@@ -3,6 +3,7 @@
 from enum import StrEnum
 from hashlib import sha256
 from typing import Any, Self, cast
+from urllib.parse import urlsplit
 
 from pydantic import Field, ModelWrapValidatorHandler, SecretStr, ValidationError, model_validator
 from pydantic_core import InitErrorDetails
@@ -12,6 +13,9 @@ from pydantic_settings import (
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
+
+from hmt_crypto.errors import ConfigurationError
+from hmt_crypto.exchange.delta.endpoints import get_delta_endpoints
 
 
 class ExecutionMode(StrEnum):
@@ -64,6 +68,12 @@ class Settings(BaseSettings):
     execution_mode: ExecutionMode = Field(default=ExecutionMode.PAPER, alias="EXECUTION_MODE")
     delta_region: DeltaRegion = Field(default=DeltaRegion.INDIA, alias="DELTA_REGION")
     delta_env: DeltaEnvironment = Field(default=DeltaEnvironment.TESTNET, alias="DELTA_ENV")
+    delta_allow_development_endpoint_override: bool = Field(
+        default=False, alias="DELTA_ALLOW_DEVELOPMENT_ENDPOINT_OVERRIDE"
+    )
+    delta_development_rest_base_url: str | None = Field(
+        default=None, alias="DELTA_DEVELOPMENT_REST_BASE_URL"
+    )
     delta_live_trading_enabled: bool = Field(default=False, alias="DELTA_LIVE_TRADING_ENABLED")
     delta_live_confirmation: SecretStr | None = Field(default=None, alias="DELTA_LIVE_CONFIRMATION")
     delta_india_testnet_api_key: SecretStr | None = Field(
@@ -105,12 +115,13 @@ class Settings(BaseSettings):
 
     @property
     def rest_base_url(self) -> str:
-        return {
-            (DeltaRegion.INDIA, DeltaEnvironment.PROD): "https://api.india.delta.exchange",
-            (DeltaRegion.INDIA, DeltaEnvironment.TESTNET): "https://cdn-ind.testnet.deltaex.org",
-            (DeltaRegion.GLOBAL, DeltaEnvironment.PROD): "https://api.delta.exchange",
-            (DeltaRegion.GLOBAL, DeltaEnvironment.TESTNET): "https://testnet-api.delta.exchange",
-        }[self.delta_region, self.delta_env]
+        return get_delta_endpoints(
+            self.delta_region,
+            self.delta_env,
+            development_rest_base_url=self.delta_development_rest_base_url,
+            allow_development_override=self.delta_allow_development_endpoint_override,
+            live_requested=self.execution_mode is ExecutionMode.LIVE,
+        ).rest_base_url
 
     @property
     def selected_credential_slot(self) -> str:
@@ -157,6 +168,27 @@ class Settings(BaseSettings):
                 raise ValueError("LIVE requires the exact explicit confirmation")
             if key is None or secret is None:
                 raise ValueError("LIVE requires credentials in the selected slot")
+        override = self.delta_development_rest_base_url
+        allow_override = self.delta_allow_development_endpoint_override
+        if (override is None) != (not allow_override):
+            raise ValueError(
+                "Development endpoint override requires both URL and explicit enable flag"
+            )
+        if override is not None:
+            if self.execution_mode is ExecutionMode.LIVE:
+                raise ValueError("Development endpoint override makes LIVE impossible")
+            if self.delta_env is not DeltaEnvironment.TESTNET:
+                raise ValueError("Development endpoint override is testnet-only")
+            try:
+                get_delta_endpoints(
+                    self.delta_region,
+                    self.delta_env,
+                    development_rest_base_url=override,
+                    allow_development_override=allow_override,
+                    live_requested=False,
+                )
+            except ConfigurationError as error:
+                raise ValueError("Development endpoint override is invalid") from error
         return self
 
     @model_validator(mode="wrap")
@@ -184,7 +216,17 @@ class Settings(BaseSettings):
         fingerprint = (
             sha256(key.get_secret_value().encode("utf-8")).hexdigest()[:12] if key else None
         )
-        return {
+        diagnostics = {
             "credential_slot": self.selected_credential_slot,
             "api_key_fingerprint": fingerprint,
         }
+        if self.delta_development_rest_base_url is not None:
+            endpoints = get_delta_endpoints(
+                self.delta_region,
+                self.delta_env,
+                development_rest_base_url=self.delta_development_rest_base_url,
+                allow_development_override=True,
+                live_requested=False,
+            )
+            diagnostics["development_rest_host"] = urlsplit(endpoints.rest_base_url).hostname
+        return diagnostics
