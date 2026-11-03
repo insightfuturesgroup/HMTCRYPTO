@@ -2,11 +2,9 @@
 
 HTTPX's single-request boundary covers sync/async clients, custom transports,
 and every redirect hop. Keep its narrow version range in pyproject.toml and
-verify these behavioral tests whenever HTTPX is upgraded. This test fixture is
+verify these behavioral tests whenever HTTPX is upgraded. This test guard is
 not the runtime transport policy (introduced separately in Task 1.9).
 """
-
-from collections.abc import Iterator
 
 import httpx
 import pytest
@@ -24,9 +22,10 @@ def _reject_production_write(request: httpx.Request) -> None:
         )
 
 
-@pytest.fixture(autouse=True)
-def forbid_production_writes(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Unconditionally enforce the guard; environment variables cannot disable it."""
+def pytest_configure(config: pytest.Config) -> None:
+    """Guard before collection/fixture setup, until all fixture teardown is complete."""
+    monkeypatch = pytest.MonkeyPatch()
+    config.add_cleanup(monkeypatch.undo)
     monkeypatch.setenv("PRODUCTION_WRITES_FORBIDDEN", "1")
     sync_send = httpx.Client._send_single_request
     async_send = httpx.AsyncClient._send_single_request
@@ -43,4 +42,3 @@ def forbid_production_writes(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     monkeypatch.setattr(httpx.Client, "_send_single_request", guarded_send)
     monkeypatch.setattr(httpx.AsyncClient, "_send_single_request", guarded_async_send)
-    yield
