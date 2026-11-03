@@ -127,7 +127,7 @@ async def test_5xx_retries_safe_read_then_raises_exchange_down() -> None:
 
 
 @pytest.mark.asyncio
-async def test_malformed_5xx_json_is_protocol_error_without_retry() -> None:
+async def test_malformed_5xx_json_does_not_override_retryable_status() -> None:
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -137,11 +137,11 @@ async def test_malformed_5xx_json_is_protocol_error_without_retry() -> None:
 
     client = new_client(handler)
     try:
-        with pytest.raises(ExchangeProtocolError):
+        with pytest.raises(ExchangeDownError):
             await _ticker_call(client)
     finally:
         await client.aclose()
-    assert calls == 1
+    assert calls == 3
 
 
 @pytest.mark.asyncio

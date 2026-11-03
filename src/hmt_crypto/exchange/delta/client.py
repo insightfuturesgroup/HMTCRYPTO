@@ -21,6 +21,7 @@ from hmt_crypto.exchange.base import (
     ProductQuery,
     ProductRef,
 )
+from hmt_crypto.exchange.delta.candle_policy import normalize_candles
 from hmt_crypto.exchange.delta.endpoints import DeltaEndpointSet
 from hmt_crypto.exchange.delta.paginator import (
     MISSING_AFTER,
@@ -35,7 +36,7 @@ from hmt_crypto.exchange.delta.rate_limiter import (
     WeightedRateLimiter,
 )
 from hmt_crypto.exchange.delta.routes import resolve_public_request
-from hmt_crypto.exchange.delta.transport import _DeltaPublicTransport
+from hmt_crypto.exchange.delta.transport import _DeltaPublicTransport, _EnvelopeResult
 from hmt_crypto.exchange.delta.wire_schemas import (
     parse_candles,
     parse_order_book,
@@ -62,8 +63,8 @@ def _config(operation: str) -> ConfigurationError:
     return ConfigurationError(context={"operation": operation})
 
 
-def _protocol(operation: str) -> ExchangeProtocolError:
-    return ExchangeProtocolError(context={"operation": operation})
+def _response_protocol(response: _EnvelopeResult) -> ExchangeProtocolError:
+    return ExchangeProtocolError(context=response.context)
 
 
 class DeltaPublicClient:
@@ -139,30 +140,33 @@ class DeltaPublicClient:
                 path="/v2/products",
                 params=tuple(params.items()),
             )
-            if not isinstance(response.result, list):
-                raise _protocol("products")
-            items = tuple(parse_product(item, endpoint_id="products") for item in response.result)
-            if response.meta is None:
-                after: object = MISSING_AFTER
-            elif isinstance(response.meta, dict) and all(
-                type(name) is str for name in response.meta
-            ):
-                before = response.meta.get("before")
-                if before is not None and (
-                    type(before) is not str
-                    or not 0 < len(before) <= 4096
-                    or any(
-                        not character.isprintable() or character.isspace() for character in before
-                    )
-                ):
-                    raise _protocol("products")
-                after = response.meta.get("after", MISSING_AFTER)
-            else:
-                raise _protocol("products")
             try:
+                if not isinstance(response.result, list):
+                    raise _response_protocol(response)
+                items = tuple(
+                    parse_product(item, endpoint_id="products") for item in response.result
+                )
+                if response.meta is None:
+                    after: object = MISSING_AFTER
+                elif isinstance(response.meta, dict) and all(
+                    type(name) is str for name in response.meta
+                ):
+                    before = response.meta.get("before")
+                    if before is not None and (
+                        type(before) is not str
+                        or not 0 < len(before) <= 4096
+                        or any(
+                            not character.isprintable() or character.isspace()
+                            for character in before
+                        )
+                    ):
+                        raise _response_protocol(response)
+                    after = response.meta.get("after", MISSING_AFTER)
+                else:
+                    raise _response_protocol(response)
                 return CursorPage(items=items, after=after)
-            except (TypeError, ValueError):
-                raise _protocol("products") from None
+            except (TypeError, ValueError, ExchangeProtocolError):
+                raise _response_protocol(response) from None
 
         return await collect_cursor_pages(
             fetch_page,
@@ -181,9 +185,12 @@ class DeltaPublicClient:
         response = await self._transport._get_json(  # noqa: SLF001
             resolve_public_request("GET", path), path=path
         )
-        parsed = parse_product(response.result, endpoint_id="product")
+        try:
+            parsed = parse_product(response.result, endpoint_id="product")
+        except ExchangeProtocolError:
+            raise _response_protocol(response) from None
         if parsed.symbol != product.symbol:
-            raise _protocol("product")
+            raise _response_protocol(response)
         return parsed
 
     async def get_ticker(self, product: ProductRef) -> Ticker:
@@ -194,9 +201,12 @@ class DeltaPublicClient:
         response = await self._transport._get_json(  # noqa: SLF001
             resolve_public_request("GET", path), path=path
         )
-        ticker = parse_ticker(response.result, endpoint_id="ticker")
+        try:
+            ticker = parse_ticker(response.result, endpoint_id="ticker")
+        except ExchangeProtocolError:
+            raise _response_protocol(response) from None
         if ticker.symbol != product.symbol:
-            raise _protocol("ticker")
+            raise _response_protocol(response)
         return ticker
 
     async def get_tickers(
@@ -208,9 +218,12 @@ class DeltaPublicClient:
             response = await self._transport._get_json(  # noqa: SLF001
                 resolve_public_request("GET", path), path=path
             )
-            if not isinstance(response.result, list):
-                raise _protocol("tickers")
-            return parse_ticker_collection(response.result, endpoint_id="tickers")
+            try:
+                if not isinstance(response.result, list):
+                    raise _response_protocol(response)
+                return parse_ticker_collection(response.result, endpoint_id="tickers")
+            except ExchangeProtocolError:
+                raise _response_protocol(response) from None
         if (
             not isinstance(products, tuple)
             or not 1 <= len(products) <= _MAX_TICKER_SYMBOLS
@@ -224,10 +237,13 @@ class DeltaPublicClient:
         response = await self._transport._get_json(  # noqa: SLF001
             resolve_public_request("GET", path), path=path
         )
-        tickers = parse_ticker_collection(response.result, endpoint_id="ticker")
+        try:
+            tickers = parse_ticker_collection(response.result, endpoint_id="ticker")
+        except ExchangeProtocolError:
+            raise _response_protocol(response) from None
         by_symbol = {ticker.symbol: ticker for ticker in tickers}
         if len(by_symbol) != len(tickers) or set(by_symbol) != set(symbols):
-            raise _protocol("ticker")
+            raise _response_protocol(response)
         return tuple(by_symbol[symbol] for symbol in symbols)
 
     async def get_order_book(self, request: OrderBookRequest) -> OrderBookSnapshot:
@@ -243,15 +259,18 @@ class DeltaPublicClient:
         response = await self._transport._get_json(  # noqa: SLF001
             resolve_public_request("GET", path), path=path, params=params
         )
-        book = parse_order_book(
-            response.result,
-            endpoint_id="orderbook",
-            requested=request.product,
-        )
+        try:
+            book = parse_order_book(
+                response.result,
+                endpoint_id="orderbook",
+                requested=request.product,
+            )
+        except ExchangeProtocolError:
+            raise _response_protocol(response) from None
         if request.depth is not None and (
             len(book.bids) > request.depth or len(book.asks) > request.depth
         ):
-            raise _protocol("orderbook")
+            raise _response_protocol(response)
         return book
 
     async def get_candles(self, request: CandleRequest) -> CandleResult:
@@ -268,9 +287,16 @@ class DeltaPublicClient:
         response = await self._transport._get_json(  # noqa: SLF001
             resolve_public_request("GET", path), path=path, params=params
         )
-        candles = parse_candles(response.result, endpoint_id="candles")
-        if len(candles) > _MAX_CANDLES:
-            raise _protocol("candles")
+        try:
+            candles = parse_candles(response.result, endpoint_id="candles")
+            candles = normalize_candles(
+                candles,
+                request=request,
+                maximum=_MAX_CANDLES,
+                context=response.context,
+            )
+        except ExchangeProtocolError:
+            raise _response_protocol(response) from None
         return CandleResult(
             items=candles,
             possibly_truncated=len(candles) == _MAX_CANDLES,

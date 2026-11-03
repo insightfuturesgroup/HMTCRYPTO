@@ -122,9 +122,8 @@ def parse_product(value: object, *, endpoint_id: str) -> Product:
     """Parse one product using an explicit local required-core policy."""
     try:
         item = _object(value, endpoint_id)
-        specs_value = item.get("product_specs", {})
-        specs = _object(specs_value, endpoint_id)
-        reduce_only = specs.get("only_reduce_only_orders_allowed", False)
+        specs = _object(item["product_specs"], endpoint_id)
+        reduce_only = specs["only_reduce_only_orders_allowed"]
         is_quanto = item.get("is_quanto")
         if not isinstance(reduce_only, bool) or not isinstance(is_quanto, bool):
             raise _protocol(endpoint_id)

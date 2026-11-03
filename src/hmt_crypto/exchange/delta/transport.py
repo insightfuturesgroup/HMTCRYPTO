@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -15,11 +14,11 @@ import httpx
 from hmt_crypto.errors import (
     ConfigurationError,
     ExchangeDownError,
-    ExchangeProtocolError,
     ExchangeTimeoutError,
     RateLimitError,
 )
 from hmt_crypto.exchange.delta.endpoints import DeltaEndpointSet
+from hmt_crypto.exchange.delta.lifecycle import _ClientLifecycle
 from hmt_crypto.exchange.delta.rate_limiter import (
     OperationClass,
     RateRequest,
@@ -28,6 +27,12 @@ from hmt_crypto.exchange.delta.rate_limiter import (
     WeightedRateLimiter,
     classify_retry,
     parse_rate_limit_reset_ms,
+)
+from hmt_crypto.exchange.delta.response import (
+    drain_status_body,
+    protocol,
+    read_json_body,
+    response_context,
 )
 from hmt_crypto.exchange.delta.routes import PublicRouteSpec, resolve_public_request
 from hmt_crypto.exchange.delta.wire_json import (
@@ -49,69 +54,7 @@ _LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 class _EnvelopeResult:
     result: object
     meta: object
-
-
-def _protocol(spec: PublicRouteSpec, status: int | None = None) -> ExchangeProtocolError:
-    context: dict[str, object] = {"operation": spec.route_id.value}
-    if status is not None:
-        context["http_status"] = status
-    return ExchangeProtocolError(context=context)
-
-
-def _validate_media_type(response: httpx.Response, spec: PublicRouteSpec) -> None:
-    values = response.headers.get_list("content-type")
-    if len(values) != 1 or "," in values[0]:
-        raise _protocol(spec, response.status_code)
-    media_type = values[0].split(";", 1)[0].strip().casefold()
-    parts = media_type.split("/")
-    if (
-        len(parts) != 2
-        or not all(parts)
-        or not media_type.isascii()
-        or any(not character.isprintable() or character.isspace() for character in media_type)
-        or (media_type != "application/json" and not parts[1].endswith("+json"))
-    ):
-        raise _protocol(spec, response.status_code)
-
-
-def _declared_length(response: httpx.Response, spec: PublicRouteSpec) -> int | None:
-    values = response.headers.get_list("content-length")
-    if not values:
-        return None
-    if len(values) != 1 or "," in values[0]:
-        raise _protocol(spec, response.status_code)
-    value = values[0]
-    if not value or not value.isascii() or not value.isdecimal():
-        raise _protocol(spec, response.status_code)
-    if int(value) > spec.max_response_bytes:
-        raise _protocol(spec, response.status_code)
-    return int(value)
-
-
-async def _bounded_body(response: httpx.Response, spec: PublicRouteSpec) -> bytes:
-    _validate_media_type(response, spec)
-    declared_length = _declared_length(response, spec)
-    chunks: list[bytes] = []
-    size = 0
-    try:
-        async for chunk in response.aiter_bytes():
-            size += len(chunk)
-            if size > spec.max_response_bytes:
-                raise _protocol(spec, response.status_code)
-            chunks.append(chunk)
-    except asyncio.CancelledError:
-        raise
-    except ExchangeProtocolError:
-        raise
-    except (httpx.HTTPError, UnicodeError, ValueError):
-        raise _protocol(spec, response.status_code) from None
-    if (
-        declared_length is not None
-        and not response.headers.get("content-encoding")
-        and size != declared_length
-    ):
-        raise _protocol(spec, response.status_code)
-    return b"".join(chunks)
+    context: dict[str, object]
 
 
 def _safe_request_log(request: httpx.Request) -> dict[str, object]:
@@ -143,7 +86,6 @@ class _DeltaPublicTransport:
         self._sleeper = sleeper
         self._jitter_source = jitter_source
         self._monotonic = monotonic
-        self._closed = False
         self._logger = get_logger("exchange.delta.public")
         self._base_url = httpx.URL(endpoints.rest_base_url)
         self._client = httpx.AsyncClient(
@@ -154,6 +96,7 @@ class _DeltaPublicTransport:
             follow_redirects=False,
             transport=transport,
         )
+        self._lifecycle = _ClientLifecycle(self._client.aclose)
 
     def _check_request(self, request: httpx.Request, spec: PublicRouteSpec) -> None:
         url = request.url
@@ -192,16 +135,20 @@ class _DeltaPublicTransport:
             return True, float(decision.delay_seconds)
         return False, None
 
-    def _reset_header(self, response: httpx.Response, spec: PublicRouteSpec) -> str | None:
+    def _reset_header(
+        self,
+        response: httpx.Response,
+        context: dict[str, object],
+    ) -> str | None:
         values = response.headers.get_list("x-rate-limit-reset")
         if not values:
             return None
         if len(values) != 1 or "," in values[0]:
-            raise _protocol(spec, response.status_code)
+            raise protocol(context)
         try:
             parse_rate_limit_reset_ms(values[0])
         except ConfigurationError:
-            raise _protocol(spec, response.status_code) from None
+            raise protocol(context) from None
         return values[0]
 
     def _log_attempt(
@@ -212,6 +159,7 @@ class _DeltaPublicTransport:
         spec: PublicRouteSpec,
         attempt: int,
         correlation_id: str,
+        attempt_context: dict[str, object],
         started_at: float,
     ) -> None:
         event: dict[str, object] = {
@@ -224,12 +172,8 @@ class _DeltaPublicTransport:
         if response is not None:
             event["http_status"] = response.status_code
             event["response"] = safe_response_summary(response)
-            request_id = response.headers.get("x-request-id")
-            if (
-                request_id
-                and len(request_id) <= 128
-                and all(0x21 <= ord(character) <= 0x7E for character in request_id)
-            ):
+            request_id = attempt_context.get("request_id")
+            if request_id is not None:
                 event["exchange_request_id"] = request_id
         self._logger.info("exchange_request_attempt", **event)
 
@@ -240,12 +184,27 @@ class _DeltaPublicTransport:
         path: str,
         params: QueryParams = (),
     ) -> _EnvelopeResult:
-        if self._closed:
-            raise ConfigurationError(context={"operation": "public_client", "state": "closed"})
+        await self._lifecycle.admit()
+        try:
+            return await self._get_json_admitted(spec, path=path, params=params)
+        finally:
+            await self._lifecycle.release()
+
+    async def _get_json_admitted(
+        self,
+        spec: PublicRouteSpec,
+        *,
+        path: str,
+        params: QueryParams,
+    ) -> _EnvelopeResult:
         resolved = resolve_public_request("GET", path)
         if resolved.route_id is not spec.route_id:
             raise ConfigurationError(context={"operation": "public_route_mismatch"})
         correlation_id = str(uuid4())
+        base_context: dict[str, object] = {
+            "operation": spec.route_id.value,
+            "correlation_id": correlation_id,
+        }
 
         for attempt in range(1, self._retry_policy.max_attempts + 1):
             request = self._client.build_request("GET", path, params=params)
@@ -256,59 +215,80 @@ class _DeltaPublicTransport:
             retry_delay: float | None = None
             terminal_error: Exception | None = None
             result: _EnvelopeResult | None = None
+            attempt_context = base_context
             try:
                 response = await self._client.send(request, stream=True)
                 status = response.status_code
+                attempt_context = response_context(
+                    response,
+                    spec=spec,
+                    correlation_id=correlation_id,
+                )
                 if status < 200 or status > 599 or 300 <= status < 400:
-                    terminal_error = _protocol(spec, status)
+                    terminal_error = protocol(attempt_context)
+                elif status == 429:
+                    reset = self._reset_header(response, attempt_context)
+                    if reset is not None:
+                        await self._limiter.observe_429(reset)
+                    await drain_status_body(response, maximum=spec.max_response_bytes)
+                    retry, retry_delay = self._retry_decision(
+                        attempt=attempt,
+                        status_code=status,
+                        reset_header=reset,
+                    )
+                    if not retry:
+                        terminal_error = RateLimitError(
+                            context=attempt_context,
+                            retry_after_ms=(
+                                parse_rate_limit_reset_ms(reset) if reset is not None else None
+                            ),
+                        )
+                elif 500 <= status <= 599:
+                    await drain_status_body(response, maximum=spec.max_response_bytes)
+                    retry, retry_delay = self._retry_decision(
+                        attempt=attempt,
+                        status_code=status,
+                    )
+                    if not retry:
+                        terminal_error = ExchangeDownError(context=attempt_context)
                 else:
-                    body = await _bounded_body(response, spec)
-                    envelope = decode_json_object(body, endpoint_id=spec.route_id.value)
-                    if status == 429:
-                        reset = self._reset_header(response, spec)
-                        if reset is not None:
-                            await self._limiter.observe_429(reset)
-                        retry, retry_delay = self._retry_decision(
-                            attempt=attempt, status_code=status, reset_header=reset
+                    body = await read_json_body(
+                        response,
+                        spec=spec,
+                        context=attempt_context,
+                    )
+                    envelope = decode_json_object(
+                        body,
+                        endpoint_id=spec.route_id.value,
+                        context=attempt_context,
+                    )
+                    if 200 <= status < 300:
+                        payload, meta = success_result(
+                            envelope,
+                            endpoint_id=spec.route_id.value,
+                            context=attempt_context,
                         )
-                        if not retry:
-                            terminal_error = RateLimitError(
-                                context={"operation": spec.route_id.value, "http_status": status},
-                                retry_after_ms=(
-                                    parse_rate_limit_reset_ms(reset) if reset is not None else None
-                                ),
-                            )
-                    elif 500 <= status <= 599:
-                        retry, retry_delay = self._retry_decision(
-                            attempt=attempt, status_code=status
+                        result = _EnvelopeResult(
+                            result=payload,
+                            meta=meta,
+                            context=attempt_context,
                         )
-                        if not retry:
-                            terminal_error = ExchangeDownError(
-                                context={"operation": spec.route_id.value, "http_status": status}
-                            )
-                    elif 200 <= status < 500:
-                        if 200 <= status < 300:
-                            payload, meta = success_result(
-                                envelope, endpoint_id=spec.route_id.value
-                            )
-                            result = _EnvelopeResult(result=payload, meta=meta)
-                        else:
-                            terminal_error = error_from_envelope(
-                                envelope,
-                                endpoint_id=spec.route_id.value,
-                                status_code=status,
-                            )
-            except asyncio.CancelledError:
-                raise
+                    else:
+                        terminal_error = error_from_envelope(
+                            envelope,
+                            endpoint_id=spec.route_id.value,
+                            status_code=status,
+                            context=attempt_context,
+                        )
             except httpx.DecodingError:
-                terminal_error = _protocol(spec)
+                terminal_error = protocol(attempt_context)
             except httpx.TransportError as error:
                 retry, retry_delay = self._retry_decision(attempt=attempt, transport_error=error)
                 if not retry:
                     terminal_error = (
-                        ExchangeTimeoutError(context={"operation": spec.route_id.value})
+                        ExchangeTimeoutError(context=attempt_context)
                         if isinstance(error, httpx.TimeoutException)
-                        else ExchangeDownError(context={"operation": spec.route_id.value})
+                        else ExchangeDownError(context=attempt_context)
                     )
             finally:
                 if response is not None:
@@ -319,6 +299,7 @@ class _DeltaPublicTransport:
                     spec=spec,
                     attempt=attempt,
                     correlation_id=correlation_id,
+                    attempt_context=attempt_context,
                     started_at=started_at,
                 )
 
@@ -327,17 +308,14 @@ class _DeltaPublicTransport:
             if terminal_error is not None:
                 raise terminal_error
             if retry_delay is None:
-                raise ExchangeDownError(context={"operation": spec.route_id.value})
+                raise ExchangeDownError(context=base_context)
             await self._sleeper(retry_delay)
 
-        raise ExchangeDownError(context={"operation": spec.route_id.value})
+        raise ExchangeDownError(context=base_context)
 
     async def aclose(self) -> None:
         """Close the owned HTTP client idempotently."""
-        if self._closed:
-            return
-        self._closed = True
-        await self._client.aclose()
+        await self._lifecycle.close()
 
 
 __all__: list[str] = []

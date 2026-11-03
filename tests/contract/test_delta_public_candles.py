@@ -22,6 +22,20 @@ from hmt_crypto.errors import ExchangeProtocolError
 pytestmark = pytest.mark.contract
 
 
+def _candle_rows(*, count: int, start: int, step: int = 60) -> list[dict[str, object]]:
+    return [
+        {
+            "time": start + index * step,
+            "open": "100",
+            "high": "102",
+            "low": "99",
+            "close": "101",
+            "volume": "1",
+        }
+        for index in range(count)
+    ]
+
+
 @pytest.mark.asyncio
 async def test_india_candles_use_documented_resolutions_and_epoch_seconds() -> None:
     seen: list[httpx.Request] = []
@@ -68,7 +82,7 @@ def test_deprecated_long_candle_resolutions_fail_closed_for_every_region() -> No
 @pytest.mark.asyncio
 async def test_more_than_two_thousand_candles_fails_closed() -> None:
     payload = fixture_json("public_candles.json")
-    payload["result"] = [payload["result"][0]] * 2001
+    payload["result"] = _candle_rows(count=2001, start=1_700_000_000)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return json_response(request, json.dumps(payload).encode())
@@ -78,7 +92,7 @@ async def test_more_than_two_thousand_candles_fails_closed() -> None:
         product=api.ProductRef(symbol="XBTUSD_TEST"),
         resolution=api.CandleResolution.ONE_MINUTE,
         start=datetime.fromtimestamp(1_700_000_000, UTC),
-        end=datetime.fromtimestamp(1_700_000_120, UTC),
+        end=datetime.fromtimestamp(1_700_120_000, UTC),
     )
     client = new_client(handler)
     try:
@@ -91,7 +105,7 @@ async def test_more_than_two_thousand_candles_fails_closed() -> None:
 @pytest.mark.asyncio
 async def test_exactly_two_thousand_candles_exposes_possible_incompleteness() -> None:
     payload = fixture_json("public_candles.json")
-    payload["result"] = [payload["result"][0]] * 2000
+    payload["result"] = _candle_rows(count=2000, start=1_700_000_000)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return json_response(request, json.dumps(payload).encode())
@@ -101,7 +115,7 @@ async def test_exactly_two_thousand_candles_exposes_possible_incompleteness() ->
         product=api.ProductRef(symbol="XBTUSD_TEST"),
         resolution=api.CandleResolution.ONE_MINUTE,
         start=datetime.fromtimestamp(1_700_000_000, UTC),
-        end=datetime.fromtimestamp(1_700_000_120, UTC),
+        end=datetime.fromtimestamp(1_700_119_940, UTC),
     )
     client = new_client(handler)
     try:
