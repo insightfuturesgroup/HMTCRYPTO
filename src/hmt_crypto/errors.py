@@ -2,10 +2,54 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
+from datetime import date, datetime
+from decimal import Decimal
 from typing import ClassVar
+from urllib.parse import urlsplit
+from uuid import UUID
 
 from hmt_crypto.persistence.redaction import JsonValue, redact
+
+_SAFE_CONTEXT_KEYS = frozenset(
+    {
+        "correlation_id",
+        "environment",
+        "exchange_code",
+        "exchange_request_id",
+        "http_status",
+        "method",
+        "operation",
+        "path",
+        "product_id",
+        "product_symbol",
+        "region",
+        "request_id",
+        "scope",
+        "state",
+        "status_code",
+        "symbol",
+    }
+)
+_SAFE_CONTEXT_VALUE_TYPES = (type(None), bool, int, str, Decimal, UUID, datetime, date)
+
+
+def _sanitize_context(context: Mapping[str, object] | None) -> dict[str, JsonValue]:
+    """Retain only explicitly safe scalar correlation and exchange metadata."""
+    if context is None:
+        return {}
+    selected: dict[str, object] = {}
+    for raw_name, value in context.items():
+        name = raw_name.casefold()
+        if name not in _SAFE_CONTEXT_KEYS or not isinstance(value, _SAFE_CONTEXT_VALUE_TYPES):
+            continue
+        if name == "path" and isinstance(value, str):
+            parsed = urlsplit(value)
+            value = parsed.path
+        selected[name] = value
+    sanitized = redact(selected)
+    return sanitized if isinstance(sanitized, dict) else {}
 
 
 class HmtCryptoError(Exception):
@@ -17,7 +61,7 @@ class HmtCryptoError(Exception):
     def __init__(
         self,
         *,
-        context: dict[str, object] | None = None,
+        context: Mapping[str, object] | None = None,
         retry_after_ms: int | None = None,
     ) -> None:
         if retry_after_ms is not None and (
@@ -26,8 +70,7 @@ class HmtCryptoError(Exception):
             or retry_after_ms < 0
         ):
             raise ValueError("retry_after_ms must be a nonnegative integer")
-        sanitized = redact(context or {})
-        self._context: dict[str, JsonValue] = sanitized if isinstance(sanitized, dict) else {}
+        self._context = _sanitize_context(context)
         self._retry_after_ms = retry_after_ms
         super().__init__(f"{self.code}: {self.message}")
 
@@ -76,6 +119,13 @@ class ExchangeError(HmtCryptoError):
     _message = "Exchange request failed"
 
 
+class ConfigurationError(HmtCryptoError):
+    """Typed configuration failed a fail-closed validation or policy check."""
+
+    _code = "configuration_error"
+    _message = "Configuration is invalid"
+
+
 class AuthError(ExchangeError):
     """Credentials or a signature were rejected by the exchange."""
 
@@ -111,6 +161,13 @@ class ExchangeDownError(ExchangeError):
     _message = "Exchange is unavailable"
 
 
+class ExchangeTimeoutError(ExchangeError):
+    """An exchange request exceeded its bounded transport timeout."""
+
+    _code = "exchange_timeout"
+    _message = "Exchange request timed out"
+
+
 class OrderRejected(ExchangeError):
     """The exchange definitively rejected an order request."""
 
@@ -142,9 +199,11 @@ class UnsupportedProductError(HmtCryptoError):
 __all__ = [
     "AmbiguousExchangeResult",
     "AuthError",
+    "ConfigurationError",
     "ExchangeDownError",
     "ExchangeError",
     "ExchangeProtocolError",
+    "ExchangeTimeoutError",
     "HmtCryptoError",
     "OrderRejected",
     "RateLimitError",

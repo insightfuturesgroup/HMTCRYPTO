@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Self
+from typing import Annotated, Any, Self, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    StrictBool,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
+from pydantic_core import InitErrorDetails
 
 from hmt_crypto.domain.enums import ContractType, NotionalType, ProductState, TradingStatus
 from hmt_crypto.domain.money import NonNegativeDecimal, PositiveDecimal, UtcDateTime
@@ -22,6 +32,20 @@ class DomainModel(BaseModel):
     """Shared fail-closed configuration for immutable public domain values."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def remove_structured_validation_inputs(
+        cls, values: Any, handler: ModelWrapValidatorHandler[Self]
+    ) -> Self:
+        """Remove raw exchange inputs from every Pydantic error representation."""
+        try:
+            return handler(values)
+        except ValidationError as error:
+            details = cast(list[InitErrorDetails], error.errors(include_input=False))
+            raise ValidationError.from_exception_data(
+                cls.__name__, details, hide_input=True
+            ) from None
 
 
 class Asset(DomainModel):

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -42,6 +43,10 @@ def domain_api() -> SimpleNamespace:
         ExchangeProtocolError=errors.ExchangeProtocolError,
         AmbiguousExchangeResult=errors.AmbiguousExchangeResult,
         UnsupportedProductError=errors.UnsupportedProductError,
+        ConfigurationError=getattr(errors, "ConfigurationError", None),
+        ExchangeTimeoutError=getattr(errors, "ExchangeTimeoutError", None),
+        ExchangeError=errors.ExchangeError,
+        HmtCryptoError=errors.HmtCryptoError,
     )
 
 
@@ -203,6 +208,37 @@ def test_product_rejects_nested_float_metadata() -> None:
         api.Product(**values)
 
 
+@pytest.mark.parametrize(
+    ("changes", "secret"),
+    [
+        ({"contract_value": "fixture-secret-contract-value"}, "fixture-secret-contract-value"),
+        (
+            {
+                "underlying_asset": {
+                    "id": "fixture-secret-nested-id",
+                    "symbol": "BTC",
+                    "precision": 8,
+                    "minimum_precision": 2,
+                }
+            },
+            "fixture-secret-nested-id",
+        ),
+        ({"unexpected_field": "fixture-secret-extra-value"}, "fixture-secret-extra-value"),
+    ],
+)
+def test_domain_validation_errors_remove_inputs_from_every_serialization_surface(
+    changes: dict[str, object], secret: str
+) -> None:
+    api = domain_api()
+    values = product_values(api)
+    values.update(changes)
+    with pytest.raises(ValidationError) as caught:
+        api.Product(**values)
+    rendered = "\n".join([str(caught.value), repr(caught.value.errors()), caught.value.json()])
+    assert secret not in rendered
+    assert all(detail.get("input") is None for detail in caught.value.errors())
+
+
 def test_ticker_normalizes_utc_and_keeps_decimal_prices() -> None:
     api = domain_api()
     ticker = api.Ticker(
@@ -321,6 +357,8 @@ def test_request_reference_is_typed_and_immutable() -> None:
         ),
         ("RateLimitError", "rate_limit", "Exchange rate limit exceeded"),
         ("ExchangeDownError", "exchange_down", "Exchange is unavailable"),
+        ("ExchangeTimeoutError", "exchange_timeout", "Exchange request timed out"),
+        ("ConfigurationError", "configuration_error", "Configuration is invalid"),
         ("OrderRejected", "order_rejected", "Exchange rejected the order"),
         ("ExchangeProtocolError", "exchange_protocol_error", "Exchange protocol error"),
         (
@@ -336,6 +374,7 @@ def test_error_subclasses_have_stable_safe_codes_and_messages(
 ) -> None:
     api = domain_api()
     error_type = getattr(api, error_name)
+    assert error_type is not None, f"{error_name} is missing"
     error = error_type()
     assert error.code == expected_code
     assert error.message == expected_message
@@ -355,26 +394,74 @@ def test_error_sanitizes_before_retaining_or_rendering_context() -> None:
         "signature": "fixture-signature-2ce0",
         "raw_body": "fixture-body-b718",
         "exception": "fixture-exception-6fa4",
+        "raw_response": "fixture-raw-response-68e2",
+        "raw_request": "fixture-raw-request-19b5",
     }
     original: dict[str, object] = {
         "apiKey": secrets["api_key"],
         "headers": {"Authorization": secrets["authorization"], "x-request-id": "safe-id"},
         "signature": secrets["signature"],
-        "response_body": secrets["raw_body"].encode(),
+        "raw_body": secrets["raw_body"],
+        "response_body": secrets["raw_body"],
+        "raw_response": secrets["raw_response"],
+        "raw_request": secrets["raw_request"],
         "cause": RuntimeError(secrets["exception"]),
-        "safe_field": "retained",
+        "request": httpx.Request(
+            "GET",
+            "https://example.invalid/private?apiKey=fixture-query-secret",
+            headers={"Authorization": "Bearer fixture-request-secret"},
+        ),
+        "correlation_id": "corr-safe-42",
+        "status_code": 401,
+        "product_id": 27,
+        "symbol": "BTCUSD",
+        "path": "/v2/orders?apiKey=fixture-path-secret",
     }
     error = api.AuthError(context=original)
-    original["safe_field"] = "changed-after-construction"
+    original["correlation_id"] = "changed-after-construction"
 
-    surfaces = [str(error), repr(error), json.dumps(error.to_dict()), json.dumps(error.context)]
+    surfaces = [
+        str(error),
+        repr(error),
+        repr(vars(error)),
+        json.dumps(error.to_dict()),
+        json.dumps(error.context),
+    ]
     rendered = "\n".join(surfaces)
-    for secret in secrets.values():
+    for secret in [
+        *secrets.values(),
+        "fixture-query-secret",
+        "fixture-request-secret",
+        "fixture-path-secret",
+    ]:
         assert secret not in rendered
-    assert error.context["safe_field"] == "retained"
-    assert error.to_dict()["context"]["safe_field"] == "retained"
-    assert error.context["apiKey"] == "[REDACTED]"
-    assert error.context["cause"] == "<RuntimeError>"
+    assert error.context == {
+        "correlation_id": "corr-safe-42",
+        "status_code": 401,
+        "product_id": 27,
+        "symbol": "BTCUSD",
+        "path": "/v2/orders",
+    }
+    assert error.to_dict()["context"] == error.context
+
+
+def test_planned_configuration_and_timeout_errors_have_distinct_inheritance() -> None:
+    api = domain_api()
+    assert api.ConfigurationError is not None, "ConfigurationError is missing"
+    assert api.ExchangeTimeoutError is not None, "ExchangeTimeoutError is missing"
+    assert issubclass(api.ConfigurationError, api.HmtCryptoError)
+    assert not issubclass(api.ConfigurationError, api.ExchangeError)
+    assert issubclass(api.ExchangeTimeoutError, api.ExchangeError)
+    assert api.ConfigurationError().to_dict() == {
+        "code": "configuration_error",
+        "message": "Configuration is invalid",
+        "context": {},
+    }
+    assert api.ExchangeTimeoutError().to_dict() == {
+        "code": "exchange_timeout",
+        "message": "Exchange request timed out",
+        "context": {},
+    }
 
 
 def test_error_public_identity_and_context_cannot_be_mutated_into_a_secret_leak() -> None:
