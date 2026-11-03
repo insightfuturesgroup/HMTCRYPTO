@@ -48,6 +48,33 @@ def _is_exact_source(value: object) -> bool:
     )
 
 
+def _clone_source(value: object) -> CatalogSource:
+    if type(value) is not CatalogSource:
+        raise TypeError("catalogue source is invalid")
+    region = value.region
+    environment = value.environment
+    if type(region) is not DeltaRegion or type(environment) is not DeltaEnvironment:
+        raise TypeError("catalogue source is invalid")
+    return CatalogSource(region=region, environment=environment)
+
+
+def _clone_product(value: object) -> Product:
+    if type(value) is not Product:
+        raise ValueError("catalogue item is not a Product")
+    fields_set = frozenset(value.model_fields_set)
+    if not fields_set <= Product.model_fields.keys():
+        raise ValueError("catalogue product provenance is invalid")
+    payload = value.model_dump(
+        mode="python",
+        include=set(fields_set),
+        warnings="none",
+    )
+    cloned = Product.model_validate(payload, strict=True)
+    if frozenset(cloned.model_fields_set) != fields_set:
+        raise ValueError("catalogue product provenance changed during cloning")
+    return cloned
+
+
 @dataclass(frozen=True, slots=True, init=False, repr=False)
 class CatalogProductLoad:
     """Immutable source provenance plus explicit paginator completion evidence."""
@@ -61,18 +88,17 @@ class CatalogProductLoad:
         source: CatalogSource,
         pagination: PaginationResult[Product],
     ) -> None:
-        if not _is_exact_source(source):
-            raise TypeError("catalogue load source is invalid")
+        owned_source = _clone_source(source)
         if type(pagination) is not PaginationResult:
             raise TypeError("catalogue load pagination is invalid")
         owned = PaginationResult[Product](
-            items=pagination.items,
+            items=tuple(_clone_product(item) for item in pagination.items),
             page_count=pagination.page_count,
             complete=pagination.complete,
             truncated=pagination.truncated,
             terminal_after=pagination.terminal_after,
         )
-        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "source", owned_source)
         object.__setattr__(self, "pagination", owned)
 
     def __repr__(self) -> str:
@@ -120,8 +146,7 @@ class CatalogSnapshot:
         ttl: timedelta,
         products: Sequence[Product],
     ) -> None:
-        if type(source) is not CatalogSource:
-            raise TypeError("snapshot source is invalid")
+        owned_source = _clone_source(source)
         if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
             raise ValueError("snapshot revision must be positive")
         if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
@@ -140,8 +165,8 @@ class CatalogSnapshot:
             symbol_map,
             asset_map,
             content_sha256,
-        ) = _validated_candidate(source=source, products=products)
-        object.__setattr__(self, "source", source)
+        ) = _validated_candidate(source=owned_source, products=products)
+        object.__setattr__(self, "source", owned_source)
         object.__setattr__(self, "revision", revision)
         object.__setattr__(self, "content_sha256", content_sha256)
         object.__setattr__(self, "fetched_at", fetched)
@@ -248,16 +273,13 @@ def _validated_candidate(
 ]:
     if type(source) is not CatalogSource:
         raise ValueError("catalogue source is invalid")
-    copied = tuple(products)
-    if not copied or any(type(product) is not Product for product in copied):
+    supplied = tuple(products)
+    if not supplied:
         raise ValueError("catalogue requires products")
+    copied = tuple(_clone_product(product) for product in supplied)
     for product in copied:
         if "only_reduce_only_orders_allowed" not in product.model_fields_set:
             raise ValueError("catalogue product lacks reduce-only provenance")
-        Product.model_validate(
-            product.model_dump(mode="python", warnings="none"),
-            strict=True,
-        )
     ordered = tuple(sorted(copied, key=lambda product: product.id))
     by_id: dict[int, Product] = {}
     by_symbol: dict[str, Product] = {}

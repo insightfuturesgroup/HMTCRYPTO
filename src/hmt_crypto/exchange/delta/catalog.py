@@ -18,6 +18,7 @@ from hmt_crypto.exchange.delta.catalog_models import (
     CatalogProductLoad,
     CatalogSnapshot,
     CatalogSource,
+    _clone_source,
     _is_exact_source,
     venue_allows_new_orders,
 )
@@ -168,7 +169,7 @@ class ProductCatalog:
             raise TypeError("catalogue fetcher and clock must be callable")
         if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
             raise ValueError("catalogue TTL must be positive")
-        self._source = source
+        self._source = _clone_source(source)
         self._fetch_products = fetch_products
         self._ttl = ttl
         self._clock = clock

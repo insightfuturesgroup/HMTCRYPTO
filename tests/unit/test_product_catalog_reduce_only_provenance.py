@@ -68,9 +68,10 @@ async def test_explicit_false_and_true_reduce_only_metadata_are_preserved(
 
 
 @pytest.mark.asyncio
-async def test_model_copy_cannot_forge_reduce_only_type() -> None:
-    product = load_products()[0].model_copy(update={"only_reduce_only_orders_allowed": "false"})
-    catalog = new_catalog(FetchQueue(complete_load((product,))))
+async def test_owned_load_mutation_cannot_forge_reduce_only_type() -> None:
+    load = complete_load((load_products()[0],))
+    load.pagination.items[0].__dict__["only_reduce_only_orders_allowed"] = "false"
+    catalog = new_catalog(FetchQueue(load))
 
     result = await catalog.refresh()
 

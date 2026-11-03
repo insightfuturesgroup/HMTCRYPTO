@@ -79,10 +79,14 @@ async def test_id_symbol_and_asset_mappings_round_trip() -> None:
     snapshot = catalog.require_snapshot(at=BASE_TIME)
 
     for product in products:
-        assert snapshot.require_product_id(product.id) is product
-        assert snapshot.require_symbol(product.symbol) is product
+        indexed_by_id = snapshot.require_product_id(product.id)
+        indexed_by_symbol = snapshot.require_symbol(product.symbol)
+        assert indexed_by_id == product
+        assert indexed_by_id is indexed_by_symbol
+        assert indexed_by_id is not product
         for asset in (product.underlying_asset, product.quoting_asset, product.settling_asset):
             assert snapshot.assets_by_id[asset.id] == asset
+            assert snapshot.assets_by_id[asset.id] is not asset
 
     with pytest.raises(api.ProductNotFoundError) as missing_id:
         snapshot.require_product_id(999999)
@@ -267,20 +271,18 @@ async def test_invalid_candidates_are_rejected_atomically(mutation: str) -> None
     "mutation",
     ["zero_tick", "negative_contract_value", "untyped_state", "invalid_asset_id"],
 )
-async def test_model_copy_cannot_bypass_candidate_validation(mutation: str) -> None:
-    products = list(load_products())
-    product = products[0]
+async def test_owned_load_mutation_cannot_bypass_snapshot_validation(mutation: str) -> None:
+    load = complete_load(load_products())
+    product = load.pagination.items[0]
     if mutation == "zero_tick":
-        product = product.model_copy(update={"tick_size": Decimal("0")})
+        product.__dict__["tick_size"] = Decimal("0")
     elif mutation == "negative_contract_value":
-        product = product.model_copy(update={"contract_value": Decimal("-0.001")})
+        product.__dict__["contract_value"] = Decimal("-0.001")
     elif mutation == "untyped_state":
-        product = product.model_copy(update={"state": "live"})
+        product.__dict__["state"] = "live"
     else:
-        asset = product.underlying_asset.model_copy(update={"id": 0})
-        product = product.model_copy(update={"underlying_asset": asset})
-    products[0] = product
-    catalog = new_catalog(FetchQueue(complete_load(products)))
+        product.underlying_asset.__dict__["id"] = 0
+    catalog = new_catalog(FetchQueue(load))
 
     result = await catalog.refresh()
 
