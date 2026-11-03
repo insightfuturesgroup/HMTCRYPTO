@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 
 from hmt_crypto.errors import (
     AuthError,
@@ -19,6 +19,23 @@ class _InvalidJson(ValueError):
 
 
 _MAX_CONTAINER_DEPTH = 64
+# Local resource policy, independent of interpreter-wide integer conversion limits.
+_MAX_NUMBER_CHARACTERS = 1024
+
+
+def _bounded_integer(value: str) -> int:
+    if len(value) > _MAX_NUMBER_CHARACTERS:
+        raise _InvalidJson("number length")
+    return int(value)
+
+
+def _bounded_decimal(value: str) -> Decimal:
+    if len(value) > _MAX_NUMBER_CHARACTERS:
+        raise _InvalidJson("number length")
+    result = Decimal(value)
+    if not result.is_finite():
+        raise _InvalidJson("non-finite number")
+    return result
 
 
 def _context(endpoint_id: str, inherited: Mapping[str, object] | None) -> dict[str, object]:
@@ -74,8 +91,8 @@ def decode_json_object(
         text = body.decode("utf-8", errors="strict")
         value = json.loads(
             text,
-            parse_float=Decimal,
-            parse_int=int,
+            parse_float=_bounded_decimal,
+            parse_int=_bounded_integer,
             parse_constant=_reject_constant,
             object_pairs_hook=_unique_object,
         )
@@ -86,6 +103,8 @@ def decode_json_object(
         ValueError,
         RecursionError,
         MemoryError,
+        DecimalException,
+        OverflowError,
     ):
         raise ExchangeProtocolError(context=_context(endpoint_id, context)) from None
     if not isinstance(value, dict):

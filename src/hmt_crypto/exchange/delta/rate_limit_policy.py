@@ -307,9 +307,18 @@ class QuotaObservation:
 
 def parse_rate_limit_reset_ms(value: str) -> int:
     """Parse Delta's reset header strictly as milliseconds within one window."""
-    if type(value) is not str or not value or not value.isascii() or not value.isdecimal():
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > len(str(MAX_RATE_LIMIT_RESET_MS))
+        or not value.isascii()
+        or not value.isdecimal()
+    ):
         raise ConfigurationError(context={"operation": "rate_limit_reset"})
-    parsed = int(value, 10)
+    try:
+        parsed = int(value, 10)
+    except (ValueError, OverflowError):
+        raise ConfigurationError(context={"operation": "rate_limit_reset"}) from None
     if parsed > MAX_RATE_LIMIT_RESET_MS:
         raise ConfigurationError(context={"operation": "rate_limit_reset"})
     return parsed

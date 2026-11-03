@@ -110,3 +110,58 @@ async def test_each_resolution_rejects_count_impossible_for_inclusive_interval(
             await client.get_candles(_request(resolution=resolution, end=_START + seconds))
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resolution", "seconds"),
+    [
+        ("1m", 60),
+        ("3m", 180),
+        ("5m", 300),
+        ("15m", 900),
+        ("30m", 1800),
+        ("1h", 3600),
+        ("2h", 7200),
+        ("4h", 14400),
+        ("6h", 21600),
+        ("1d", 86400),
+        ("1w", 604800),
+    ],
+)
+@pytest.mark.parametrize("spacing", ["one_second", "just_short", "exact", "gap"])
+async def test_candle_spacing_respects_resolution_without_grid_guessing(
+    resolution: str,
+    seconds: int,
+    spacing: str,
+) -> None:
+    distance = {
+        "one_second": 1,
+        "just_short": seconds - 1,
+        "exact": seconds,
+        "gap": 2 * seconds + 1,
+    }[spacing]
+    rows = [_row(_START + distance), _row(_START)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            request,
+            json.dumps({"success": True, "result": rows}).encode(),
+            headers={"X-Request-ID": "spacing-request"},
+        )
+
+    async with new_client(handler) as client:
+        request = _request(resolution=resolution, end=_START + max(distance, seconds))
+        if spacing in {"one_second", "just_short"}:
+            with pytest.raises(ExchangeProtocolError) as raised:
+                await client.get_candles(request)
+            assert raised.value.context["operation"] == "candles"
+            assert raised.value.context["request_id"] == "spacing-request"
+            assert raised.value.context["http_status"] == 200
+            assert raised.value.context["correlation_id"]
+        else:
+            result = await client.get_candles(request)
+            assert [int(row.timestamp.timestamp()) for row in result.items] == [
+                _START,
+                _START + distance,
+            ]

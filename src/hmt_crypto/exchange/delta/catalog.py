@@ -10,9 +10,19 @@ from enum import StrEnum
 
 from hmt_crypto.domain import Product
 from hmt_crypto.errors import (
+    AuthError,
     CatalogUnavailableError,
+    ConfigurationError,
+    ExchangeDownError,
+    ExchangeError,
+    ExchangeProtocolError,
+    ExchangeTimeoutError,
     HmtCryptoError,
+    PaginationLimitError,
+    RateLimitError,
+    SignatureExpiredError,
     StaleCatalogError,
+    UnauthorizedApiAccessError,
 )
 from hmt_crypto.exchange.delta.catalog_models import (
     CatalogProductLoad,
@@ -39,22 +49,20 @@ class CatalogRefreshStatus(StrEnum):
 
 ProductFetcher = Callable[[], Awaitable[CatalogProductLoad]]
 
-_SAFE_REFRESH_ERROR_CODES = frozenset(
-    {
-        "auth_error",
-        "catalog_stale",
-        "catalog_unavailable",
-        "configuration_error",
-        "exchange_down",
-        "exchange_error",
-        "exchange_protocol_error",
-        "exchange_timeout",
-        "pagination_limit",
-        "rate_limit",
-        "signature_expired",
-        "unauthorized_api_access",
-    }
-)
+_SAFE_REFRESH_ERROR_CODES: dict[type[HmtCryptoError], str] = {
+    AuthError: "auth_error",
+    StaleCatalogError: "catalog_stale",
+    CatalogUnavailableError: "catalog_unavailable",
+    ConfigurationError: "configuration_error",
+    ExchangeDownError: "exchange_down",
+    ExchangeError: "exchange_error",
+    ExchangeProtocolError: "exchange_protocol_error",
+    ExchangeTimeoutError: "exchange_timeout",
+    PaginationLimitError: "pagination_limit",
+    RateLimitError: "rate_limit",
+    SignatureExpiredError: "signature_expired",
+    UnauthorizedApiAccessError: "unauthorized_api_access",
+}
 
 
 def _utc(value: object) -> datetime:
@@ -346,8 +354,7 @@ class ProductCatalog:
         except (_CatalogValidationError, TypeError, ValueError):
             return self._failure(attempted_at=attempted_at, code="catalog_validation_failed")
         except HmtCryptoError as error:
-            code = getattr(type(error), "_code", "")
-            safe_code = code if code in _SAFE_REFRESH_ERROR_CODES else "catalog_refresh_failed"
+            safe_code = _SAFE_REFRESH_ERROR_CODES.get(type(error), "catalog_refresh_failed")
             return self._failure(attempted_at=attempted_at, code=safe_code)
         except Exception:
             return self._failure(attempted_at=attempted_at, code="catalog_refresh_failed")

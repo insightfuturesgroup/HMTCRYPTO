@@ -185,7 +185,11 @@ class _DeltaPublicTransport:
         }
         if response is not None:
             event["http_status"] = response.status_code
-            event["response"] = safe_response_summary(response)
+            summary = safe_response_summary(response)
+            # Failed framing/reset validation must not echo untrusted numeric headers.
+            # Correlation below comes only from the validated response context.
+            summary.pop("headers", None)
+            event["response"] = summary
             request_id = attempt_context.get("request_id")
             if request_id is not None:
                 event["exchange_request_id"] = request_id

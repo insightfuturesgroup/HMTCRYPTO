@@ -22,7 +22,7 @@ from hmt_crypto.exchange.base import (
     ProductRef,
 )
 from hmt_crypto.exchange.delta.candle_policy import normalize_candles
-from hmt_crypto.exchange.delta.endpoints import DeltaEndpointSet
+from hmt_crypto.exchange.delta.endpoints import DeltaEndpointSet, _validated_endpoint_snapshot
 from hmt_crypto.exchange.delta.http_headers import validate_user_agent
 from hmt_crypto.exchange.delta.paginator import (
     MISSING_AFTER,
@@ -83,8 +83,7 @@ class DeltaPublicClient:
         jitter_source: Callable[[], Decimal] | None = None,
         l2_timestamp_policy: L2TimestampPolicy = L2TimestampPolicy.DISABLED,
     ) -> None:
-        if not isinstance(endpoints, DeltaEndpointSet):
-            raise _config("public_client_endpoints")
+        endpoints = _validated_endpoint_snapshot(endpoints)
         if not isinstance(limiter, WeightedRateLimiter):
             raise _config("public_client_limiter")
         scope = limiter.scope

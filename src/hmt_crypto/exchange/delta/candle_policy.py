@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from hmt_crypto.domain import Candle
 from hmt_crypto.errors import ExchangeProtocolError
 from hmt_crypto.exchange.base import CandleRequest, CandleResolution
@@ -39,7 +41,13 @@ def normalize_candles(
         or any(timestamp < request.start or timestamp > request.end for timestamp in timestamps)
     ):
         raise ExchangeProtocolError(context=context)
-    return tuple(sorted(candles, key=lambda candle: candle.timestamp))
+    ordered = tuple(sorted(candles, key=lambda candle: candle.timestamp))
+    if any(
+        right.timestamp - left.timestamp < timedelta(seconds=duration)
+        for left, right in zip(ordered, ordered[1:], strict=False)
+    ):
+        raise ExchangeProtocolError(context=context)
+    return ordered
 
 
 __all__: list[str] = []

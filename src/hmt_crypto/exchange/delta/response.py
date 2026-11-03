@@ -83,9 +83,17 @@ def _framing(
 
     declared: int | None = None
     if length_value is not None:
-        if not length_value or not length_value.isascii() or not length_value.isdecimal():
+        if (
+            not length_value
+            or len(length_value) > len(str(maximum))
+            or not length_value.isascii()
+            or not length_value.isdecimal()
+        ):
             raise protocol(context)
-        declared = int(length_value)
+        try:
+            declared = int(length_value)
+        except (ValueError, OverflowError):
+            raise protocol(context) from None
         if declared > maximum:
             raise protocol(context)
 

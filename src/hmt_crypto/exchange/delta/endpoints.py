@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from ipaddress import ip_address
 from urllib.parse import urlsplit
@@ -34,6 +34,11 @@ class DeltaEndpointSet:
     is_development_override: bool = False
     # Phase 1 exposes public REST only. This remains false even for canonical hosts.
     private_rest_allowed: bool = False
+    # Only the explicit testnet/non-LIVE factory path issues origin-bound evidence.
+    # Ordinary construction and dataclasses.replace cannot carry authorization.
+    _development_authorization: tuple[str, str, str] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def rest_url(self, path: str) -> str:
         """Join a literal absolute API path without permitting host/path confusion."""
@@ -212,16 +217,16 @@ def get_delta_endpoints(
     if development_rest_base_url is None:
         if allow_development_override:
             raise ConfigurationError(context={"operation": "resolve_delta_development_override"})
-        return canonical
+        return replace(canonical)
     if not allow_development_override or live_requested or canonical.environment != "testnet":
         raise ConfigurationError(context={"operation": "resolve_delta_development_override"})
     base_url = _development_base_url(development_rest_base_url)
     candidate_host = urlsplit(base_url).hostname
     if candidate_host is not None and candidate_host.casefold() in _CANONICAL_REST_HOSTS:
         if _same_origin(base_url, canonical.rest_base_url):
-            return canonical
+            return replace(canonical)
         raise ConfigurationError(context={"operation": "resolve_delta_development_override"})
-    return replace(
+    endpoint = replace(
         canonical,
         rest_base_url=base_url,
         public_ws_url=None,
@@ -230,6 +235,60 @@ def get_delta_endpoints(
         is_development_override=True,
         private_rest_allowed=False,
     )
+    object.__setattr__(
+        endpoint, "_development_authorization", (canonical.region, canonical.environment, base_url)
+    )
+    return endpoint
+
+
+def _validated_endpoint_snapshot(value: DeltaEndpointSet) -> DeltaEndpointSet:
+    """Revalidate source/origin metadata and return an independently owned endpoint."""
+    context = {"operation": "public_client_endpoints"}
+    if type(value) is not DeltaEndpointSet:
+        raise ConfigurationError(context=context)
+    if (
+        any(
+            type(part) is not str for part in (value.region, value.environment, value.rest_base_url)
+        )
+        or type(value.is_development_override) is not bool
+        or value.private_rest_allowed is not False
+        or type(value.streaming_capability) is not StreamingCapability
+        or any(
+            type(url) is not str
+            for url in (value.public_ws_url, value.private_ws_url)
+            if url is not None
+        )
+    ):
+        raise ConfigurationError(context=context)
+    try:
+        base_url = _development_base_url(value.rest_base_url)
+        if value.is_development_override:
+            authorization = value._development_authorization
+            if (
+                type(authorization) is not tuple
+                or any(type(part) is not str for part in authorization)
+                or authorization != (value.region, value.environment, base_url)
+            ):
+                raise ConfigurationError(context=context)
+            expected = get_delta_endpoints(
+                value.region,
+                value.environment,
+                development_rest_base_url=base_url,
+                allow_development_override=True,
+            )
+        else:
+            expected = get_delta_endpoints(value.region, value.environment)
+        if (
+            not _same_origin(base_url, expected.rest_base_url)
+            or value.public_ws_url != expected.public_ws_url
+            or value.private_ws_url != expected.private_ws_url
+            or value.streaming_capability is not expected.streaming_capability
+            or value.is_development_override is not expected.is_development_override
+        ):
+            raise ConfigurationError(context=context)
+    except ConfigurationError:
+        raise ConfigurationError(context=context) from None
+    return expected
 
 
 __all__ = ["DeltaEndpointSet", "StreamingCapability", "get_delta_endpoints"]
