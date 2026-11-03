@@ -34,6 +34,33 @@ def local_clock(
     )
 
 
+def signed_probe(*, outcome: str = "ok", observed_at: object = NOW) -> Any:
+    api = clock_api()
+    evidence_type = getattr(api, "SignedProbeEvidence", None)
+    if evidence_type is None:
+        pytest.fail("timestamped signed-probe evidence API is missing", pytrace=False)
+    return evidence_type(outcome=api.SignedProbeOutcome(outcome), observed_at=observed_at)
+
+
+def assess_with_timestamped_evidence(
+    *,
+    local: Any | None = None,
+    probe: Any | None = None,
+    http: Any | None = None,
+    checked_at: object = NOW,
+    max_age: object = "5",
+) -> Any:
+    api = clock_api()
+    return api.assess_clock_readiness(
+        local=local if local is not None else local_clock(),
+        signed_probe_evidence=probe if probe is not None else signed_probe(),
+        max_skew_seconds="1",
+        max_evidence_age_seconds=max_age,
+        http_date_observation=http,
+        checked_at=checked_at,
+    )
+
+
 def test_http_date_observation_uses_request_midpoint_and_utc() -> None:
     api = clock_api()
     observation = api.observe_http_date(
@@ -108,10 +135,11 @@ def test_ready_requires_positive_sync_bounded_skew_and_successful_signed_probe()
     )
     result = api.assess_clock_readiness(
         local=local_clock(offset="0.20"),
-        signed_probe_outcome=api.SignedProbeOutcome.OK,
+        signed_probe_evidence=signed_probe(observed_at=NOW + timedelta(milliseconds=100)),
         max_skew_seconds="1",
+        max_evidence_age_seconds="5",
         http_date_observation=observation,
-        checked_at=NOW,
+        checked_at=NOW + timedelta(milliseconds=100),
     )
     assert result.clock_ready is True
     assert result.signed_probe_ready is True
@@ -131,8 +159,9 @@ def test_local_sync_must_be_positively_known(
     api = clock_api()
     result = api.assess_clock_readiness(
         local=local_clock(synchronized=synchronized),
-        signed_probe_outcome=api.SignedProbeOutcome.OK,
+        signed_probe_evidence=signed_probe(),
         max_skew_seconds="1",
+        max_evidence_age_seconds="5",
         checked_at=NOW,
     )
     assert result.order_write_prerequisites_met is False
@@ -143,8 +172,9 @@ def test_numeric_skew_evidence_is_required_even_when_os_reports_sync() -> None:
     api = clock_api()
     result = api.assess_clock_readiness(
         local=local_clock(offset=None),
-        signed_probe_outcome=api.SignedProbeOutcome.OK,
+        signed_probe_evidence=signed_probe(),
         max_skew_seconds="1",
+        max_evidence_age_seconds="5",
         checked_at=NOW,
     )
     assert result.clock_ready is False
@@ -158,8 +188,9 @@ def test_maximum_skew_boundary_is_inclusive(offset: str, ready: bool) -> None:
     api = clock_api()
     result = api.assess_clock_readiness(
         local=local_clock(offset=offset),
-        signed_probe_outcome=api.SignedProbeOutcome.OK,
+        signed_probe_evidence=signed_probe(),
         max_skew_seconds="1",
+        max_evidence_age_seconds="5",
         checked_at=NOW,
     )
     assert result.clock_ready is ready
@@ -175,8 +206,9 @@ def test_conservative_strongest_observation_fails_when_http_date_exceeds_policy(
     )
     result = api.assess_clock_readiness(
         local=local_clock(offset="0.1"),
-        signed_probe_outcome=api.SignedProbeOutcome.OK,
+        signed_probe_evidence=signed_probe(),
         max_skew_seconds="1",
+        max_evidence_age_seconds="5",
         http_date_observation=observation,
         checked_at=NOW,
     )
@@ -201,8 +233,9 @@ def test_every_unsuccessful_signed_probe_fails_closed_without_conflating_auth_an
     api = clock_api()
     result = api.assess_clock_readiness(
         local=local_clock(offset="0.1"),
-        signed_probe_outcome=api.SignedProbeOutcome(outcome),
+        signed_probe_evidence=signed_probe(outcome=outcome),
         max_skew_seconds="1",
+        max_evidence_age_seconds="5",
         checked_at=NOW,
     )
     reason_values = {item.value for item in result.reasons}
@@ -221,8 +254,9 @@ def test_maximum_skew_policy_rejects_float_bool_nonpositive_or_nonfinite(maximum
     with pytest.raises(ValueError):
         api.assess_clock_readiness(
             local=local_clock(),
-            signed_probe_outcome=api.SignedProbeOutcome.OK,
+            signed_probe_evidence=signed_probe(),
             max_skew_seconds=maximum,
+            max_evidence_age_seconds="5",
             checked_at=NOW,
         )
 
@@ -232,8 +266,9 @@ def test_readiness_rejects_millisecond_looking_checked_at() -> None:
     with pytest.raises(ValueError):
         api.assess_clock_readiness(
             local=local_clock(),
-            signed_probe_outcome=api.SignedProbeOutcome.OK,
+            signed_probe_evidence=signed_probe(),
             max_skew_seconds="1",
+            max_evidence_age_seconds="5",
             checked_at=1_794_000_000_000,
         )
 
@@ -242,11 +277,117 @@ def test_readiness_result_and_evidence_are_frozen() -> None:
     api = clock_api()
     result = api.assess_clock_readiness(
         local=local_clock(),
-        signed_probe_outcome=api.SignedProbeOutcome.OK,
+        signed_probe_evidence=signed_probe(),
         max_skew_seconds="1",
+        max_evidence_age_seconds="5",
         checked_at=NOW,
     )
     with pytest.raises(ValidationError):
         result.clock_ready = False
     with pytest.raises(ValidationError):
         result.reasons = ()
+
+
+@pytest.mark.parametrize(
+    ("evidence", "reason"),
+    [
+        ("local_stale", "local_clock_evidence_stale"),
+        ("local_future", "local_clock_evidence_future"),
+        ("http_stale", "http_date_evidence_stale"),
+        ("http_future", "http_date_evidence_future"),
+        ("probe_stale", "signed_probe_evidence_stale"),
+        ("probe_future", "signed_probe_evidence_future"),
+    ],
+)
+def test_future_or_stale_evidence_fails_closed(evidence: str, reason: str) -> None:
+    local = local_clock()
+    probe = signed_probe()
+    http = None
+    if evidence == "local_stale":
+        local = local_clock(observed_at=NOW - timedelta(seconds=6))
+    elif evidence == "local_future":
+        local = local_clock(observed_at=NOW + timedelta(microseconds=1))
+    elif evidence.startswith("http_"):
+        shift = timedelta(seconds=-6 if evidence == "http_stale" else 1)
+        observed_at = NOW + shift
+        http = clock_api().observe_http_date(
+            observed_at.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+            request_started_at=observed_at,
+            response_received_at=observed_at,
+        )
+    elif evidence == "probe_stale":
+        probe = signed_probe(observed_at=NOW - timedelta(seconds=6))
+    else:
+        probe = signed_probe(observed_at=NOW + timedelta(microseconds=1))
+    result = assess_with_timestamped_evidence(local=local, probe=probe, http=http)
+    assert result.order_write_prerequisites_met is False
+    assert reason in {item.value for item in result.reasons}
+
+
+@pytest.mark.parametrize(
+    ("age", "ready"),
+    [(timedelta(seconds=5), True), (timedelta(seconds=5, microseconds=1), False)],
+)
+def test_evidence_age_boundary_is_inclusive(age: timedelta, ready: bool) -> None:
+    result = assess_with_timestamped_evidence(
+        local=local_clock(observed_at=NOW - age),
+        probe=signed_probe(observed_at=NOW - age),
+    )
+    assert result.order_write_prerequisites_met is ready
+
+
+@pytest.mark.parametrize("maximum", [0.1, True, "0", "-1", "NaN", "Infinity"])
+def test_maximum_evidence_age_rejects_float_bool_nonpositive_or_nonfinite(
+    maximum: object,
+) -> None:
+    with pytest.raises(ValueError):
+        assess_with_timestamped_evidence(max_age=maximum)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("request_midpoint", NOW + timedelta(seconds=1)),
+        ("round_trip_seconds", Decimal("99")),
+        ("estimated_skew_seconds", Decimal("0.25")),
+    ],
+)
+def test_http_date_observation_rejects_fabricated_derived_fields(field: str, value: object) -> None:
+    api = clock_api()
+    valid = api.observe_http_date(
+        "Tue, 03 Nov 2026 10:00:00 GMT",
+        request_started_at=NOW,
+        response_received_at=NOW,
+    )
+    payload = valid.model_dump()
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        api.HttpDateObservation(**payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("signed_probe_ready", False),
+        ("order_write_prerequisites_met", False),
+        ("clock_ready", False),
+        ("time_endpoint_documented", True),
+    ],
+)
+def test_readiness_rejects_contradictory_direct_construction(field: str, value: object) -> None:
+    result = assess_with_timestamped_evidence()
+    payload = result.model_dump()
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        clock_api().ClockReadiness(**payload)
+
+
+def test_readiness_rejects_success_boolean_with_not_attempted_probe() -> None:
+    result = assess_with_timestamped_evidence()
+    payload = result.model_dump()
+    payload["signed_probe_evidence"] = {
+        "outcome": "not_attempted",
+        "observed_at": NOW,
+    }
+    with pytest.raises(ValidationError):
+        clock_api().ClockReadiness(**payload)

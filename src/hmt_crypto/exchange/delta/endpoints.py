@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from urllib.parse import unquote, urlsplit
+from ipaddress import ip_address
+from urllib.parse import urlsplit
+
+import httpx
 
 from hmt_crypto.errors import ConfigurationError
 
@@ -33,11 +37,17 @@ class DeltaEndpointSet:
 
     def rest_url(self, path: str) -> str:
         """Join a literal absolute API path without permitting host/path confusion."""
-        if not isinstance(path, str) or not path.startswith("/") or path in {"", "/"}:
+        if (
+            not isinstance(path, str)
+            or not path.startswith("/")
+            or path in {"", "/"}
+            or any(not character.isprintable() or character.isspace() for character in path)
+            or "%" in path
+        ):
             raise ConfigurationError(context={"operation": "join_rest_path"})
         parsed = urlsplit(path)
-        decoded = unquote(path).replace("\\", "/")
-        segments = decoded.split("/")
+        normalized = path.replace("\\", "/")
+        segments = normalized.split("/")
         if (
             parsed.scheme
             or parsed.netloc
@@ -45,7 +55,7 @@ class DeltaEndpointSet:
             or parsed.fragment
             or path.startswith("//")
             or "\\" in path
-            or "//" in decoded
+            or "//" in normalized
             or any(segment in {".", ".."} for segment in segments)
         ):
             raise ConfigurationError(context={"operation": "join_rest_path"})
@@ -98,12 +108,16 @@ def _selection_value(value: object) -> str:
 
 
 def _development_base_url(value: str) -> str:
-    if not isinstance(value, str) or not value or any(character.isspace() for character in value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(not character.isprintable() or character.isspace() for character in value)
+    ):
         raise ConfigurationError(context={"operation": "validate_development_endpoint"})
     try:
         parsed = urlsplit(value)
         _ = parsed.port
-    except ValueError as error:
+    except (UnicodeError, ValueError) as error:
         raise ConfigurationError(context={"operation": "validate_development_endpoint"}) from error
     if (
         parsed.scheme not in {"http", "https"}
@@ -113,9 +127,46 @@ def _development_base_url(value: str) -> str:
         or parsed.path not in {"", "/"}
         or parsed.query
         or parsed.fragment
+        or "%" in parsed.netloc
     ):
         raise ConfigurationError(context={"operation": "validate_development_endpoint"})
-    return value.rstrip("/")
+    _validate_development_hostname(parsed.hostname)
+    try:
+        normalized = httpx.URL(value)
+    except (httpx.InvalidURL, UnicodeError, ValueError) as error:
+        raise ConfigurationError(context={"operation": "validate_development_endpoint"}) from error
+    if normalized.scheme not in {"http", "https"} or normalized.host is None:
+        raise ConfigurationError(context={"operation": "validate_development_endpoint"})
+    return str(normalized).rstrip("/")
+
+
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+
+
+def _validate_development_hostname(hostname: str) -> None:
+    """Require an IP, localhost, or a round-trippable IDNA DNS name."""
+    try:
+        ip_address(hostname)
+        return
+    except ValueError:
+        pass
+    if hostname.casefold() == "localhost":
+        return
+    try:
+        ascii_hostname = hostname.encode("idna").decode("ascii").casefold()
+    except UnicodeError as error:
+        raise ConfigurationError(context={"operation": "validate_development_endpoint"}) from error
+    if not ascii_hostname or len(ascii_hostname) > 253:
+        raise ConfigurationError(context={"operation": "validate_development_endpoint"})
+    labels = ascii_hostname.split(".")
+    if any(not _DNS_LABEL.fullmatch(label) for label in labels):
+        raise ConfigurationError(context={"operation": "validate_development_endpoint"})
+    try:
+        for label in labels:
+            if label.startswith("xn--"):
+                label.encode("ascii").decode("idna")
+    except UnicodeError as error:
+        raise ConfigurationError(context={"operation": "validate_development_endpoint"}) from error
 
 
 def get_delta_endpoints(

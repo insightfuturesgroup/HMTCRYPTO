@@ -125,6 +125,30 @@ def test_rest_path_join_preserves_canonical_host_and_absolute_path() -> None:
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        "/v2/prod\x00ucts",
+        "/v2/prod\ructs",
+        "/v2/prod\nucts",
+        "/v2/prod\tucts",
+        "/v2/prod ucts",
+        "/v2/products%00",
+        "/v2/products%0d",
+        "/v2%2fproducts",
+        "/v2%5cproducts",
+        "/v2/products%3fsecret",
+        "/v2/products%23secret",
+        "/v2/products%25ff",
+        "/v2/products%ZZ",
+    ],
+)
+def test_rest_path_rejects_raw_or_encoded_controls_and_delimiters(path: str) -> None:
+    endpoints = endpoint_api().get_delta_endpoints("india", "testnet")
+    with pytest.raises(ConfigurationError):
+        endpoints.rest_url(path)
+
+
+@pytest.mark.parametrize(
     "override",
     [
         "not-a-url",
@@ -148,6 +172,55 @@ def test_development_override_rejects_malformed_or_credential_bearing_urls(
         )
     rendered = str(error.value) + repr(error.value) + str(error.value.to_dict())
     assert "fixture-secret" not in rendered
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "http://local\x00host:9000",
+        "http://local\rhost:9000",
+        "http://local\nhost:9000",
+        "http://local\thost:9000",
+        "http://local%00host:9000",
+        "http://local%2fhost:9000",
+        "http://exa_mple.example:9000",
+        "http://-bad.example:9000",
+        "http://bad-.example:9000",
+        "http://a..b:9000",
+        "http://xn--.example:9000",
+    ],
+)
+def test_development_override_rejects_control_encoded_or_invalid_idna_hosts(
+    override: str,
+) -> None:
+    with pytest.raises(ConfigurationError):
+        endpoint_api().get_delta_endpoints(
+            "india",
+            "testnet",
+            development_rest_base_url=override,
+            allow_development_override=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ("http://localhost:9000", "http://localhost:9000"),
+        ("http://127.0.0.1:9000", "http://127.0.0.1:9000"),
+        ("http://[::1]:9000", "http://[::1]:9000"),
+        ("https://例え.テスト:9000", "https://xn--r8jz45g.xn--zckzah:9000"),
+    ],
+)
+def test_development_override_accepts_valid_local_ip_and_international_hosts(
+    override: str, expected: str
+) -> None:
+    endpoints = endpoint_api().get_delta_endpoints(
+        "india",
+        "testnet",
+        development_rest_base_url=override,
+        allow_development_override=True,
+    )
+    assert endpoints.rest_base_url == expected
 
 
 def test_development_override_requires_explicit_flag() -> None:
