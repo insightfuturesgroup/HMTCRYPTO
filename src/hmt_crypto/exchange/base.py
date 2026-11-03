@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Protocol, Self
 
-from pydantic import Field, StrictInt, field_validator, model_validator
+from pydantic import Field, StrictBool, StrictInt, field_validator, model_validator
 
 from hmt_crypto.domain.models import Candle, DomainModel, Product, Ticker
 from hmt_crypto.domain.money import PositiveDecimal, UtcDateTime
@@ -169,7 +169,13 @@ class CandleResult(DomainModel):
     """Candle rows plus explicit evidence that the venue cap may have truncated them."""
 
     items: tuple[Candle, ...]
-    possibly_truncated: bool
+    possibly_truncated: StrictBool
+
+    @model_validator(mode="after")
+    def validate_truncation_evidence(self) -> Self:
+        if self.possibly_truncated and not self.items:
+            raise ValueError("empty candle results cannot be venue-truncated")
+        return self
 
     def __len__(self) -> int:
         return len(self.items)

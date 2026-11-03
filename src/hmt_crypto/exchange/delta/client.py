@@ -23,6 +23,7 @@ from hmt_crypto.exchange.base import (
 )
 from hmt_crypto.exchange.delta.candle_policy import normalize_candles
 from hmt_crypto.exchange.delta.endpoints import DeltaEndpointSet
+from hmt_crypto.exchange.delta.http_headers import validate_user_agent
 from hmt_crypto.exchange.delta.paginator import (
     MISSING_AFTER,
     CursorPage,
@@ -93,12 +94,7 @@ class DeltaPublicClient:
             or scope.kind is not ScopeKind.IP
         ):
             raise _config("public_client_limiter_scope")
-        if (
-            type(user_agent) is not str
-            or not user_agent.strip()
-            or any(not character.isprintable() for character in user_agent)
-        ):
-            raise _config("public_client_user_agent")
+        checked_user_agent = validate_user_agent(user_agent)
         if not isinstance(retry_policy, RetryPolicy):
             raise _config("public_client_retry_policy")
         if not callable(sleeper) or not callable(jitter_source or random.random):
@@ -114,7 +110,7 @@ class DeltaPublicClient:
         self._transport = _DeltaPublicTransport(
             endpoints=endpoints,
             limiter=limiter,
-            user_agent=user_agent,
+            user_agent=checked_user_agent,
             retry_policy=retry_policy,
             transport=transport,
             sleeper=sleeper,

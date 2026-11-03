@@ -88,6 +88,7 @@ class _DeltaPublicTransport:
         self._monotonic = monotonic
         self._logger = get_logger("exchange.delta.public")
         self._base_url = httpx.URL(endpoints.rest_base_url)
+        self._owned_transport = transport or httpx.AsyncHTTPTransport(limits=_LIMITS)
         self._client = httpx.AsyncClient(
             base_url=endpoints.rest_base_url,
             headers={
@@ -98,9 +99,18 @@ class _DeltaPublicTransport:
             timeout=_TIMEOUT,
             limits=_LIMITS,
             follow_redirects=False,
-            transport=transport,
+            transport=self._owned_transport,
         )
-        self._lifecycle = _ClientLifecycle(self._client.aclose)
+        self._client_close_attempted = False
+        self._lifecycle = _ClientLifecycle(self._close_owned_transport)
+
+    async def _close_owned_transport(self) -> None:
+        """Retry raw transport cleanup if HTTPX made its close state terminal on failure."""
+        if not self._client_close_attempted:
+            self._client_close_attempted = True
+            await self._client.aclose()
+            return
+        await self._owned_transport.aclose()
 
     def _check_request(self, request: httpx.Request, spec: PublicRouteSpec) -> None:
         url = request.url

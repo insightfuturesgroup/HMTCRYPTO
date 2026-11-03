@@ -5,7 +5,15 @@ from hashlib import sha256
 from typing import Any, Self, cast
 from urllib.parse import urlsplit
 
-from pydantic import Field, ModelWrapValidatorHandler, SecretStr, ValidationError, model_validator
+from pydantic import (
+    Field,
+    ModelWrapValidatorHandler,
+    SecretStr,
+    StrictBool,
+    ValidationError,
+    model_validator,
+)
+from pydantic.fields import FieldInfo
 from pydantic_core import InitErrorDetails
 from pydantic_settings import (
     BaseSettings,
@@ -16,6 +24,23 @@ from pydantic_settings import (
 
 from hmt_crypto.errors import ConfigurationError
 from hmt_crypto.exchange.delta.endpoints import get_delta_endpoints
+
+_STRICT_BOOLEAN_ALIASES = frozenset(
+    {
+        "DELTA_ALLOW_DEVELOPMENT_ENDPOINT_OVERRIDE",
+        "DELTA_LIVE_TRADING_ENABLED",
+        "PRODUCTION_WRITES_FORBIDDEN",
+    }
+)
+
+
+def _normalize_source_booleans(values: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(values)
+    for alias in _STRICT_BOOLEAN_ALIASES:
+        value = normalized.get(alias)
+        if type(value) is str and value in {"true", "false"}:
+            normalized[alias] = value == "true"
+    return normalized
 
 
 class ExecutionMode(StrEnum):
@@ -45,7 +70,25 @@ class _DeltaEnvSource(EnvSettingsSource):
         for name, value in self.env_vars.items():
             if name.lower().startswith("delta_") and name.lower() not in known:
                 values[name] = SecretStr(value) if value is not None else None
-        return values
+        return _normalize_source_booleans(values)
+
+
+class _NormalizedSettingsSource(PydanticBaseSettingsSource):
+    """Normalize documented text booleans for dotenv without weakening init values."""
+
+    def __init__(
+        self,
+        settings_cls: type[BaseSettings],
+        wrapped: PydanticBaseSettingsSource,
+    ) -> None:
+        super().__init__(settings_cls)
+        self._wrapped = wrapped
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        return self._wrapped.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        return _normalize_source_booleans(self._wrapped())
 
 
 class Settings(BaseSettings):
@@ -68,13 +111,15 @@ class Settings(BaseSettings):
     execution_mode: ExecutionMode = Field(default=ExecutionMode.PAPER, alias="EXECUTION_MODE")
     delta_region: DeltaRegion = Field(default=DeltaRegion.INDIA, alias="DELTA_REGION")
     delta_env: DeltaEnvironment = Field(default=DeltaEnvironment.TESTNET, alias="DELTA_ENV")
-    delta_allow_development_endpoint_override: bool = Field(
+    delta_allow_development_endpoint_override: StrictBool = Field(
         default=False, alias="DELTA_ALLOW_DEVELOPMENT_ENDPOINT_OVERRIDE"
     )
     delta_development_rest_base_url: str | None = Field(
         default=None, alias="DELTA_DEVELOPMENT_REST_BASE_URL"
     )
-    delta_live_trading_enabled: bool = Field(default=False, alias="DELTA_LIVE_TRADING_ENABLED")
+    delta_live_trading_enabled: StrictBool = Field(
+        default=False, alias="DELTA_LIVE_TRADING_ENABLED"
+    )
     delta_live_confirmation: SecretStr | None = Field(default=None, alias="DELTA_LIVE_CONFIRMATION")
     delta_india_testnet_api_key: SecretStr | None = Field(
         default=None, alias="DELTA_INDIA_TESTNET_API_KEY"
@@ -100,7 +145,9 @@ class Settings(BaseSettings):
     delta_global_prod_api_secret: SecretStr | None = Field(
         default=None, alias="DELTA_GLOBAL_PROD_API_SECRET"
     )
-    production_writes_forbidden: bool = Field(default=True, alias="PRODUCTION_WRITES_FORBIDDEN")
+    production_writes_forbidden: StrictBool = Field(
+        default=True, alias="PRODUCTION_WRITES_FORBIDDEN"
+    )
 
     @classmethod
     def settings_customise_sources(
@@ -111,7 +158,12 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        return (init_settings, _DeltaEnvSource(settings_cls), dotenv_settings, file_secret_settings)
+        return (
+            init_settings,
+            _DeltaEnvSource(settings_cls),
+            _NormalizedSettingsSource(settings_cls, dotenv_settings),
+            file_secret_settings,
+        )
 
     @property
     def rest_base_url(self) -> str:

@@ -226,6 +226,31 @@ async def test_429_block_uses_milliseconds_and_only_extends_existing_block() -> 
 
 
 @pytest.mark.asyncio
+async def test_429_extension_wakes_sleeping_fifo_head_and_recomputes_deadline() -> None:
+    fake = FakeTime()
+    limiter = new_limiter(fake, capacity=100)
+    await limiter.observe_429("1000")
+    head = asyncio.create_task(limiter.acquire(request()))
+    await settle()
+    assert not head.done()
+
+    fake.advance(0.5)
+    await limiter.observe_429("2500")
+    await settle()
+    fake.advance(0.5)
+    await settle()
+    assert not head.done()
+
+    fake.advance(1.999)
+    await settle()
+    assert not head.done()
+    fake.advance(0.001)
+    await settle()
+    permit = await head
+    assert permit.acquired_at == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
 async def test_quota_endpoint_is_validated_telemetry_only() -> None:
     fake = FakeTime()
     limiter = new_limiter(fake)

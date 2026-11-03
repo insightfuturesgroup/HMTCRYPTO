@@ -56,9 +56,17 @@ def _bounded_decimal(
     sign, digits, exponent = parsed.as_tuple()
     if not isinstance(exponent, int):
         raise NumericContractError
-    if len(digits) > max_digits or abs(exponent) > max_exponent:
+    canonical_digits = list(digits)
+    if not any(canonical_digits):
+        canonical_digits = [0]
+        exponent = 0
+    else:
+        while len(canonical_digits) > 1 and canonical_digits[-1] == 0:
+            canonical_digits.pop()
+            exponent += 1
+    if len(canonical_digits) > max_digits or abs(exponent) > max_exponent:
         raise NumericContractError
-    coefficient = _coefficient(digits)
+    coefficient = _coefficient(tuple(canonical_digits))
     if sign and coefficient:
         raise NumericContractError
     if positive and coefficient == 0:

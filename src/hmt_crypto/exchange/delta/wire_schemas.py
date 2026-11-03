@@ -123,14 +123,23 @@ def parse_product(value: object, *, endpoint_id: str) -> Product:
     try:
         item = _object(value, endpoint_id)
         specs = _object(item["product_specs"], endpoint_id)
-        reduce_only = specs["only_reduce_only_orders_allowed"]
+        # Current testnet option families may omit this flag. Unknown venue permission is
+        # represented as explicitly reduce-only so downstream new-risk gates remain closed.
+        reduce_only = specs.get("only_reduce_only_orders_allowed", True)
         is_quanto = item.get("is_quanto")
         if not isinstance(reduce_only, bool) or not isinstance(is_quanto, bool):
             raise _protocol(endpoint_id)
+        contract_type = _enum(item.get("contract_type"), ContractType, endpoint_id)
+        settling_value = item.get("settling_asset")
+        settling_asset = (
+            None
+            if contract_type is ContractType.SPOT and settling_value is None
+            else _asset(settling_value, endpoint_id)
+        )
         return Product(
             id=_integer(item.get("id"), endpoint_id, minimum=1),
             symbol=ProductRef(symbol=_text(item.get("symbol"), endpoint_id)).symbol,
-            contract_type=_enum(item.get("contract_type"), ContractType, endpoint_id),
+            contract_type=contract_type,
             notional_type=_enum(item.get("notional_type"), NotionalType, endpoint_id),
             contract_value=_decimal(item.get("contract_value"), endpoint_id, positive=True),
             contract_unit_currency=ProductRef(
@@ -141,15 +150,23 @@ def parse_product(value: object, *, endpoint_id: str) -> Product:
             trading_status=_enum(item.get("trading_status"), TradingStatus, endpoint_id),
             underlying_asset=_asset(item.get("underlying_asset"), endpoint_id),
             quoting_asset=_asset(item.get("quoting_asset"), endpoint_id),
-            settling_asset=_asset(item.get("settling_asset"), endpoint_id),
+            settling_asset=settling_asset,
             is_quanto=is_quanto,
             only_reduce_only_orders_allowed=reduce_only,
-            position_size_limit=_optional_decimal(item, "position_size_limit", endpoint_id),
-            position_notional_limit=_optional_decimal(item, "position_notional_limit", endpoint_id),
-            initial_margin=_optional_decimal(item, "initial_margin", endpoint_id),
-            maintenance_margin=_optional_decimal(item, "maintenance_margin", endpoint_id),
+            position_size_limit=_optional_decimal(
+                item, "position_size_limit", endpoint_id, positive=False
+            ),
+            position_notional_limit=_optional_decimal(
+                item, "position_notional_limit", endpoint_id, positive=False
+            ),
+            initial_margin=_optional_decimal(item, "initial_margin", endpoint_id, positive=False),
+            maintenance_margin=_optional_decimal(
+                item, "maintenance_margin", endpoint_id, positive=False
+            ),
             default_leverage=_optional_decimal(item, "default_leverage", endpoint_id),
-            max_leverage_notional=_optional_decimal(item, "max_leverage_notional", endpoint_id),
+            max_leverage_notional=_optional_decimal(
+                item, "max_leverage_notional", endpoint_id, positive=False
+            ),
         )
     except (KeyError, TypeError, ValueError, ValidationError, ExchangeProtocolError):
         raise _protocol(endpoint_id) from None

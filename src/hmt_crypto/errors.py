@@ -35,6 +35,14 @@ _SAFE_CONTEXT_KEYS = frozenset(
 _SAFE_CONTEXT_VALUE_TYPES = (type(None), bool, int, str, Decimal, UUID, datetime, date)
 
 
+def _reconstruct_error(
+    error_type: type[HmtCryptoError],
+    context: Mapping[str, object],
+    retry_after_ms: int | None,
+) -> HmtCryptoError:
+    return error_type(context=context, retry_after_ms=retry_after_ms)
+
+
 def _sanitize_context(context: Mapping[str, object] | None) -> dict[str, JsonValue]:
     """Retain only explicitly safe scalar correlation and exchange metadata."""
     if context is None:
@@ -110,6 +118,10 @@ class HmtCryptoError(Exception):
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(code={self.code!r})"
+
+    def __reduce__(self) -> tuple[object, tuple[object, ...]]:
+        """Reconstruct copies and pickles from sanitized state only."""
+        return _reconstruct_error, (type(self), self.context, self.retry_after_ms)
 
 
 class ExchangeError(HmtCryptoError):

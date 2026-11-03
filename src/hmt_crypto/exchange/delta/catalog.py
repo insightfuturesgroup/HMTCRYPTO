@@ -39,6 +39,23 @@ class CatalogRefreshStatus(StrEnum):
 
 ProductFetcher = Callable[[], Awaitable[CatalogProductLoad]]
 
+_SAFE_REFRESH_ERROR_CODES = frozenset(
+    {
+        "auth_error",
+        "catalog_stale",
+        "catalog_unavailable",
+        "configuration_error",
+        "exchange_down",
+        "exchange_error",
+        "exchange_protocol_error",
+        "exchange_timeout",
+        "pagination_limit",
+        "rate_limit",
+        "signature_expired",
+        "unauthorized_api_access",
+    }
+)
+
 
 def _utc(value: object) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
@@ -329,7 +346,9 @@ class ProductCatalog:
         except (_CatalogValidationError, TypeError, ValueError):
             return self._failure(attempted_at=attempted_at, code="catalog_validation_failed")
         except HmtCryptoError as error:
-            return self._failure(attempted_at=attempted_at, code=error.code)
+            code = getattr(type(error), "_code", "")
+            safe_code = code if code in _SAFE_REFRESH_ERROR_CODES else "catalog_refresh_failed"
+            return self._failure(attempted_at=attempted_at, code=safe_code)
         except Exception:
             return self._failure(attempted_at=attempted_at, code="catalog_refresh_failed")
 

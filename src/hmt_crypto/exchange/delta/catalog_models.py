@@ -363,6 +363,8 @@ def _validated_candidate(
             product.quoting_asset,
             product.settling_asset,
         ):
+            if asset is None:
+                continue
             known = assets_by_id.get(asset.id)
             if known is not None and known != asset:
                 raise ValueError("conflicting asset metadata")

@@ -1,4 +1,4 @@
-"""Risk-critical reduce-only product metadata is required and strictly typed."""
+"""Risk-critical reduce-only product metadata is conservative and strictly typed."""
 
 from __future__ import annotations
 
@@ -18,14 +18,13 @@ pytestmark = pytest.mark.contract
     [
         ("missing_specs", None),
         ("wrong_specs", "fixture-secret-not-an-object"),
-        ("missing_flag", None),
         ("wrong_flag", 0),
         ("wrong_flag", 1),
         ("wrong_flag", "false"),
         ("wrong_flag", None),
     ],
 )
-def test_reduce_only_product_metadata_fails_closed_when_missing_or_not_boolean(
+def test_reduce_only_product_metadata_fails_closed_when_malformed(
     mutation: str,
     value: object,
 ) -> None:
@@ -35,8 +34,6 @@ def test_reduce_only_product_metadata_fails_closed_when_missing_or_not_boolean(
         product.pop("product_specs")
     elif mutation == "wrong_specs":
         product["product_specs"] = value
-    elif mutation == "missing_flag":
-        product["product_specs"].pop("only_reduce_only_orders_allowed")
     else:
         product["product_specs"]["only_reduce_only_orders_allowed"] = value
 
@@ -44,3 +41,29 @@ def test_reduce_only_product_metadata_fails_closed_when_missing_or_not_boolean(
         parse_product(product, endpoint_id="products")
     rendered = str(raised.value) + repr(raised.value) + json.dumps(raised.value.to_dict())
     assert "fixture-secret-not-an-object" not in rendered
+
+
+def test_missing_reduce_only_flag_is_synthesized_as_explicit_conservative_true() -> None:
+    payload = fixture_json("public_products_page1.json")
+    product = payload["result"][0]
+    product["product_specs"].pop("only_reduce_only_orders_allowed")
+
+    parsed = parse_product(product, endpoint_id="products")
+
+    assert parsed.only_reduce_only_orders_allowed is True
+    assert "only_reduce_only_orders_allowed" in parsed.model_fields_set
+
+
+def test_spot_product_represents_absent_settling_asset_without_derivative_inference() -> None:
+    payload = fixture_json("public_products_page1.json")
+    product = payload["result"][0]
+    product["contract_type"] = "spot"
+    product["settling_asset"] = None
+
+    parsed = parse_product(product, endpoint_id="products")
+
+    assert parsed.settling_asset is None
+
+    product["contract_type"] = "perpetual_futures"
+    with pytest.raises(ExchangeProtocolError):
+        parse_product(product, endpoint_id="products")

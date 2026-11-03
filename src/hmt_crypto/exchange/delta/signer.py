@@ -11,6 +11,7 @@ from typing import NoReturn, SupportsIndex
 from pydantic import SecretStr
 
 from hmt_crypto.errors import ConfigurationError
+from hmt_crypto.exchange.delta.http_headers import validate_user_agent
 
 EpochClock = Callable[[], int]
 
@@ -87,18 +88,6 @@ def _validate_api_key(value: object) -> _SecretSnapshot:
     if any(byte <= 0x20 or byte >= 0x7F for byte in encoded):
         raise _configuration_error("validate_delta_api_key")
     return secret
-
-
-def _validate_user_agent(value: object) -> str:
-    if not isinstance(value, str) or not value or value.strip() != value:
-        raise _configuration_error("validate_delta_user_agent")
-    try:
-        encoded = value.encode("ascii")
-    except UnicodeEncodeError:
-        raise _configuration_error("validate_delta_user_agent") from None
-    if any(byte < 0x20 or byte >= 0x7F for byte in encoded):
-        raise _configuration_error("validate_delta_user_agent")
-    return value
 
 
 def _validate_method(value: object) -> bytes:
@@ -266,7 +255,7 @@ class DeltaSigner:
             "_DeltaSigner__api_secret",
             _validate_secret(api_secret, operation="validate_delta_api_secret"),
         )
-        object.__setattr__(self, "_DeltaSigner__user_agent", _validate_user_agent(user_agent))
+        object.__setattr__(self, "_DeltaSigner__user_agent", validate_user_agent(user_agent))
         object.__setattr__(self, "_DeltaSigner__clock", clock)
 
     def sign_at(

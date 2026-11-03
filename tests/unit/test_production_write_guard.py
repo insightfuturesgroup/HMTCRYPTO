@@ -62,7 +62,7 @@ def test_redirect_cannot_forward_write_to_production() -> None:
 
 def test_guard_environment_is_forced_on() -> None:
     value = os.getenv("PRODUCTION_WRITES_FORBIDDEN")
-    assert value == "1"
+    assert value == "true"
 
 
 @pytest.mark.parametrize("scope", ["session", "package", "module", "class", "function"])

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from hmt_crypto.errors import ConfigurationError
+from hmt_crypto.errors import ConfigurationError, ExchangeDownError
 
 
 class _ClientLifecycle:
@@ -37,12 +37,20 @@ class _ClientLifecycle:
         try:
             await self._idle.wait()
             await self._close_callback()
-        finally:
+        except asyncio.CancelledError:
+            self._state = "close_failed"
+            raise
+        except Exception:
+            self._state = "close_failed"
+            raise ExchangeDownError(context={"operation": "public_client_close"}) from None
+        else:
             self._state = "closed"
 
     async def close(self) -> None:
         """Start close once and shield it from any individual closer's cancellation."""
-        if self._close_task is None:
+        if self._state == "closed":
+            return
+        if self._close_task is None or self._close_task.done():
             self._state = "closing"
             self._close_task = asyncio.create_task(self._finish_close())
         close_task = self._close_task

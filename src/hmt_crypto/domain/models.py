@@ -71,15 +71,21 @@ class Product(DomainModel):
     trading_status: TradingStatus
     underlying_asset: Asset
     quoting_asset: Asset
-    settling_asset: Asset
+    settling_asset: Asset | None
     is_quanto: StrictBool
     only_reduce_only_orders_allowed: StrictBool = False
-    position_size_limit: PositiveDecimal | None = None
-    position_notional_limit: PositiveDecimal | None = None
-    initial_margin: PositiveDecimal | None = None
-    maintenance_margin: PositiveDecimal | None = None
+    position_size_limit: NonNegativeDecimal | None = None
+    position_notional_limit: NonNegativeDecimal | None = None
+    initial_margin: NonNegativeDecimal | None = None
+    maintenance_margin: NonNegativeDecimal | None = None
     default_leverage: PositiveDecimal | None = None
-    max_leverage_notional: PositiveDecimal | None = None
+    max_leverage_notional: NonNegativeDecimal | None = None
+
+    @model_validator(mode="after")
+    def validate_settling_asset_applicability(self) -> Self:
+        if self.contract_type is not ContractType.SPOT and self.settling_asset is None:
+            raise ValueError("derivative products require a settling asset")
+        return self
 
 
 class Ticker(DomainModel):

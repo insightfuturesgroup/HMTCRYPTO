@@ -26,7 +26,7 @@ def pytest_configure(config: pytest.Config) -> None:
     """Guard before collection/fixture setup, until all fixture teardown is complete."""
     monkeypatch = pytest.MonkeyPatch()
     config.add_cleanup(monkeypatch.undo)
-    monkeypatch.setenv("PRODUCTION_WRITES_FORBIDDEN", "1")
+    monkeypatch.setenv("PRODUCTION_WRITES_FORBIDDEN", "true")
     sync_send = httpx.Client._send_single_request
     async_send = httpx.AsyncClient._send_single_request
 
