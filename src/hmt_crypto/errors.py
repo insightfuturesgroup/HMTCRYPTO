@@ -182,6 +182,13 @@ class ExchangeProtocolError(ExchangeError):
     _message = "Exchange protocol error"
 
 
+class PaginationLimitError(HmtCryptoError):
+    """A local pagination bound stopped a traversal before completion."""
+
+    _code = "pagination_limit"
+    _message = "Pagination safety limit reached"
+
+
 class AmbiguousExchangeResult(ExchangeError):
     """A write outcome cannot be established without reconciliation."""
 
@@ -206,6 +213,7 @@ __all__ = [
     "ExchangeTimeoutError",
     "HmtCryptoError",
     "OrderRejected",
+    "PaginationLimitError",
     "RateLimitError",
     "SignatureExpiredError",
     "UnauthorizedApiAccessError",
