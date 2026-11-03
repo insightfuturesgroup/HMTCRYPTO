@@ -229,3 +229,37 @@ def test_settings_cannot_be_mutated_to_bypass_live_gates() -> None:
         config.execution_mode = "LIVE"
     assert config.live_config_ready is False
     assert config.order_write_capable is False
+
+
+@pytest.mark.parametrize("source", ["constructor", "environment", "dotenv"])
+@pytest.mark.parametrize("failure", ["live_gate", "field", "unknown"])
+def test_structured_validation_errors_never_expose_sensitive_inputs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str, failure: str
+) -> None:
+    values = {
+        "EXECUTION_MODE": "LIVE",
+        "DELTA_LIVE_TRADING_ENABLED": "false",
+        "DELTA_LIVE_CONFIRMATION": CONFIRMATION,
+        "DELTA_INDIA_TESTNET_API_KEY": "error-test-api-key",
+        "DELTA_INDIA_TESTNET_API_SECRET": "error-test-api-secret",
+    }
+    if failure == "field":
+        values["DELTA_REGION"] = "error-test-api-key"
+    elif failure == "unknown":
+        values["DELTA_API_KEY"] = "error-test-api-key"
+        values["DELTA_API_SECRET"] = "error-test-api-secret"
+        values["DELTA_UNKNOWN"] = CONFIRMATION
+    with pytest.raises(ValidationError) as error:
+        if source == "constructor":
+            settings(**values)
+        elif source == "environment":
+            for name, value in values.items():
+                monkeypatch.setenv(name, value)
+            settings()
+        else:
+            path = tmp_path / ".env"
+            path.write_text("".join(f"{name}={value}\n" for name, value in values.items()))
+            Settings(_env_file=path)
+    for rendered in [str(error.value), str(error.value.errors()), error.value.json()]:
+        for sensitive in ["error-test-api-key", "error-test-api-secret", CONFIRMATION]:
+            assert sensitive not in rendered

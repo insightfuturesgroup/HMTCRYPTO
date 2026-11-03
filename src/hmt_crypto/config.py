@@ -2,9 +2,10 @@
 
 from enum import StrEnum
 from hashlib import sha256
-from typing import Any, Self
+from typing import Any, Self, cast
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, ModelWrapValidatorHandler, SecretStr, ValidationError, model_validator
+from pydantic_core import InitErrorDetails
 from pydantic_settings import (
     BaseSettings,
     EnvSettingsSource,
@@ -157,6 +158,25 @@ class Settings(BaseSettings):
             if key is None or secret is None:
                 raise ValueError("LIVE requires credentials in the selected slot")
         return self
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def redact_validation_error_inputs(
+        cls, values: Any, handler: ModelWrapValidatorHandler[Self]
+    ) -> Self:
+        """Keep raw source values out of every structured validation error.
+
+        Pydantic's hide_input_in_errors only protects the human-readable error.
+        Remove input payloads before rebuilding the exception so errors()/json()
+        cannot expose credentials, including from rejected or mistyped fields.
+        """
+        try:
+            return handler(values)
+        except ValidationError as error:
+            details = cast(list[InitErrorDetails], error.errors(include_input=False))
+            raise ValidationError.from_exception_data(
+                cls.__name__, details, hide_input=True
+            ) from None
 
     def safe_diagnostics(self) -> dict[str, str | None]:
         """Expose no credential material; hash only the API key, never the secret."""
