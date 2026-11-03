@@ -15,6 +15,8 @@ from pydantic import SecretStr
 FIXTURE_SECRET = "fixture-secret-7c9e-do-not-log"
 FIXTURE_SIGNATURE = "fixture-signature-a14d-do-not-log"
 REDACTED = "[REDACTED]"
+CAMEL_SENSITIVE_FIELDS = ("authToken", "SecretKey", "xAPIKey", "sessionToken")
+HARMLESS_FIELDS = ("monkey", "hockey", "tokenizer", "secretary", "keynote")
 
 
 def _redaction_api() -> Any:
@@ -65,6 +67,51 @@ def test_sensitive_fields_are_redacted_without_mutating_input(field_name: str) -
     assert result["symbol"] == "BTCUSD"
     assert source[field_name] == FIXTURE_SECRET
     assert FIXTURE_SECRET not in _rendered(result)
+
+
+@pytest.mark.parametrize("field_name", CAMEL_SENSITIVE_FIELDS)
+def test_camel_and_acronym_sensitive_fields_are_recursively_redacted(field_name: str) -> None:
+    api = _redaction_api()
+    source = {
+        "details": {
+            field_name: FIXTURE_SECRET,
+            **{name: f"safe-{name}" for name in HARMLESS_FIELDS},
+        }
+    }
+
+    result = api.redact(source)
+
+    assert result["details"][field_name] == REDACTED
+    for harmless in HARMLESS_FIELDS:
+        assert result["details"][harmless] == f"safe-{harmless}"
+    assert FIXTURE_SECRET not in _rendered(result)
+
+
+@pytest.mark.parametrize("json_output", [True, False], ids=["json", "console"])
+def test_structured_log_renderers_redact_camel_and_acronym_sensitive_fields(
+    json_output: bool,
+) -> None:
+    api = _logging_api()
+    stream = io.StringIO()
+    secrets = {
+        field_name: f"{FIXTURE_SECRET}-{index}"
+        for index, field_name in enumerate(CAMEL_SENSITIVE_FIELDS)
+    }
+    harmless = {name: f"safe-{name}" for name in HARMLESS_FIELDS}
+    api.configure_logging(json_output=json_output, stream=stream)
+
+    api.get_logger("exchange").info("camel_case_redaction", details={**secrets, **harmless})
+    rendered = stream.getvalue()
+
+    for secret in secrets.values():
+        assert secret not in rendered
+    for safe_value in harmless.values():
+        assert safe_value in rendered
+    assert REDACTED in rendered
+    if json_output:
+        event = json.loads(rendered)
+        for field_name in CAMEL_SENSITIVE_FIELDS:
+            assert event["details"][field_name] == REDACTED
 
 
 def test_nested_values_are_json_safe_and_never_render_secret_objects() -> None:

@@ -69,11 +69,15 @@ _SAFE_HEADER_NAMES = frozenset(
         "x-request-id",
     }
 )
+_ACRONYM_BOUNDARY = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NORMALIZE_NAME = re.compile(r"[^a-z0-9]+")
 
 
 def _normalized_name(name: str) -> tuple[str, str, tuple[str, ...]]:
-    normalized = _NORMALIZE_NAME.sub("_", name.casefold()).strip("_")
+    expanded = _ACRONYM_BOUNDARY.sub("_", name)
+    expanded = _CAMEL_BOUNDARY.sub("_", expanded)
+    normalized = _NORMALIZE_NAME.sub("_", expanded.casefold()).strip("_")
     compact = normalized.replace("_", "")
     return normalized, compact, tuple(part for part in normalized.split("_") if part)
 
