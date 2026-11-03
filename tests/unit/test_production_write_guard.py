@@ -65,25 +65,32 @@ def test_guard_environment_is_forced_on() -> None:
     assert value == "1"
 
 
+@pytest.mark.parametrize("scope", ["session", "package", "module", "class", "function"])
 @pytest.mark.parametrize("phase", ["setup", "teardown"])
-def test_guard_covers_session_fixture_lifetime(tmp_path: Path, phase: str) -> None:
+def test_guard_covers_fixture_lifetime(tmp_path: Path, phase: str, scope: str) -> None:
+    """Each child must reject its fixture write; an outer PASS proves no transport I/O."""
     conftest = Path(__file__).parents[1] / "conftest.py"
     (tmp_path / "conftest.py").write_text(conftest.read_text())
-    (tmp_path / "test_session_guard.py").write_text(
-        f'''import httpx
+    (tmp_path / "__init__.py").touch()
+    (tmp_path / "test_fixture_guard.py").write_text(
+        f'''from pathlib import Path
+
+import httpx
 import pytest
 
 
 def send_production_write():
     def transport(request):
+        Path("transport_reached").touch()
         pytest.fail("TRANSPORT_REACHED")
 
+    Path("attempted").write_text("{scope}:{phase}")
     with httpx.Client(transport=httpx.MockTransport(transport)) as client:
         client.post("https://api.india.delta.exchange/v2/orders")
 
 
-@pytest.fixture(scope="session", autouse=True)
-def session_resource():
+@pytest.fixture(scope="{scope}", autouse=True)
+def scoped_resource():
     if "{phase}" == "setup":
         send_production_write()
     yield
@@ -91,8 +98,9 @@ def session_resource():
         send_production_write()
 
 
-def test_session_resource():
-    pass
+class TestFixtureLifetime:
+    def test_body(self):
+        Path("test_body_ran").touch()
 '''
     )
     result = subprocess.run(
@@ -106,3 +114,6 @@ def test_session_resource():
     assert result.returncode == 1, result.stdout + result.stderr
     assert "Production Delta write forbidden" in result.stdout, result.stdout
     assert "TRANSPORT_REACHED" not in result.stdout, result.stdout
+    assert (tmp_path / "attempted").read_text() == f"{scope}:{phase}"
+    assert not (tmp_path / "transport_reached").exists()
+    assert (tmp_path / "test_body_ran").exists() == (phase == "teardown")
