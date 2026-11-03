@@ -26,6 +26,9 @@ class ProductState(StrEnum):
     """Catalogue lifecycle states retained independently from tradability."""
 
     LIVE = "live"
+    UPCOMING = "upcoming"
+    EXPIRED = "expired"
+    SETTLED = "settled"
     UNKNOWN = "unknown"
 
 
@@ -33,4 +36,6 @@ class TradingStatus(StrEnum):
     """Operational status needed by fail-closed market-data consumers."""
 
     OPERATIONAL = "operational"
+    DISRUPTED_CANCEL_ONLY = "disrupted_cancel_only"
+    DISRUPTED_POST_ONLY = "disrupted_post_only"
     UNKNOWN = "unknown"

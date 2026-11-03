@@ -1,0 +1,4 @@
+{
+  "success": false,
+  "error": {"code": "UnauthorizedApiAccess", "context": {"raw_body": "fixture-secret-error-body"}}
+}

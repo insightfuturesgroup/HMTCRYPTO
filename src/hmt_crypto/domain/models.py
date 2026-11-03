@@ -88,7 +88,9 @@ class Ticker(DomainModel):
     product_id: PositiveId
     symbol: NonEmptyText
     timestamp: UtcDateTime
-    product_trading_status: TradingStatus
+    contract_type: ContractType = ContractType.UNKNOWN
+    # REST ticker does not document trading status. Catalogue Product is authoritative.
+    product_trading_status: TradingStatus = TradingStatus.UNKNOWN
     mark_price: PositiveDecimal | None = None
     spot_price: PositiveDecimal | None = None
     close: PositiveDecimal | None = None

@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "result": {
+    "symbol": "XBTUSD_TEST",
+    "last_updated_at": 1700000000123456,
+    "buy": [
+      {"depth": "3", "price": "50000.0", "size": 3},
+      {"depth": "8", "price": "49999.5", "size": 5}
+    ],
+    "sell": [
+      {"depth": "4", "price": "50000.5", "size": 4},
+      {"depth": "10", "price": "50001.0", "size": 6}
+    ]
+  }
+}
