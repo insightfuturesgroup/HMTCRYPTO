@@ -1,0 +1,231 @@
+"""Configuration boundaries must fail closed and keep credentials private."""
+
+import hashlib
+import os
+from pathlib import Path
+from typing import Any
+
+import pytest
+from pydantic import SecretStr, ValidationError
+
+from hmt_crypto.config import Settings
+
+CONFIRMATION = "I_UNDERSTAND_THIS_CAN_PLACE_REAL_ORDERS"
+SLOTS = (
+    "DELTA_INDIA_TESTNET",
+    "DELTA_INDIA_PROD",
+    "DELTA_GLOBAL_TESTNET",
+    "DELTA_GLOBAL_PROD",
+)
+
+
+@pytest.fixture(autouse=True)
+def clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in os.environ:
+        if name.upper().startswith("DELTA_") or name.upper() == "EXECUTION_MODE":
+            monkeypatch.delenv(name)
+
+
+def settings(**kwargs: Any) -> Settings:
+    return Settings(_env_file=None, **kwargs)
+
+
+def arm(monkeypatch: pytest.MonkeyPatch, slot: str = "DELTA_INDIA_TESTNET") -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("DELTA_LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setenv("DELTA_LIVE_CONFIRMATION", CONFIRMATION)
+    monkeypatch.setenv(f"{slot}_API_KEY", "example-api-key")
+    monkeypatch.setenv(f"{slot}_API_SECRET", "example-api-secret")
+
+
+def test_defaults_are_paper_india_testnet_without_write_capability() -> None:
+    config = settings()
+    assert config.execution_mode.value == "PAPER"
+    assert config.delta_region.value == "india"
+    assert config.delta_env.value == "testnet"
+    assert config.live_config_ready is False
+    assert config.order_write_capable is False
+    assert config.selected_api_key is None
+    assert config.selected_api_secret is None
+
+
+@pytest.mark.parametrize(
+    ("region", "environment", "url", "slot"),
+    [
+        ("india", "prod", "https://api.india.delta.exchange", "DELTA_INDIA_PROD"),
+        ("india", "testnet", "https://cdn-ind.testnet.deltaex.org", "DELTA_INDIA_TESTNET"),
+        ("global", "prod", "https://api.delta.exchange", "DELTA_GLOBAL_PROD"),
+        ("global", "testnet", "https://testnet-api.delta.exchange", "DELTA_GLOBAL_TESTNET"),
+    ],
+)
+def test_endpoint_and_credentials_follow_selected_slot(
+    monkeypatch: pytest.MonkeyPatch, region: str, environment: str, url: str, slot: str
+) -> None:
+    monkeypatch.setenv("DELTA_REGION", region)
+    monkeypatch.setenv("DELTA_ENV", environment)
+    for index, candidate in enumerate(SLOTS):
+        monkeypatch.setenv(f"{candidate}_API_KEY", f"key-{index}")
+        monkeypatch.setenv(f"{candidate}_API_SECRET", f"secret-{index}")
+    config = settings()
+    assert config.rest_base_url == url
+    assert config.selected_credential_slot == slot
+    assert config.selected_api_key.get_secret_value() == f"key-{SLOTS.index(slot)}"
+    assert config.selected_api_secret.get_secret_value() == f"secret-{SLOTS.index(slot)}"
+    assert config.order_write_capable is False
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("EXECUTION_MODE", "live"), ("DELTA_REGION", "us"), ("DELTA_ENV", "production")],
+)
+def test_invalid_enum_values_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        settings()
+
+
+@pytest.mark.parametrize("name", ["DELTA_API_KEY", "DELTA_API_SECRET", "DELTA_TYPO"])
+def test_generic_or_unknown_delta_environment_keys_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv(name, "sensitive-input")
+    with pytest.raises(ValidationError) as error:
+        settings()
+    assert "sensitive-input" not in str(error.value)
+
+
+def test_unknown_constructor_fields_are_rejected() -> None:
+    with pytest.raises(ValidationError):
+        settings(unknown_option=True)
+
+
+@pytest.mark.parametrize("suffix", ["API_KEY", "API_SECRET"])
+@pytest.mark.parametrize("value", ["", "   ", "one-half"])
+def test_selected_partial_or_empty_credentials_are_invalid(
+    monkeypatch: pytest.MonkeyPatch, suffix: str, value: str
+) -> None:
+    monkeypatch.setenv(f"DELTA_INDIA_TESTNET_{suffix}", value)
+    with pytest.raises(ValidationError):
+        settings()
+
+
+@pytest.mark.parametrize("missing", ["KEY", "SECRET"])
+def test_live_cannot_borrow_credentials_from_another_slot(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    arm(monkeypatch, "DELTA_GLOBAL_PROD")
+    monkeypatch.setenv(f"DELTA_INDIA_TESTNET_API_{missing}", "selected-half")
+    with pytest.raises(ValidationError):
+        settings()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("DELTA_LIVE_TRADING_ENABLED", None),
+        ("DELTA_LIVE_TRADING_ENABLED", "false"),
+        ("DELTA_LIVE_CONFIRMATION", None),
+        ("DELTA_LIVE_CONFIRMATION", "yes"),
+        ("DELTA_LIVE_CONFIRMATION", CONFIRMATION.lower()),
+        ("DELTA_LIVE_CONFIRMATION", CONFIRMATION + " "),
+        ("DELTA_INDIA_TESTNET_API_KEY", None),
+        ("DELTA_INDIA_TESTNET_API_SECRET", None),
+    ],
+)
+def test_each_live_gate_is_required(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: str | None
+) -> None:
+    arm(monkeypatch)
+    if value is None:
+        monkeypatch.delenv(field)
+    else:
+        monkeypatch.setenv(field, value)
+    with pytest.raises(ValidationError):
+        settings()
+
+
+@pytest.mark.parametrize("region", ["india", "global"])
+@pytest.mark.parametrize("environment", ["testnet", "prod"])
+def test_armed_live_configuration_never_enables_phase_one_order_writes(
+    monkeypatch: pytest.MonkeyPatch, region: str, environment: str
+) -> None:
+    arm(monkeypatch, f"DELTA_{region.upper()}_{environment.upper()}")
+    monkeypatch.setenv("DELTA_REGION", region)
+    monkeypatch.setenv("DELTA_ENV", environment)
+    config = settings()
+    assert config.live_config_ready is True
+    assert config.order_write_capable is False
+
+
+@pytest.mark.parametrize("mode", ["PAPER", "BACKTEST"])
+def test_non_live_modes_remain_unarmed_even_with_all_gates(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    arm(monkeypatch)
+    monkeypatch.setenv("EXECUTION_MODE", mode)
+    config = settings()
+    assert config.live_config_ready is False
+    assert config.order_write_capable is False
+
+
+def test_secrets_are_redacted_and_diagnostics_only_expose_slot_and_key_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arm(monkeypatch)
+    config = settings()
+    assert isinstance(config.selected_api_key, SecretStr)
+    assert isinstance(config.selected_api_secret, SecretStr)
+    rendered = repr(config) + str(config.model_dump()) + config.model_dump_json()
+    for sensitive in ["example-api-key", "example-api-secret", CONFIRMATION]:
+        assert sensitive not in rendered
+    assert config.safe_diagnostics() == {
+        "credential_slot": "DELTA_INDIA_TESTNET",
+        "api_key_fingerprint": hashlib.sha256(b"example-api-key").hexdigest()[:12],
+    }
+
+
+def test_diagnostics_without_credentials_have_no_fingerprint() -> None:
+    assert settings().safe_diagnostics() == {
+        "credential_slot": "DELTA_INDIA_TESTNET",
+        "api_key_fingerprint": None,
+    }
+
+
+def test_live_requires_selected_credentials_even_when_other_slot_is_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arm(monkeypatch, "DELTA_GLOBAL_PROD")
+    with pytest.raises(ValidationError):
+        settings()
+
+
+@pytest.mark.parametrize("name", ["DELTA_API_KEY", "DELTA_API_SECRET", "DELTA_UNKNOWN"])
+def test_dotenv_rejects_generic_and_unknown_fields(tmp_path: Path, name: str) -> None:
+    path = tmp_path / ".env"
+    path.write_text(f"{name}=private-value\n")
+    with pytest.raises(ValidationError) as error:
+        Settings(_env_file=path)
+    assert "private-value" not in str(error.value)
+
+
+def test_dotenv_loads_selected_credentials(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_text(
+        "DELTA_REGION=global\nDELTA_ENV=prod\n"
+        "DELTA_GLOBAL_PROD_API_KEY=dotenv-key\n"
+        "DELTA_GLOBAL_PROD_API_SECRET=dotenv-secret\n"
+    )
+    config = Settings(_env_file=path)
+    assert config.rest_base_url == "https://api.delta.exchange"
+    assert config.selected_api_key.get_secret_value() == "dotenv-key"
+    assert config.selected_api_secret.get_secret_value() == "dotenv-secret"
+
+
+def test_settings_cannot_be_mutated_to_bypass_live_gates() -> None:
+    config = settings()
+    with pytest.raises(ValidationError):
+        config.execution_mode = "LIVE"
+    assert config.live_config_ready is False
+    assert config.order_write_capable is False
