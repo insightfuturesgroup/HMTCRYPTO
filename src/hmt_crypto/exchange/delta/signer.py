@@ -24,18 +24,62 @@ def _configuration_error(operation: str) -> ConfigurationError:
     return ConfigurationError(context={"operation": operation})
 
 
-def _validate_secret(value: object, *, operation: str) -> SecretStr:
+class _SecretSnapshot:
+    """Internally owned immutable text whose representations never reveal its value."""
+
+    __value: str
+    __slots__ = ("__value",)
+
+    def __init__(self, value: str) -> None:
+        object.__setattr__(self, "_SecretSnapshot__value", value)
+
+    def reveal(self) -> str:
+        """Reveal the value only at the cryptographic or transport boundary."""
+        return self.__value
+
+    def clone(self) -> _SecretSnapshot:
+        """Create a distinct immutable snapshot for a downstream auth object."""
+        return _SecretSnapshot(self.__value)
+
+    def __repr__(self) -> str:
+        return "_SecretSnapshot([REDACTED])"
+
+    __str__ = __repr__
+
+    def __setattr__(self, _name: str, _value: object) -> NoReturn:
+        raise AttributeError("Secret snapshots are immutable")
+
+    def __delattr__(self, _name: str) -> NoReturn:
+        raise AttributeError("Secret snapshots are immutable")
+
+    def __copy__(self) -> NoReturn:
+        raise TypeError("Secret snapshots cannot be copied")
+
+    def __deepcopy__(self, _memo: dict[int, object]) -> NoReturn:
+        raise TypeError("Secret snapshots cannot be copied")
+
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> NoReturn:
+        raise TypeError("Secret snapshots cannot be serialized")
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("Secret snapshots cannot be serialized")
+
+    def __getstate__(self) -> NoReturn:
+        raise TypeError("Secret snapshots cannot be serialized")
+
+
+def _validate_secret(value: object, *, operation: str) -> _SecretSnapshot:
     if not isinstance(value, SecretStr):
         raise _configuration_error(operation)
     raw = value.get_secret_value()
     if not raw or any(not character.isprintable() for character in raw):
         raise _configuration_error(operation)
-    return value
+    return _SecretSnapshot(raw)
 
 
-def _validate_api_key(value: object) -> SecretStr:
+def _validate_api_key(value: object) -> _SecretSnapshot:
     secret = _validate_secret(value, operation="validate_delta_api_key")
-    raw = secret.get_secret_value()
+    raw = secret.reveal()
     try:
         encoded = raw.encode("ascii")
     except UnicodeEncodeError:
@@ -137,23 +181,23 @@ def _validate_payload(value: object) -> bytes:
 class SignedAuthHeaders:
     """Immutable signed header material with one explicit raw transport boundary."""
 
-    __api_key: SecretStr
+    __api_key: _SecretSnapshot
     __timestamp: int
-    __signature: SecretStr
+    __signature: _SecretSnapshot
     __user_agent: str
     __slots__ = ("__api_key", "__signature", "__timestamp", "__user_agent")
 
     def __init__(
         self,
         *,
-        api_key: SecretStr,
+        api_key: _SecretSnapshot,
         timestamp: int,
-        signature: SecretStr,
+        signature: _SecretSnapshot,
         user_agent: str,
     ) -> None:
-        object.__setattr__(self, "_SignedAuthHeaders__api_key", api_key)
+        object.__setattr__(self, "_SignedAuthHeaders__api_key", api_key.clone())
         object.__setattr__(self, "_SignedAuthHeaders__timestamp", timestamp)
-        object.__setattr__(self, "_SignedAuthHeaders__signature", signature)
+        object.__setattr__(self, "_SignedAuthHeaders__signature", signature.clone())
         object.__setattr__(self, "_SignedAuthHeaders__user_agent", user_agent)
 
     @property
@@ -164,9 +208,9 @@ class SignedAuthHeaders:
     def as_headers(self) -> dict[str, str]:
         """Return a fresh raw header mapping solely for immediate HTTP dispatch."""
         return {
-            "api-key": self.__api_key.get_secret_value(),
+            "api-key": self.__api_key.reveal(),
             "timestamp": str(self.__timestamp),
-            "signature": self.__signature.get_secret_value(),
+            "signature": self.__signature.reveal(),
             "User-Agent": self.__user_agent,
         }
 
@@ -200,8 +244,8 @@ class SignedAuthHeaders:
 class DeltaSigner:
     """Hold Delta credentials safely and sign exact finalized request bytes."""
 
-    __api_key: SecretStr
-    __api_secret: SecretStr
+    __api_key: _SecretSnapshot
+    __api_secret: _SecretSnapshot
     __clock: EpochClock
     __user_agent: str
     __slots__ = ("__api_key", "__api_secret", "__clock", "__user_agent")
@@ -284,12 +328,12 @@ class DeltaSigner:
     ) -> SignedAuthHeaders:
         timestamp_bytes = str(timestamp).encode("ascii")
         prehash = method + timestamp_bytes + request_path + query_string + payload
-        secret = self.__api_secret.get_secret_value().encode("utf-8")
+        secret = self.__api_secret.reveal().encode("utf-8")
         signature = hmac.new(secret, prehash, hashlib.sha256).hexdigest()
         return SignedAuthHeaders(
             api_key=self.__api_key,
             timestamp=timestamp,
-            signature=SecretStr(signature),
+            signature=_SecretSnapshot(signature),
             user_agent=self.__user_agent,
         )
 

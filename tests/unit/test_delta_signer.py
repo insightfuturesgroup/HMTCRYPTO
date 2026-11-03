@@ -270,6 +270,75 @@ def test_signer_and_signed_header_internal_slots_are_immutable() -> None:
     assert signed.as_headers()["timestamp"] == "1700000000"
 
 
+def test_caller_api_key_mutation_cannot_change_existing_or_future_headers() -> None:
+    api = _api()
+    source_key = SecretStr(AUTH_KEY)
+    source_secret = SecretStr(AUTH_SECRET)
+    signer = api.DeltaSigner(
+        api_key=source_key,
+        api_secret=source_secret,
+        user_agent=USER_AGENT,
+        clock=lambda: 1_700_000_000,
+    )
+    existing = signer.sign_at("GET", 1_700_000_000, "/v2/profile")
+
+    source_key._secret_value = "caller-mutated-key"
+
+    future = signer.sign_at("GET", 1_700_000_000, "/v2/profile")
+    assert existing.as_headers()["api-key"] == AUTH_KEY
+    assert future.as_headers()["api-key"] == AUTH_KEY
+
+
+def test_caller_api_secret_mutation_cannot_change_future_hmac() -> None:
+    api = _api()
+    source_key = SecretStr(AUTH_KEY)
+    source_secret = SecretStr(AUTH_SECRET)
+    signer = api.DeltaSigner(
+        api_key=source_key,
+        api_secret=source_secret,
+        user_agent=USER_AGENT,
+        clock=lambda: 1_700_000_000,
+    )
+
+    source_secret._secret_value = "caller-mutated-secret"
+    signed = signer.sign_at("GET", 1_700_000_000, "/v2/profile")
+
+    assert (
+        signed.as_headers()["signature"]
+        == "49bc03fc21400e9fe3e5ca962379907510818ff9964da29870d0510f2eeaeb74"
+    )
+
+
+def test_credentials_are_independent_immutable_redacting_snapshots() -> None:
+    api = _api()
+    source_key = SecretStr(AUTH_KEY)
+    source_secret = SecretStr(AUTH_SECRET)
+    signer = api.DeltaSigner(
+        api_key=source_key,
+        api_secret=source_secret,
+        user_agent=USER_AGENT,
+        clock=lambda: 1_700_000_000,
+    )
+    signed = signer.sign_at("GET", 1_700_000_000, "/v2/profile")
+    signer_key = signer._DeltaSigner__api_key
+    signer_secret = signer._DeltaSigner__api_secret
+    header_key = signed._SignedAuthHeaders__api_key
+
+    assert signer_key is not source_key
+    assert signer_secret is not source_secret
+    assert header_key is not signer_key
+    assert AUTH_KEY not in f"{signer_key!s} {signer_key!r}"
+    assert AUTH_SECRET not in f"{signer_secret!s} {signer_secret!r}"
+    with pytest.raises(AttributeError):
+        signer_key._SecretSnapshot__value = "replacement"
+    with pytest.raises(AttributeError):
+        header_key._SecretSnapshot__value = "replacement"
+    with pytest.raises(TypeError):
+        pickle.dumps(signer_secret)
+
+    assert signed.as_headers()["api-key"] == AUTH_KEY
+
+
 def test_signer_and_signed_headers_never_render_auth_or_prehash() -> None:
     vector = _vectors()[1]
     signer = _signer()
