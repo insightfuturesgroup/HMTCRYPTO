@@ -14,7 +14,7 @@ from product_catalog_test_support import (
     FetchQueue,
     MutableClock,
     catalog_api,
-    complete_result,
+    complete_load,
     load_products,
     new_catalog,
 )
@@ -31,7 +31,7 @@ async def test_complete_load_publishes_exact_immutable_snapshot() -> None:
     api = catalog_api()
     products = load_products()
     clock = MutableClock()
-    catalog = new_catalog(FetchQueue(complete_result(products, page_count=2)), clock=clock)
+    catalog = new_catalog(FetchQueue(complete_load(products, page_count=2)), clock=clock)
 
     result = await catalog.refresh()
     snapshot = catalog.peek()
@@ -74,7 +74,7 @@ async def test_complete_load_publishes_exact_immutable_snapshot() -> None:
 async def test_id_symbol_and_asset_mappings_round_trip() -> None:
     api = catalog_api()
     products = load_products()
-    catalog = new_catalog(FetchQueue(complete_result(products)))
+    catalog = new_catalog(FetchQueue(complete_load(products)))
     await catalog.refresh()
     snapshot = catalog.require_snapshot(at=BASE_TIME)
 
@@ -96,7 +96,7 @@ async def test_id_symbol_and_asset_mappings_round_trip() -> None:
 @pytest.mark.asyncio
 async def test_snapshot_collections_and_identity_are_frozen() -> None:
     products = load_products()
-    catalog = new_catalog(FetchQueue(complete_result(products)))
+    catalog = new_catalog(FetchQueue(complete_load(products)))
     await catalog.refresh()
     snapshot = catalog.peek()
     assert snapshot is not None
@@ -120,7 +120,7 @@ async def test_snapshot_collections_and_identity_are_frozen() -> None:
 @pytest.mark.asyncio
 async def test_freshness_boundaries_and_require_snapshot_fail_closed() -> None:
     api = catalog_api()
-    catalog = new_catalog(FetchQueue(complete_result(load_products())), ttl_seconds=60)
+    catalog = new_catalog(FetchQueue(complete_load(load_products())), ttl_seconds=60)
 
     assert catalog.peek() is None
     with pytest.raises(api.CatalogUnavailableError):
@@ -147,7 +147,7 @@ async def test_mixed_product_families_remain_visible_but_venue_helper_is_narrow(
     api = catalog_api()
     base = load_products()
     mixed = load_products("products_catalog_mixed.json")
-    catalog = new_catalog(FetchQueue(complete_result(base + mixed)))
+    catalog = new_catalog(FetchQueue(complete_load(base + mixed)))
     await catalog.refresh()
     snapshot = catalog.require_snapshot(at=BASE_TIME)
 
@@ -170,18 +170,20 @@ async def test_mixed_product_families_remain_visible_but_venue_helper_is_narrow(
 @pytest.mark.asyncio
 async def test_hash_is_order_independent_source_aware_and_field_complete() -> None:
     products = load_products()
-    first = new_catalog(FetchQueue(complete_result(products)), region="india")
+    first = new_catalog(FetchQueue(complete_load(products)), region="india")
     reversed_catalog = new_catalog(
-        FetchQueue(complete_result(tuple(reversed(products)))), region="india"
+        FetchQueue(complete_load(tuple(reversed(products)))), region="india"
     )
-    global_catalog = new_catalog(FetchQueue(complete_result(products)), region="global")
+    global_catalog = new_catalog(
+        FetchQueue(complete_load(products, region="global")), region="global"
+    )
     prod_catalog = new_catalog(
-        FetchQueue(complete_result(products)), region="india", environment="prod"
+        FetchQueue(complete_load(products, environment="prod")),
+        region="india",
+        environment="prod",
     )
     changed_product = products[0].model_copy(update={"only_reduce_only_orders_allowed": True})
-    changed = new_catalog(
-        FetchQueue(complete_result((changed_product, products[1]))), region="india"
-    )
+    changed = new_catalog(FetchQueue(complete_load((changed_product, products[1]))), region="india")
 
     with localcontext() as context:
         context.prec = 2
@@ -210,8 +212,8 @@ async def test_hash_canonicalizes_numerically_equal_decimal_encodings() -> None:
             "default_leverage": Decimal("5E+1"),
         }
     )
-    canonical = new_catalog(FetchQueue(complete_result(products)))
-    reencoded = new_catalog(FetchQueue(complete_result((equivalent, products[1]))))
+    canonical = new_catalog(FetchQueue(complete_load(products)))
+    reencoded = new_catalog(FetchQueue(complete_load((equivalent, products[1]))))
 
     await canonical.refresh()
     await reencoded.refresh()
@@ -251,7 +253,7 @@ async def test_invalid_candidates_are_rejected_atomically(mutation: str) -> None
             update={"initial_margin": Decimal("0.01"), "maintenance_margin": Decimal("0.02")}
         )
 
-    catalog = new_catalog(FetchQueue(complete_result((first, second))))
+    catalog = new_catalog(FetchQueue(complete_load((first, second))))
     result = await catalog.refresh()
 
     assert result.status is catalog_api().CatalogRefreshStatus.UNAVAILABLE
@@ -278,7 +280,7 @@ async def test_model_copy_cannot_bypass_candidate_validation(mutation: str) -> N
         asset = product.underlying_asset.model_copy(update={"id": 0})
         product = product.model_copy(update={"underlying_asset": asset})
     products[0] = product
-    catalog = new_catalog(FetchQueue(complete_result(products)))
+    catalog = new_catalog(FetchQueue(complete_load(products)))
 
     result = await catalog.refresh()
 

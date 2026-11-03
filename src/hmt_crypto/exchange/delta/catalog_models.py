@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
@@ -14,6 +14,7 @@ from types import MappingProxyType
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion
 from hmt_crypto.domain import Asset, Product, ProductState, TradingStatus
 from hmt_crypto.errors import ProductNotFoundError
+from hmt_crypto.exchange.delta.paginator import PaginationResult
 
 
 def _utc(value: object) -> datetime:
@@ -30,9 +31,7 @@ class CatalogSource:
     environment: DeltaEnvironment
 
     def __post_init__(self) -> None:
-        if not isinstance(self.region, DeltaRegion) or not isinstance(
-            self.environment, DeltaEnvironment
-        ):
+        if type(self.region) is not DeltaRegion or type(self.environment) is not DeltaEnvironment:
             raise TypeError("catalogue source requires typed Delta selectors")
 
     def __repr__(self) -> str:
@@ -41,12 +40,56 @@ class CatalogSource:
         )
 
 
+def _is_exact_source(value: object) -> bool:
+    return (
+        type(value) is CatalogSource
+        and type(value.region) is DeltaRegion
+        and type(value.environment) is DeltaEnvironment
+    )
+
+
+@dataclass(frozen=True, slots=True, init=False, repr=False)
+class CatalogProductLoad:
+    """Immutable source provenance plus explicit paginator completion evidence."""
+
+    source: CatalogSource
+    pagination: PaginationResult[Product]
+
+    def __init__(
+        self,
+        *,
+        source: CatalogSource,
+        pagination: PaginationResult[Product],
+    ) -> None:
+        if not _is_exact_source(source):
+            raise TypeError("catalogue load source is invalid")
+        if type(pagination) is not PaginationResult:
+            raise TypeError("catalogue load pagination is invalid")
+        owned = PaginationResult[Product](
+            items=pagination.items,
+            page_count=pagination.page_count,
+            complete=pagination.complete,
+            truncated=pagination.truncated,
+            terminal_after=pagination.terminal_after,
+        )
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "pagination", owned)
+
+    def __repr__(self) -> str:
+        return (
+            "CatalogProductLoad("
+            f"source={self.source!r}, item_count={len(self.pagination.items)}, "
+            f"page_count={self.pagination.page_count}, complete={self.pagination.complete})"
+        )
+
+
 def venue_allows_new_orders(product: Product) -> bool:
     """Return only the venue-state gate, not overall sizing/risk eligibility."""
     if not isinstance(product, Product):
         raise TypeError("venue state requires a Product")
     return (
-        product.state is ProductState.LIVE
+        "only_reduce_only_orders_allowed" in product.model_fields_set
+        and product.state is ProductState.LIVE
         and product.trading_status is TradingStatus.OPERATIONAL
         and not product.only_reduce_only_orders_allowed
     )
@@ -72,46 +115,32 @@ class CatalogSnapshot:
         *,
         source: CatalogSource,
         revision: int,
-        content_sha256: str,
         fetched_at: datetime,
         validated_at: datetime,
-        fresh_until: datetime,
+        ttl: timedelta,
         products: Sequence[Product],
-        by_id: Mapping[int, Product],
-        by_symbol: Mapping[str, Product],
-        assets_by_id: Mapping[int, Asset],
     ) -> None:
-        if not isinstance(source, CatalogSource):
+        if type(source) is not CatalogSource:
             raise TypeError("snapshot source is invalid")
         if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
             raise ValueError("snapshot revision must be positive")
-        if (
-            type(content_sha256) is not str
-            or len(content_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in content_sha256)
-        ):
-            raise ValueError("snapshot content hash is invalid")
+        if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
+            raise ValueError("snapshot TTL must be positive")
         fetched = _utc(fetched_at)
         validated = _utc(validated_at)
-        fresh = _utc(fresh_until)
-        if fetched > validated or fresh <= validated:
+        if fetched > validated:
             raise ValueError("snapshot timestamps are inconsistent")
-        copied_products = tuple(products)
-        id_map = dict(by_id)
-        symbol_map = dict(by_symbol)
-        asset_map = dict(assets_by_id)
-        if not copied_products or any(not isinstance(item, Product) for item in copied_products):
-            raise ValueError("snapshot products are invalid")
-        if set(id_map) != {item.id for item in copied_products} or set(symbol_map) != {
-            item.symbol for item in copied_products
-        }:
-            raise ValueError("snapshot indexes are inconsistent")
-        if any(id_map[item.id] is not item for item in copied_products) or any(
-            symbol_map[item.symbol] is not item for item in copied_products
-        ):
-            raise ValueError("snapshot indexes must reference snapshot products")
-        if any(not isinstance(asset, Asset) or key != asset.id for key, asset in asset_map.items()):
-            raise ValueError("snapshot asset index is inconsistent")
+        try:
+            fresh = validated + ttl
+        except OverflowError:
+            raise ValueError("snapshot freshness overflows UTC time") from None
+        (
+            copied_products,
+            id_map,
+            symbol_map,
+            asset_map,
+            content_sha256,
+        ) = _validated_candidate(source=source, products=products)
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "revision", revision)
         object.__setattr__(self, "content_sha256", content_sha256)
@@ -132,7 +161,8 @@ class CatalogSnapshot:
 
     def is_fresh(self, at: datetime) -> bool:
         """Return whether this snapshot is fresh at an aware UTC instant."""
-        return _utc(at) <= self.fresh_until
+        checked_at = _utc(at)
+        return self.validated_at <= checked_at <= self.fresh_until
 
     def require_product_id(self, product_id: int) -> Product:
         """Return a product by numeric ID or raise a safe typed error."""
@@ -205,21 +235,29 @@ def _canonical_hash(source: CatalogSource, products: Sequence[Product]) -> str:
     return sha256(encoded).hexdigest()
 
 
-def build_snapshot(
+def _validated_candidate(
     *,
     source: CatalogSource,
-    revision: int,
     products: Sequence[Product],
-    fetched_at: datetime,
-    validated_at: datetime,
-    fresh_until: datetime,
-) -> CatalogSnapshot:
-    """Validate a full candidate and return an immutable snapshot."""
-    if not isinstance(source, CatalogSource):
+) -> tuple[
+    tuple[Product, ...],
+    dict[int, Product],
+    dict[str, Product],
+    dict[int, Asset],
+    str,
+]:
+    if type(source) is not CatalogSource:
         raise ValueError("catalogue source is invalid")
     copied = tuple(products)
-    if not copied or any(not isinstance(product, Product) for product in copied):
+    if not copied or any(type(product) is not Product for product in copied):
         raise ValueError("catalogue requires products")
+    for product in copied:
+        if "only_reduce_only_orders_allowed" not in product.model_fields_set:
+            raise ValueError("catalogue product lacks reduce-only provenance")
+        Product.model_validate(
+            product.model_dump(mode="python", warnings="none"),
+            strict=True,
+        )
     ordered = tuple(sorted(copied, key=lambda product: product.id))
     by_id: dict[int, Product] = {}
     by_symbol: dict[str, Product] = {}
@@ -228,10 +266,6 @@ def build_snapshot(
     asset_symbol_ids: dict[str, int] = {}
 
     for product in ordered:
-        Product.model_validate(
-            product.model_dump(mode="python", warnings="none"),
-            strict=True,
-        )
         if product.id in by_id or product.symbol in by_symbol:
             raise ValueError("duplicate product identity")
         folded_symbol = product.symbol.casefold()
@@ -261,23 +295,12 @@ def build_snapshot(
             assets_by_id[asset.id] = asset
             asset_symbol_ids[folded_asset] = asset.id
 
-    return CatalogSnapshot(
-        source=source,
-        revision=revision,
-        content_sha256=_canonical_hash(source, ordered),
-        fetched_at=fetched_at,
-        validated_at=validated_at,
-        fresh_until=fresh_until,
-        products=ordered,
-        by_id=by_id,
-        by_symbol=by_symbol,
-        assets_by_id=assets_by_id,
-    )
+    return ordered, by_id, by_symbol, assets_by_id, _canonical_hash(source, ordered)
 
 
 __all__ = [
+    "CatalogProductLoad",
     "CatalogSnapshot",
     "CatalogSource",
-    "build_snapshot",
     "venue_allows_new_orders",
 ]

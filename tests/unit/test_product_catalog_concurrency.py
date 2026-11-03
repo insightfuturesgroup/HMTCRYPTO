@@ -11,7 +11,7 @@ from product_catalog_test_support import (
     GatedFetch,
     MutableClock,
     catalog_api,
-    complete_result,
+    complete_load,
     load_products,
     new_catalog,
     settle,
@@ -23,7 +23,7 @@ pytestmark = pytest.mark.unit
 @pytest.mark.asyncio
 async def test_concurrent_refreshes_coalesce_and_share_one_result_object() -> None:
     products = load_products()
-    fetcher = GatedFetch(complete_result(products))
+    fetcher = GatedFetch(complete_load(products))
     catalog = new_catalog(fetcher)
 
     callers = [asyncio.create_task(catalog.refresh()) for _ in range(5)]
@@ -44,7 +44,7 @@ async def test_concurrent_refreshes_coalesce_and_share_one_result_object() -> No
 @pytest.mark.asyncio
 async def test_cancelling_one_waiter_does_not_cancel_shared_publication() -> None:
     products = load_products()
-    fetcher = GatedFetch(complete_result(products))
+    fetcher = GatedFetch(complete_load(products))
     catalog = new_catalog(fetcher)
 
     cancelled_waiter = asyncio.create_task(catalog.refresh())
@@ -87,7 +87,7 @@ class TwoStageFetch:
 async def test_readers_observe_only_complete_old_or_new_snapshots() -> None:
     products = load_products()
     changed = products[0].model_copy(update={"tick_size": products[0].tick_size * 2})
-    fetcher = TwoStageFetch(complete_result(products), complete_result((changed, products[1])))
+    fetcher = TwoStageFetch(complete_load(products), complete_load((changed, products[1])))
     catalog = new_catalog(fetcher)
     await catalog.refresh()
     old = catalog.peek()
@@ -111,7 +111,7 @@ async def test_readers_observe_only_complete_old_or_new_snapshots() -> None:
 @pytest.mark.asyncio
 async def test_finished_refresh_does_not_block_a_later_refresh() -> None:
     products = load_products()
-    fetcher = TwoStageFetch(complete_result(products), complete_result(products))
+    fetcher = TwoStageFetch(complete_load(products), complete_load(products))
     clock = MutableClock()
     catalog = new_catalog(fetcher, clock=clock)
     first = await catalog.refresh()
@@ -140,7 +140,7 @@ async def test_concurrent_failure_returns_one_safe_result_and_keeps_last_good() 
                 raise RuntimeError("FIXTURE-SECRET-CONCURRENT")
             return value
 
-    fetcher = FailingSecondFetch(complete_result(products), complete_result(products))
+    fetcher = FailingSecondFetch(complete_load(products), complete_load(products))
     catalog = new_catalog(fetcher)
     await catalog.refresh()
     old = catalog.peek()

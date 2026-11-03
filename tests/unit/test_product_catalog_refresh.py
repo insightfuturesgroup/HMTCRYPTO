@@ -14,15 +14,14 @@ from product_catalog_test_support import (
     MutableClock,
     SequenceClock,
     catalog_api,
-    complete_result,
+    complete_load,
     load_products,
     new_catalog,
-    truncated_result,
+    truncated_load,
 )
 
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion
 from hmt_crypto.errors import ExchangeDownError
-from hmt_crypto.exchange.delta.paginator import PaginationResult
 
 pytestmark = pytest.mark.unit
 
@@ -52,19 +51,15 @@ async def test_incomplete_or_empty_pagination_never_publishes(kind: str) -> None
     api = catalog_api()
     products = load_products()
     if kind == "empty":
-        result = complete_result(())
+        result = complete_load(())
     elif kind == "truncated":
-        result = truncated_result(products)
+        result = truncated_load(products)
     elif kind == "nonterminal":
-        result = object.__new__(PaginationResult)
-        object.__setattr__(result, "items", products)
-        object.__setattr__(result, "page_count", 1)
-        object.__setattr__(result, "complete", True)
-        object.__setattr__(result, "truncated", False)
-        object.__setattr__(result, "terminal_after", "still-more")
+        result = complete_load(products)
+        object.__setattr__(result.pagination, "terminal_after", "still-more")
     else:
-        result = complete_result(products)
-        object.__setattr__(result, "items", (products[0], "raw-payload"))
+        result = complete_load(products)
+        object.__setattr__(result.pagination, "items", (products[0], "raw-payload"))
 
     catalog = new_catalog(FetchQueue(result))
     refresh = await catalog.refresh()
@@ -80,8 +75,8 @@ async def test_terminal_cursor_requires_exact_null_or_missing_evidence() -> None
             return other is None
 
     products = load_products()
-    result = complete_result(products)
-    object.__setattr__(result, "terminal_after", NullLookalike())
+    result = complete_load(products)
+    object.__setattr__(result.pagination, "terminal_after", NullLookalike())
     catalog = new_catalog(FetchQueue(result))
 
     refresh = await catalog.refresh()
@@ -95,7 +90,7 @@ async def test_terminal_cursor_requires_exact_null_or_missing_evidence() -> None
 @pytest.mark.parametrize("terminal", [None, MISSING_AFTER])
 async def test_complete_null_or_missing_terminal_cursor_is_accepted(terminal: object) -> None:
     api = catalog_api()
-    catalog = new_catalog(FetchQueue(complete_result(load_products(), terminal_after=terminal)))
+    catalog = new_catalog(FetchQueue(complete_load(load_products(), terminal_after=terminal)))
     result = await catalog.refresh()
     assert result.status is api.CatalogRefreshStatus.PUBLISHED_CHANGED
     assert catalog.peek() is not None
@@ -107,8 +102,8 @@ async def test_bad_refresh_preserves_exact_last_good_and_expiry() -> None:
     clock = MutableClock()
     products = load_products()
     fetcher = FetchQueue(
-        complete_result(products),
-        truncated_result(products),
+        complete_load(products),
+        truncated_load(products),
         ExchangeDownError(context={"operation": "products"}),
     )
     catalog = new_catalog(fetcher, clock=clock, ttl_seconds=60)
@@ -137,7 +132,7 @@ async def test_successful_unchanged_refresh_renews_revision_and_freshness() -> N
     clock = MutableClock()
     products = load_products()
     catalog = new_catalog(
-        FetchQueue(complete_result(products), complete_result(tuple(reversed(products)))),
+        FetchQueue(complete_load(products), complete_load(tuple(reversed(products)))),
         clock=clock,
         ttl_seconds=60,
     )
@@ -163,7 +158,7 @@ async def test_changed_refresh_increments_revision_and_changes_hash() -> None:
     products = load_products()
     changed = products[0].model_copy(update={"tick_size": products[0].tick_size * 2})
     catalog = new_catalog(
-        FetchQueue(complete_result(products), complete_result((changed, products[1])))
+        FetchQueue(complete_load(products), complete_load((changed, products[1])))
     )
     await catalog.refresh()
     first = catalog.peek()
@@ -199,7 +194,7 @@ async def test_initial_failures_normalize_without_leaking(failure: BaseException
 
 @pytest.mark.asyncio
 async def test_fetcher_cancelled_error_propagates_and_never_publishes() -> None:
-    async def cancelled() -> PaginationResult[object]:
+    async def cancelled() -> object:
         raise asyncio.CancelledError
 
     catalog = new_catalog(cancelled)  # type: ignore[arg-type]
@@ -236,7 +231,7 @@ async def test_clock_evidence_must_be_aware_and_monotonic(
     times: tuple[datetime, datetime, datetime],
 ) -> None:
     api = catalog_api()
-    catalog = new_catalog(FetchQueue(complete_result(load_products())), clock=SequenceClock(*times))
+    catalog = new_catalog(FetchQueue(complete_load(load_products())), clock=SequenceClock(*times))
     result = await catalog.refresh()
     assert result.status is api.CatalogRefreshStatus.UNAVAILABLE
     assert result.safe_error_code == "catalog_clock_invalid"
@@ -248,7 +243,7 @@ async def test_unexpected_clock_failure_is_normalized_safely() -> None:
     def broken_clock() -> datetime:
         raise RuntimeError("FIXTURE-SECRET-CLOCK")
 
-    catalog = new_catalog(FetchQueue(complete_result(load_products())), clock=broken_clock)
+    catalog = new_catalog(FetchQueue(complete_load(load_products())), clock=broken_clock)
 
     result = await catalog.refresh()
 
@@ -269,8 +264,8 @@ def test_ttl_is_a_strictly_positive_timedelta(ttl: object) -> None:
         environment=DeltaEnvironment.TESTNET,
     )
 
-    async def fetch() -> PaginationResult[object]:
-        return complete_result(())  # type: ignore[arg-type]
+    async def fetch() -> object:
+        return complete_load(())
 
     with pytest.raises((TypeError, ValueError)):
         api.ProductCatalog(source=source, fetch_products=fetch, ttl=ttl, clock=MutableClock())

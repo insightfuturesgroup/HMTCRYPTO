@@ -15,14 +15,14 @@ from hmt_crypto.errors import (
     StaleCatalogError,
 )
 from hmt_crypto.exchange.delta.catalog_models import (
+    CatalogProductLoad,
     CatalogSnapshot,
     CatalogSource,
-    build_snapshot,
+    _is_exact_source,
     venue_allows_new_orders,
 )
 from hmt_crypto.exchange.delta.paginator import MISSING_AFTER, PaginationResult
 
-ProductFetcher = Callable[[], Awaitable[PaginationResult[Product]]]
 UtcClock = Callable[[], datetime]
 
 
@@ -33,6 +33,9 @@ class CatalogRefreshStatus(StrEnum):
     PUBLISHED_UNCHANGED = "published_unchanged"
     RETAINED_LAST_GOOD = "retained_last_good"
     UNAVAILABLE = "unavailable"
+
+
+ProductFetcher = Callable[[], Awaitable[CatalogProductLoad]]
 
 
 def _utc(value: object) -> datetime:
@@ -144,6 +147,10 @@ class _CatalogClockError(Exception):
     pass
 
 
+class _CatalogSourceError(Exception):
+    pass
+
+
 class ProductCatalog:
     """Refresh and atomically publish one source-scoped in-memory catalogue."""
 
@@ -155,7 +162,7 @@ class ProductCatalog:
         ttl: timedelta,
         clock: UtcClock,
     ) -> None:
-        if not isinstance(source, CatalogSource):
+        if not _is_exact_source(source):
             raise TypeError("source must be CatalogSource")
         if not callable(fetch_products) or not callable(clock):
             raise TypeError("catalogue fetcher and clock must be callable")
@@ -224,16 +231,25 @@ class ProductCatalog:
         except Exception:
             raise _CatalogClockError from None
 
-    @staticmethod
-    def _validate_page(result: object) -> tuple[Product, ...]:
-        if not isinstance(result, PaginationResult):
+    def _validate_load(self, result: object) -> tuple[Product, ...]:
+        if type(result) is not CatalogProductLoad:
+            raise _CatalogValidationError
+        source = result.source
+        if (
+            not _is_exact_source(source)
+            or source.region is not self._source.region
+            or source.environment is not self._source.environment
+        ):
+            raise _CatalogSourceError
+        page = result.pagination
+        if type(page) is not PaginationResult:
             raise _CatalogValidationError
         try:
-            page_count = result.page_count
-            complete = result.complete
-            truncated = result.truncated
-            terminal = result.terminal_after
-            items = tuple(result.items)
+            page_count = page.page_count
+            complete = page.complete
+            truncated = page.truncated
+            terminal = page.terminal_after
+            items = tuple(page.items)
         except (AttributeError, TypeError):
             raise _CatalogValidationError from None
         if (
@@ -282,27 +298,30 @@ class ProductCatalog:
         try:
             raw_result = await self._fetch_products()
             fetched_at = self._now()
-            products = self._validate_page(raw_result)
+            products = self._validate_load(raw_result)
             validated_at = self._now()
-            if attempted_at > fetched_at or fetched_at > validated_at:
+            active = self._active
+            if (
+                attempted_at > fetched_at
+                or fetched_at > validated_at
+                or (active is not None and attempted_at < active.validated_at)
+            ):
                 raise _CatalogClockError
-            try:
-                fresh_until = validated_at + self._ttl
-            except OverflowError:
-                raise _CatalogClockError from None
             revision = 1 if self._active is None else self._active.revision + 1
-            snapshot = build_snapshot(
+            snapshot = CatalogSnapshot(
                 source=self._source,
                 revision=revision,
                 products=products,
                 fetched_at=fetched_at,
                 validated_at=validated_at,
-                fresh_until=fresh_until,
+                ttl=self._ttl,
             )
         except asyncio.CancelledError:
             raise
         except _CatalogClockError:
             return self._failure(attempted_at=attempted_at, code="catalog_clock_invalid")
+        except _CatalogSourceError:
+            return self._failure(attempted_at=attempted_at, code="catalog_source_mismatch")
         except (_CatalogValidationError, TypeError, ValueError):
             return self._failure(attempted_at=attempted_at, code="catalog_validation_failed")
         except HmtCryptoError as error:
@@ -323,6 +342,7 @@ class ProductCatalog:
 __all__ = [
     "CatalogRefreshResult",
     "CatalogRefreshStatus",
+    "CatalogProductLoad",
     "CatalogSnapshot",
     "CatalogSource",
     "ProductCatalog",

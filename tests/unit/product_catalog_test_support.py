@@ -13,7 +13,9 @@ from typing import Any
 
 import pytest
 
+from hmt_crypto.config import DeltaEnvironment, DeltaRegion
 from hmt_crypto.domain import Product
+from hmt_crypto.exchange.delta.catalog import CatalogProductLoad, CatalogSource
 from hmt_crypto.exchange.delta.paginator import MISSING_AFTER, PaginationResult
 from hmt_crypto.exchange.delta.wire_schemas import parse_product
 
@@ -29,6 +31,7 @@ def catalog_api() -> SimpleNamespace:
     except (AttributeError, ImportError, ModuleNotFoundError):
         pytest.fail("Delta product-catalogue API is missing", pytrace=False)
     names = (
+        "CatalogProductLoad",
         "CatalogRefreshResult",
         "CatalogRefreshStatus",
         "CatalogSnapshot",
@@ -80,6 +83,55 @@ def truncated_result(products: Sequence[Product]) -> PaginationResult[Product]:
     )
 
 
+def catalog_source(
+    region: str = "india",
+    environment: str = "testnet",
+) -> CatalogSource:
+    """Build one exact typed catalogue source."""
+    return CatalogSource(
+        region=DeltaRegion(region),
+        environment=DeltaEnvironment(environment),
+    )
+
+
+def product_load(
+    pagination: PaginationResult[Product],
+    *,
+    region: str = "india",
+    environment: str = "testnet",
+) -> CatalogProductLoad:
+    """Bind paginator evidence to exact source provenance."""
+    return CatalogProductLoad(
+        source=catalog_source(region, environment),
+        pagination=pagination,
+    )
+
+
+def complete_load(
+    products: Sequence[Product],
+    *,
+    page_count: int = 1,
+    terminal_after: object = None,
+    region: str = "india",
+    environment: str = "testnet",
+) -> CatalogProductLoad:
+    """Build a complete source-bearing catalogue load."""
+    return product_load(
+        complete_result(
+            products,
+            page_count=page_count,
+            terminal_after=terminal_after,
+        ),
+        region=region,
+        environment=environment,
+    )
+
+
+def truncated_load(products: Sequence[Product]) -> CatalogProductLoad:
+    """Build an explicitly truncated source-bearing catalogue load."""
+    return product_load(truncated_result(products))
+
+
 class MutableClock:
     """UTC clock controlled by a test."""
 
@@ -127,13 +179,13 @@ class FetchQueue:
 class GatedFetch:
     """One fetch operation whose completion is released explicitly."""
 
-    def __init__(self, result: PaginationResult[Product]) -> None:
+    def __init__(self, result: CatalogProductLoad) -> None:
         self.result = result
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.calls = 0
 
-    async def __call__(self) -> PaginationResult[Product]:
+    async def __call__(self) -> CatalogProductLoad:
         self.calls += 1
         self.started.set()
         await self.release.wait()
@@ -147,7 +199,7 @@ async def settle() -> None:
 
 
 def new_catalog(
-    fetcher: Callable[[], Awaitable[PaginationResult[Product]]],
+    fetcher: Callable[[], Awaitable[CatalogProductLoad]],
     *,
     clock: Callable[[], datetime] | None = None,
     region: str = "india",
@@ -158,11 +210,7 @@ def new_catalog(
     api = catalog_api()
     from datetime import timedelta
 
-    from hmt_crypto.config import DeltaEnvironment, DeltaRegion
-
-    source = api.CatalogSource(
-        region=DeltaRegion(region), environment=DeltaEnvironment(environment)
-    )
+    source = catalog_source(region, environment)
     return api.ProductCatalog(
         source=source,
         fetch_products=fetcher,
@@ -178,10 +226,14 @@ __all__ = [
     "MISSING_AFTER",
     "MutableClock",
     "SequenceClock",
+    "catalog_source",
     "catalog_api",
+    "complete_load",
     "complete_result",
     "load_products",
     "new_catalog",
+    "product_load",
     "settle",
     "truncated_result",
+    "truncated_load",
 ]
