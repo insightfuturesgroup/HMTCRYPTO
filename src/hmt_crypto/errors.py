@@ -224,11 +224,19 @@ class UnsupportedProductError(HmtCryptoError):
     _message = "Product model is unsupported"
 
 
+class ContractSizingError(HmtCryptoError):
+    """A contract conversion or price quantization failed closed."""
+
+    _code = "contract_sizing"
+    _message = "Contract sizing failed"
+
+
 __all__ = [
     "AmbiguousExchangeResult",
     "AuthError",
     "CatalogUnavailableError",
     "ConfigurationError",
+    "ContractSizingError",
     "ExchangeDownError",
     "ExchangeError",
     "ExchangeProtocolError",
