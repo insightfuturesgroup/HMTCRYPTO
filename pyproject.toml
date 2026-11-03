@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hmt-crypto"
+version = "0.1.0"
+description = "Safety-first Delta Exchange research and paper trading core"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1,<0.29",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "structlog>=24.4,<27",
+    "typer>=0.15,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2,<2",
+    "hypothesis>=6.120,<7",
+    "mypy>=1.14,<2",
+    "pytest>=8.3,<10",
+    "pytest-asyncio>=1.0,<2",
+    "respx>=0.22,<0.23",
+    "ruff>=0.9,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hmt_crypto"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "unit: isolated behavior with no external services",
+    "contract: sanitized exchange payload and protocol contracts",
+    "integration: external service integration",
+    "testnet: Delta testnet checks",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+# Keep the Phase 0 prose baseline outside Python formatting gates.
+[tool.ruff.format]
+exclude = ["*.md"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+files = ["src"]
