@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 
+from hmt_crypto.domain import Ticker
 from hmt_crypto.errors import ContractSizingError
+from hmt_crypto.exchange.delta.catalog_models import CatalogSource, _clone_source
 from hmt_crypto.exchange.delta.sizing_math import (
     NumericContractError,
     add,
@@ -45,6 +47,51 @@ class SizingUnit(StrEnum):
 
 def _fail(operation: str) -> ContractSizingError:
     return ContractSizingError(context={"operation": operation})
+
+
+def _clone_ticker(value: object) -> Ticker:
+    if type(value) is not Ticker:
+        raise ValueError
+    fields_set = frozenset(value.model_fields_set)
+    if not fields_set <= Ticker.model_fields.keys():
+        raise ValueError
+    payload = value.model_dump(mode="python", include=set(fields_set), warnings="none")
+    cloned = Ticker.model_validate(payload, strict=True)
+    if frozenset(cloned.model_fields_set) != fields_set:
+        raise ValueError
+    return cloned
+
+
+@dataclass(frozen=True, slots=True, init=False, repr=False)
+class SourceBoundTicker:
+    """Owned ticker evidence tied to one exact Delta region/environment."""
+
+    source: CatalogSource
+    ticker: Ticker
+
+    def __init__(self, *, source: CatalogSource, ticker: Ticker) -> None:
+        try:
+            owned_source = _clone_source(source)
+            owned_ticker = _clone_ticker(ticker)
+        except Exception:
+            raise _fail("source_bound_ticker") from None
+        object.__setattr__(self, "source", owned_source)
+        object.__setattr__(self, "ticker", owned_ticker)
+
+    def __repr__(self) -> str:
+        return (
+            "SourceBoundTicker("
+            f"region={self.source.region.value!r}, "
+            f"environment={self.source.environment.value!r}, "
+            f"product_id={self.ticker.product_id})"
+        )
+
+    def source_evidence(self) -> dict[str, str]:
+        """Return isolated scalar source identity for audit logging."""
+        return {
+            "region": self.source.region.value,
+            "environment": self.source.environment.value,
+        }
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -156,4 +203,5 @@ __all__ = [
     "PriceBasis",
     "PriceQuantization",
     "SizingUnit",
+    "SourceBoundTicker",
 ]

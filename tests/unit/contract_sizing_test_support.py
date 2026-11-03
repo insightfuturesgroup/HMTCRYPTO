@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -20,7 +21,13 @@ from hmt_crypto.domain import (
     Ticker,
     TradingStatus,
 )
-from hmt_crypto.exchange.delta.catalog import CatalogSnapshot, CatalogSource
+from hmt_crypto.exchange.delta.catalog import (
+    CatalogProductLoad,
+    CatalogSnapshot,
+    CatalogSource,
+    ProductCatalog,
+)
+from hmt_crypto.exchange.delta.paginator import PaginationResult
 
 BASE_TIME = datetime(2026, 11, 3, 10, 0, tzinfo=UTC)
 
@@ -40,6 +47,7 @@ def sizing_api() -> SimpleNamespace:
         "PriceBasis",
         "PriceQuantization",
         "SizingUnit",
+        "SourceBoundTicker",
     )
     if any(not hasattr(module, name) for name in names):
         pytest.fail("Delta contract-sizing API is missing", pytrace=False)
@@ -87,7 +95,46 @@ def make_snapshot(
     validated_at: datetime = BASE_TIME,
     ttl: timedelta = timedelta(minutes=5),
 ) -> CatalogSnapshot:
-    """Publish one real immutable snapshot using synthetic metadata only."""
+    """Publish one snapshot through the real ProductCatalog refresh path."""
+    source = CatalogSource(region=region, environment=environment)
+    selected = product or make_product()
+
+    async def fetch_products() -> CatalogProductLoad:
+        return CatalogProductLoad(
+            source=source,
+            pagination=PaginationResult(
+                items=(selected,),
+                page_count=1,
+                complete=True,
+                truncated=False,
+                terminal_after=None,
+            ),
+        )
+
+    async def publish() -> CatalogSnapshot:
+        catalog = ProductCatalog(
+            source=source,
+            fetch_products=fetch_products,
+            ttl=ttl,
+            clock=lambda: validated_at,
+        )
+        await catalog.refresh()
+        snapshot = catalog.peek()
+        assert snapshot is not None
+        return snapshot
+
+    return asyncio.run(publish())
+
+
+def make_unpublished_snapshot(
+    product: Product | None = None,
+    *,
+    region: DeltaRegion = DeltaRegion.INDIA,
+    environment: DeltaEnvironment = DeltaEnvironment.TESTNET,
+    validated_at: datetime = BASE_TIME,
+    ttl: timedelta = timedelta(minutes=5),
+) -> CatalogSnapshot:
+    """Construct a valid-shaped snapshot without ProductCatalog publication."""
     return CatalogSnapshot(
         source=CatalogSource(region=region, environment=environment),
         revision=7,
@@ -113,6 +160,22 @@ def make_ticker(**updates: Any) -> Ticker:
     }
     values.update(updates)
     return Ticker.model_validate(values, strict=True)
+
+
+def make_ticker_evidence(
+    *,
+    region: DeltaRegion = DeltaRegion.INDIA,
+    environment: DeltaEnvironment = DeltaEnvironment.TESTNET,
+    ticker: Ticker | None = None,
+    **ticker_updates: Any,
+) -> Any:
+    """Own a synthetic ticker with explicit region/environment evidence."""
+    api = sizing_api()
+    selected = ticker or make_ticker(**ticker_updates)
+    return api.SourceBoundTicker(
+        source=CatalogSource(region=region, environment=environment),
+        ticker=selected,
+    )
 
 
 def make_registry(
@@ -148,6 +211,8 @@ __all__ = [
     "make_registry",
     "make_snapshot",
     "make_ticker",
+    "make_ticker_evidence",
+    "make_unpublished_snapshot",
     "resolve",
     "sizing_api",
 ]

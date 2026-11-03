@@ -19,6 +19,7 @@ def test_sizing_types_are_available_from_the_delta_public_package() -> None:
     assert delta.LinearContractSizer is api.LinearContractSizer
     assert delta.ContractConversion is api.ContractConversion
     assert delta.PriceQuantization is api.PriceQuantization
+    assert delta.SourceBoundTicker is api.SourceBoundTicker
 
 
 def test_known_linear_vectors_and_limits_are_not_misused() -> None:

@@ -5,13 +5,17 @@ from __future__ import annotations
 from datetime import datetime
 
 from hmt_crypto.exchange.delta.catalog import CatalogSnapshot, CatalogSource
-from hmt_crypto.exchange.delta.sizing_linear import LinearContractSizer
+from hmt_crypto.exchange.delta.sizing_linear import (
+    LinearContractSizer,
+    _issue_linear_contract_sizer,
+)
 from hmt_crypto.exchange.delta.sizing_models import (
     ContractConversion,
     ContractRounding,
     PriceBasis,
     PriceQuantization,
     SizingUnit,
+    SourceBoundTicker,
 )
 from hmt_crypto.exchange.delta.sizing_validation import (
     clone_source,
@@ -63,7 +67,7 @@ class ContractSizerRegistry:
             checked_at=checked,
             risk_increasing=risk_increasing,
         )
-        return LinearContractSizer(resolved)
+        return _issue_linear_contract_sizer(resolved)
 
 
 __all__ = [
@@ -74,4 +78,5 @@ __all__ = [
     "PriceBasis",
     "PriceQuantization",
     "SizingUnit",
+    "SourceBoundTicker",
 ]

@@ -11,7 +11,7 @@ from contract_sizing_test_support import (
     make_product,
     make_registry,
     make_snapshot,
-    make_ticker,
+    make_ticker_evidence,
     resolve,
     sizing_api,
 )
@@ -202,7 +202,7 @@ def test_sizer_owns_a_product_clone_and_exposes_only_safe_audit_evidence() -> No
     assert evidence == {
         "region": "india",
         "environment": "testnet",
-        "catalog_revision": 7,
+        "catalog_revision": 1,
         "catalog_content_sha256": original_hash,
         "product_id": 1001,
         "risk_increasing": True,
@@ -211,7 +211,7 @@ def test_sizer_owns_a_product_clone_and_exposes_only_safe_audit_evidence() -> No
     rendered = repr(sizer)
     assert "region='india'" in rendered
     assert "environment='testnet'" in rendered
-    assert "catalog_revision=7" in rendered
+    assert "catalog_revision=1" in rendered
     assert original_hash in rendered
     assert "product_id=1001" in rendered
     assert "Product(" not in rendered
@@ -235,7 +235,7 @@ def test_fresh_price_selection_requires_an_explicit_basis(
 ) -> None:
     api = sizing_api()
     selected = resolve().select_fresh_price(
-        make_ticker(),
+        make_ticker_evidence(),
         basis=getattr(api.PriceBasis, basis_name),
         checked_at=BASE_TIME,
         max_age=timedelta(seconds=1),
@@ -244,7 +244,7 @@ def test_fresh_price_selection_requires_an_explicit_basis(
 
     with pytest.raises(api.ContractSizingError):
         resolve().select_fresh_price(
-            make_ticker(),
+            make_ticker_evidence(),
             basis="mark",
             checked_at=BASE_TIME,
             max_age=timedelta(seconds=1),
@@ -254,7 +254,7 @@ def test_fresh_price_selection_requires_an_explicit_basis(
 def test_price_selection_never_falls_back_and_close_is_reference_only() -> None:
     api = sizing_api()
     sizer = resolve()
-    ticker = make_ticker(mark_price=None, close=Decimal("49990"))
+    ticker = make_ticker_evidence(mark_price=None, close=Decimal("49990"))
 
     with pytest.raises(api.ContractSizingError):
         sizer.select_fresh_price(
@@ -276,7 +276,7 @@ def test_price_selection_validates_identity_status_and_time_boundaries() -> None
     sizer = resolve()
     max_age = timedelta(seconds=5)
 
-    boundary = make_ticker(timestamp=BASE_TIME - max_age)
+    boundary = make_ticker_evidence(timestamp=BASE_TIME - max_age)
     assert sizer.select_fresh_price(
         boundary,
         basis=api.PriceBasis.MARK,
@@ -285,12 +285,12 @@ def test_price_selection_validates_identity_status_and_time_boundaries() -> None
     ) == Decimal("50000")
 
     invalid_tickers = (
-        make_ticker(product_id=999),
-        make_ticker(symbol="OTHER"),
-        make_ticker(timestamp=BASE_TIME + timedelta(microseconds=1)),
-        make_ticker(timestamp=BASE_TIME - max_age - timedelta(microseconds=1)),
-        make_ticker(product_trading_status=TradingStatus.DISRUPTED_CANCEL_ONLY),
-        make_ticker(product_trading_status=TradingStatus.DISRUPTED_POST_ONLY),
+        make_ticker_evidence(product_id=999),
+        make_ticker_evidence(symbol="OTHER"),
+        make_ticker_evidence(timestamp=BASE_TIME + timedelta(microseconds=1)),
+        make_ticker_evidence(timestamp=BASE_TIME - max_age - timedelta(microseconds=1)),
+        make_ticker_evidence(product_trading_status=TradingStatus.DISRUPTED_CANCEL_ONLY),
+        make_ticker_evidence(product_trading_status=TradingStatus.DISRUPTED_POST_ONLY),
     )
     for ticker in invalid_tickers:
         with pytest.raises(api.ContractSizingError):
@@ -303,13 +303,13 @@ def test_price_selection_validates_identity_status_and_time_boundaries() -> None
 
     # UNKNOWN is documented for REST and catalogue status remains authoritative.
     assert sizer.select_fresh_price(
-        make_ticker(product_trading_status=TradingStatus.UNKNOWN),
+        make_ticker_evidence(product_trading_status=TradingStatus.UNKNOWN),
         basis=api.PriceBasis.MARK,
         checked_at=BASE_TIME,
         max_age=max_age,
     ) == Decimal("50000")
     assert sizer.select_fresh_price(
-        make_ticker(product_trading_status=TradingStatus.OPERATIONAL),
+        make_ticker_evidence(product_trading_status=TradingStatus.OPERATIONAL),
         basis=api.PriceBasis.MARK,
         checked_at=BASE_TIME,
         max_age=max_age,
@@ -323,7 +323,7 @@ def test_price_selection_rejects_invalid_clock_age_and_hostile_ticker_mutation()
     for max_age in (timedelta(0), timedelta(microseconds=-1), "5 seconds"):
         with pytest.raises(api.ContractSizingError):
             sizer.select_fresh_price(
-                make_ticker(),
+                make_ticker_evidence(),
                 basis=api.PriceBasis.MARK,
                 checked_at=BASE_TIME,
                 max_age=max_age,
@@ -331,14 +331,14 @@ def test_price_selection_rejects_invalid_clock_age_and_hostile_ticker_mutation()
 
     with pytest.raises(api.ContractSizingError):
         sizer.select_fresh_price(
-            make_ticker(),
+            make_ticker_evidence(),
             basis=api.PriceBasis.MARK,
             checked_at=BASE_TIME.replace(tzinfo=None),
             max_age=timedelta(seconds=1),
         )
 
-    hostile = make_ticker()
-    object.__setattr__(hostile, "mark_price", "DO-NOT-LEAK-TICKER")
+    hostile = make_ticker_evidence()
+    object.__setattr__(hostile.ticker, "mark_price", "DO-NOT-LEAK-TICKER")
     with pytest.raises(api.ContractSizingError) as error:
         sizer.select_fresh_price(
             hostile,

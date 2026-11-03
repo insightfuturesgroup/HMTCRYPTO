@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from decimal import Decimal
-from typing import Final
+from typing import Final, cast
 
-from hmt_crypto.domain import Ticker, TradingStatus
+from hmt_crypto.domain import ContractType, TradingStatus
 from hmt_crypto.errors import UnsupportedProductError
 from hmt_crypto.exchange.delta.sizing_math import (
     NumericContractError,
@@ -23,9 +24,11 @@ from hmt_crypto.exchange.delta.sizing_models import (
     PriceBasis,
     PriceQuantization,
     SizingUnit,
+    SourceBoundTicker,
 )
 from hmt_crypto.exchange.delta.sizing_validation import (
     ResolvedSizingProduct,
+    _has_valid_resolved_sizing_product,
     clone_product,
     clone_source,
     sizing_error,
@@ -42,6 +45,26 @@ _PRICE_FIELDS: Final = {
 }
 
 
+def _build_linear_constructor_capability() -> tuple[
+    Callable[[ResolvedSizingProduct], LinearContractSizer],
+    Callable[[object], bool],
+]:
+    seal = object()
+
+    def build(resolved: ResolvedSizingProduct) -> LinearContractSizer:
+        return LinearContractSizer(resolved, _construction_evidence=seal)
+
+    def verify(value: object) -> bool:
+        return value is seal
+
+    return build, verify
+
+
+_issue_linear_contract_sizer, _has_linear_constructor_capability = (
+    _build_linear_constructor_capability()
+)
+
+
 class LinearContractSizer:
     """Exact sizer for the verified linear vanilla futures subset only."""
 
@@ -55,26 +78,34 @@ class LinearContractSizer:
         "_tick_size",
     )
 
-    def __init__(self, resolved: ResolvedSizingProduct) -> None:
-        if type(resolved) is not ResolvedSizingProduct:
+    def __init__(
+        self,
+        resolved: object,
+        *,
+        _construction_evidence: object | None = None,
+    ) -> None:
+        if not _has_linear_constructor_capability(
+            _construction_evidence
+        ) or not _has_valid_resolved_sizing_product(resolved):
             raise sizing_error("linear_contract_sizer")
+        issued = cast(ResolvedSizingProduct, resolved)
         try:
-            owned = clone_product(resolved.product)
-            owned_source = clone_source(resolved.source)
-            if type(resolved.catalog_revision) is not int or resolved.catalog_revision <= 0:
+            owned = clone_product(issued.product)
+            owned_source = clone_source(issued.source)
+            if type(issued.catalog_revision) is not int or issued.catalog_revision <= 0:
                 raise ValueError
-            content_hash = resolved.catalog_content_sha256
+            content_hash = issued.catalog_content_sha256
             if (
                 type(content_hash) is not str
                 or len(content_hash) != 64
                 or any(character not in "0123456789abcdef" for character in content_hash)
             ):
                 raise ValueError
-            if type(resolved.risk_increasing) is not bool:
+            if type(issued.risk_increasing) is not bool:
                 raise ValueError
             validate_supported_product(
                 owned,
-                risk_increasing=resolved.risk_increasing,
+                risk_increasing=issued.risk_increasing,
             )
             contract_value = positive_decimal(owned.contract_value)
             tick_size = positive_decimal(owned.tick_size)
@@ -84,9 +115,9 @@ class LinearContractSizer:
             raise unsupported("linear_contract_sizer") from None
         self._product = owned
         self._source = owned_source
-        self._catalog_revision = resolved.catalog_revision
+        self._catalog_revision = issued.catalog_revision
         self._catalog_content_sha256 = content_hash
-        self._risk_increasing = resolved.risk_increasing
+        self._risk_increasing = issued.risk_increasing
         self._contract_value = contract_value
         self._tick_size = tick_size
 
@@ -227,18 +258,29 @@ class LinearContractSizer:
 
     def select_fresh_price(
         self,
-        ticker: Ticker,
+        evidence: SourceBoundTicker,
         *,
         basis: PriceBasis,
         checked_at: object,
         max_age: timedelta,
     ) -> Decimal:
         """Select one explicit fresh ticker price with no cross-field fallback."""
-        if type(ticker) is not Ticker or type(basis) is not PriceBasis:
+        if type(evidence) is not SourceBoundTicker or type(basis) is not PriceBasis:
             raise sizing_error("select_fresh_price", self.product_id)
         if type(max_age) is not timedelta or max_age <= timedelta(0):
             raise sizing_error("select_fresh_price", self.product_id)
         try:
+            owned_evidence = SourceBoundTicker(
+                source=evidence.source,
+                ticker=evidence.ticker,
+            )
+            source = owned_evidence.source
+            ticker = owned_evidence.ticker
+            if (
+                source.region is not self._source.region
+                or source.environment is not self._source.environment
+            ):
+                raise ValueError
             checked = utc_datetime(checked_at)
             observed = utc_datetime(ticker.timestamp)
             if (
@@ -247,6 +289,12 @@ class LinearContractSizer:
                 or type(ticker.symbol) is not str
                 or ticker.symbol != self._product.symbol
             ):
+                raise ValueError
+            contract_type = ticker.contract_type
+            if type(contract_type) is not ContractType or contract_type not in {
+                ContractType.UNKNOWN,
+                self._product.contract_type,
+            }:
                 raise ValueError
             status = ticker.product_trading_status
             if type(status) is not TradingStatus or status not in {

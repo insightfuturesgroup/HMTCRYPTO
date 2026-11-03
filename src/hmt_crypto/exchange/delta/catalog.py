@@ -20,6 +20,7 @@ from hmt_crypto.exchange.delta.catalog_models import (
     CatalogSource,
     _clone_source,
     _is_exact_source,
+    _issue_catalog_snapshot_publication,
     venue_allows_new_orders,
 )
 from hmt_crypto.exchange.delta.paginator import MISSING_AFTER, PaginationResult
@@ -309,13 +310,15 @@ class ProductCatalog:
             ):
                 raise _CatalogClockError
             revision = 1 if self._active is None else self._active.revision + 1
-            snapshot = CatalogSnapshot(
-                source=self._source,
-                revision=revision,
-                products=products,
-                fetched_at=fetched_at,
-                validated_at=validated_at,
-                ttl=self._ttl,
+            snapshot = _issue_catalog_snapshot_publication(
+                CatalogSnapshot(
+                    source=self._source,
+                    revision=revision,
+                    products=products,
+                    fetched_at=fetched_at,
+                    validated_at=validated_at,
+                    ttl=self._ttl,
+                )
             )
         except asyncio.CancelledError:
             raise

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
         PriceBasis,
         PriceQuantization,
         SizingUnit,
+        SourceBoundTicker,
     )
 
 _SIZING_EXPORTS = frozenset(
@@ -36,6 +37,7 @@ _SIZING_EXPORTS = frozenset(
         "LinearContractSizer",
         "PriceBasis",
         "PriceQuantization",
+        "SourceBoundTicker",
         "SizingUnit",
     }
 )
@@ -67,6 +69,7 @@ __all__ = [
     "PriceQuantization",
     "SignedAuthHeaders",
     "StreamingCapability",
+    "SourceBoundTicker",
     "SizingUnit",
     "collect_cursor_pages",
     "get_delta_endpoints",

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hmac
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
+from secrets import token_bytes
 from types import MappingProxyType
 
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion
@@ -135,6 +137,7 @@ class CatalogSnapshot:
     by_id: Mapping[int, Product]
     by_symbol: Mapping[str, Product]
     assets_by_id: Mapping[int, Asset]
+    _publication_evidence: bytes | None
 
     def __init__(
         self,
@@ -176,6 +179,7 @@ class CatalogSnapshot:
         object.__setattr__(self, "by_id", MappingProxyType(id_map))
         object.__setattr__(self, "by_symbol", MappingProxyType(symbol_map))
         object.__setattr__(self, "assets_by_id", MappingProxyType(asset_map))
+        object.__setattr__(self, "_publication_evidence", None)
 
     def __repr__(self) -> str:
         return (
@@ -212,6 +216,58 @@ class CatalogSnapshot:
     def venue_allows_new_orders(self, product_id: int) -> bool:
         """Apply only the narrow venue-state gate to one indexed product."""
         return venue_allows_new_orders(self.require_product_id(product_id))
+
+
+def _build_catalog_publication_capability() -> tuple[
+    Callable[[CatalogSnapshot], CatalogSnapshot],
+    Callable[[object], bool],
+]:
+    signing_key = token_bytes(32)
+
+    def digest(snapshot: CatalogSnapshot) -> bytes:
+        payload = json.dumps(
+            {
+                "content_sha256": snapshot.content_sha256,
+                "environment": snapshot.source.environment.value,
+                "fetched_at": snapshot.fetched_at.isoformat(timespec="microseconds"),
+                "fresh_until": snapshot.fresh_until.isoformat(timespec="microseconds"),
+                "region": snapshot.source.region.value,
+                "revision": snapshot.revision,
+                "validated_at": snapshot.validated_at.isoformat(timespec="microseconds"),
+            },
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        return hmac.digest(signing_key, payload, "sha256")
+
+    def issue(snapshot: CatalogSnapshot) -> CatalogSnapshot:
+        if type(snapshot) is not CatalogSnapshot or snapshot._publication_evidence is not None:
+            raise TypeError("catalogue publication candidate is invalid")
+        object.__setattr__(snapshot, "_publication_evidence", digest(snapshot))
+        return snapshot
+
+    def verify(value: object) -> bool:
+        if type(value) is not CatalogSnapshot:
+            return False
+        try:
+            evidence = value._publication_evidence
+            return (
+                type(evidence) is bytes
+                and len(evidence) == sha256().digest_size
+                and type(value.source) is CatalogSource
+                and hmac.compare_digest(evidence, digest(value))
+            )
+        except Exception:
+            return False
+
+    return issue, verify
+
+
+_issue_catalog_snapshot_publication, _has_valid_catalog_snapshot_publication = (
+    _build_catalog_publication_capability()
+)
 
 
 def _canonical_value(value: object) -> object:

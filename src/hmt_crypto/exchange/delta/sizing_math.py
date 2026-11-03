@@ -33,7 +33,7 @@ def _bounded_decimal(
     max_text = MAX_RESULT_DIGITS + MAX_RESULT_ABS_EXPONENT + 16
     if isinstance(value, bool) or isinstance(value, float):
         raise NumericContractError
-    if isinstance(value, Decimal):
+    if type(value) is Decimal:
         parsed = value
     elif type(value) is int:
         if value.bit_length() > max_digits * 4:

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion
@@ -14,6 +15,7 @@ from hmt_crypto.errors import (
     UnsupportedProductError,
 )
 from hmt_crypto.exchange.delta.catalog import CatalogSnapshot, CatalogSource
+from hmt_crypto.exchange.delta.catalog_models import _has_valid_catalog_snapshot_publication
 from hmt_crypto.exchange.delta.sizing_math import NumericContractError, positive_decimal
 
 _REQUIRED_PRODUCT_FIELDS = frozenset(
@@ -129,6 +131,35 @@ class ResolvedSizingProduct:
     catalog_revision: int
     catalog_content_sha256: str
     risk_increasing: bool
+    _issuance_evidence: object | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+
+def _build_resolved_sizing_capability() -> tuple[
+    Callable[[ResolvedSizingProduct], ResolvedSizingProduct],
+    Callable[[object], bool],
+]:
+    seal = object()
+
+    def issue(value: ResolvedSizingProduct) -> ResolvedSizingProduct:
+        if type(value) is not ResolvedSizingProduct or value._issuance_evidence is not None:
+            raise TypeError
+        object.__setattr__(value, "_issuance_evidence", seal)
+        return value
+
+    def verify(value: object) -> bool:
+        return type(value) is ResolvedSizingProduct and value._issuance_evidence is seal
+
+    return issue, verify
+
+
+_issue_resolved_sizing_product, _has_valid_resolved_sizing_product = (
+    _build_resolved_sizing_capability()
+)
 
 
 def resolve_sizing_product(
@@ -143,6 +174,8 @@ def resolve_sizing_product(
     if type(snapshot) is not CatalogSnapshot:
         raise sizing_error("contract_sizer_resolve")
     try:
+        if not _has_valid_catalog_snapshot_publication(snapshot):
+            raise unsupported("contract_sizer_snapshot_publication", product_id)
         source = clone_source(snapshot.source)
         revision = snapshot.revision
         content_hash = snapshot.content_sha256
@@ -180,12 +213,14 @@ def resolve_sizing_product(
         product = owned_snapshot.require_product_id(product_id)
         validate_supported_product(product, risk_increasing=risk_increasing)
         owned_product = clone_product(product)
-        return ResolvedSizingProduct(
-            product=owned_product,
-            source=source,
-            catalog_revision=revision,
-            catalog_content_sha256=content_hash,
-            risk_increasing=risk_increasing,
+        return _issue_resolved_sizing_product(
+            ResolvedSizingProduct(
+                product=owned_product,
+                source=source,
+                catalog_revision=revision,
+                catalog_content_sha256=content_hash,
+                risk_increasing=risk_increasing,
+            )
         )
     except (ProductNotFoundError, StaleCatalogError, UnsupportedProductError):
         raise
@@ -194,7 +229,6 @@ def resolve_sizing_product(
 
 
 __all__ = [
-    "ResolvedSizingProduct",
     "clone_product",
     "clone_source",
     "resolve_sizing_product",
