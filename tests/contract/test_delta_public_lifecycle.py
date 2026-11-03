@@ -107,6 +107,20 @@ class _CloseGateTransport(httpx.AsyncBaseTransport):
         self.closed = True
 
 
+class _BlockingCountingTransport(httpx.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.close_calls = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.entered.set()
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+
+
 @pytest.mark.asyncio
 async def test_close_waits_for_call_admitted_before_blocked_limiter_dispatch() -> None:
     limiter = _GateLimiter()
@@ -228,3 +242,45 @@ async def test_concurrent_and_cancelled_closers_share_one_unstranded_close() -> 
     assert transport.closed is True
     with pytest.raises(ConfigurationError):
         await _ticker_call(client)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_cancelled_call_cannot_strand_its_lifecycle_lease(cancel_count: int) -> None:
+    transport = _BlockingCountingTransport()
+    client = _client(transport)
+    lifecycle = client._transport._lifecycle
+    call = asyncio.create_task(_ticker_call(client))
+    await asyncio.wait_for(transport.entered.wait(), timeout=1)
+
+    # Round-1's condition-based release can be suspended here. A synchronous release has no
+    # suspension point, so this compatibility gate deliberately disappears after the fix.
+    release_condition = getattr(lifecycle, "_condition", None)
+    if release_condition is not None:
+        await release_condition.acquire()
+    call.cancel()
+    await asyncio.sleep(0)
+    if cancel_count == 2:
+        call.cancel()
+    if release_condition is not None and release_condition.locked():
+        release_condition.release()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    close_timed_out = False
+    try:
+        await asyncio.wait_for(client.aclose(), timeout=0.05)
+    except TimeoutError:
+        close_timed_out = True
+        # RED cleanup for the old stranded counter so pytest does not retain its close task.
+        assert release_condition is not None
+        async with release_condition:
+            lifecycle._active_calls = 0
+            release_condition.notify_all()
+        await asyncio.wait_for(client.aclose(), timeout=1)
+
+    close_task = lifecycle._close_task
+    assert close_timed_out is False
+    assert call.done() is True
+    assert close_task is not None and close_task.done()
+    assert transport.close_calls == 1

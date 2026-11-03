@@ -90,7 +90,11 @@ class _DeltaPublicTransport:
         self._base_url = httpx.URL(endpoints.rest_base_url)
         self._client = httpx.AsyncClient(
             base_url=endpoints.rest_base_url,
-            headers={"User-Agent": user_agent, "Accept": "application/json"},
+            headers={
+                "User-Agent": user_agent,
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+            },
             timeout=_TIMEOUT,
             limits=_LIMITS,
             follow_redirects=False,
@@ -184,11 +188,11 @@ class _DeltaPublicTransport:
         path: str,
         params: QueryParams = (),
     ) -> _EnvelopeResult:
-        await self._lifecycle.admit()
+        self._lifecycle.admit()
         try:
             return await self._get_json_admitted(spec, path=path, params=params)
         finally:
-            await self._lifecycle.release()
+            self._lifecycle.release()
 
     async def _get_json_admitted(
         self,

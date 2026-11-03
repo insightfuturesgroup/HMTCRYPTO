@@ -12,7 +12,7 @@ from typing import Self
 import httpx
 
 from hmt_crypto.domain import Product, Ticker
-from hmt_crypto.errors import ConfigurationError, ExchangeProtocolError
+from hmt_crypto.errors import ConfigurationError, ExchangeProtocolError, PaginationLimitError
 from hmt_crypto.exchange.base import (
     CandleRequest,
     CandleResult,
@@ -109,6 +109,7 @@ class DeltaPublicClient:
             raise _config("public_client_transport")
 
         jitter = jitter_source or (lambda: Decimal(str(random.random())))
+        self._region = endpoints.region
         self._l2_timestamp_policy = l2_timestamp_policy
         self._transport = _DeltaPublicTransport(
             endpoints=endpoints,
@@ -133,16 +134,22 @@ class DeltaPublicClient:
         if not isinstance(selected_query, ProductQuery):
             raise _config("products_query")
         spec = resolve_public_request("GET", "/v2/products")
+        last_page_context: dict[str, object] | None = None
 
         async def fetch_page(params: dict[str, str | int]) -> CursorPage[Product]:
+            nonlocal last_page_context
             response = await self._transport._get_json(  # noqa: SLF001
                 spec,
                 path="/v2/products",
                 params=tuple(params.items()),
             )
+            page_context = dict(response.context)
+            page_context["operation"] = "products"
+            page_context["region"] = self._region
+            last_page_context = page_context
             try:
                 if not isinstance(response.result, list):
-                    raise _response_protocol(response)
+                    raise ExchangeProtocolError(context=page_context)
                 items = tuple(
                     parse_product(item, endpoint_id="products") for item in response.result
                 )
@@ -160,22 +167,29 @@ class DeltaPublicClient:
                             for character in before
                         )
                     ):
-                        raise _response_protocol(response)
+                        raise ExchangeProtocolError(context=page_context)
                     after = response.meta.get("after", MISSING_AFTER)
                 else:
-                    raise _response_protocol(response)
+                    raise ExchangeProtocolError(context=page_context)
                 return CursorPage(items=items, after=after)
             except (TypeError, ValueError, ExchangeProtocolError):
-                raise _response_protocol(response) from None
+                raise ExchangeProtocolError(context=page_context) from None
 
-        return await collect_cursor_pages(
-            fetch_page,
-            filters=selected_query.to_filters(),
-            page_size=page_size,
-            page_size_cap=_PRODUCT_PAGE_SIZE_CAP,
-            max_pages=max_pages,
-            max_items=max_items,
-        )
+        try:
+            return await collect_cursor_pages(
+                fetch_page,
+                filters=selected_query.to_filters(),
+                page_size=page_size,
+                page_size_cap=_PRODUCT_PAGE_SIZE_CAP,
+                max_pages=max_pages,
+                max_items=max_items,
+            )
+        except (ExchangeProtocolError, PaginationLimitError) as error:
+            if error.context.get("operation") != "cursor_pagination" or last_page_context is None:
+                raise
+            if isinstance(error, PaginationLimitError):
+                raise PaginationLimitError(context=last_page_context) from None
+            raise ExchangeProtocolError(context=last_page_context) from None
 
     async def get_product(self, product: ProductRef) -> Product:
         """Return one product selected by an exact validated symbol."""
