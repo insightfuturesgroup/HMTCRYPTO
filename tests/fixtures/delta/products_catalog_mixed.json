@@ -1,0 +1,50 @@
+[
+  {
+    "id": 1201,
+    "symbol": "XBT-CALL-CAT",
+    "contract_type": "call_options",
+    "notional_type": "vanilla",
+    "contract_value": "0.001",
+    "contract_unit_currency": "XBT",
+    "tick_size": "0.1",
+    "state": "live",
+    "trading_status": "operational",
+    "is_quanto": false,
+    "product_specs": {"only_reduce_only_orders_allowed": true},
+    "underlying_asset": {"id": 11, "symbol": "XBT", "precision": 8, "minimum_precision": 1},
+    "quoting_asset": {"id": 12, "symbol": "USD", "precision": 8, "minimum_precision": 2},
+    "settling_asset": {"id": 12, "symbol": "USD", "precision": 8, "minimum_precision": 2}
+  },
+  {
+    "id": 1202,
+    "symbol": "ALTUSD-INVERSE-CAT",
+    "contract_type": "futures",
+    "notional_type": "inverse",
+    "contract_value": "1",
+    "contract_unit_currency": "ALT",
+    "tick_size": "0.01",
+    "state": "expired",
+    "trading_status": "disrupted_post_only",
+    "is_quanto": false,
+    "product_specs": {"only_reduce_only_orders_allowed": false},
+    "underlying_asset": {"id": 14, "symbol": "ALT", "precision": 8, "minimum_precision": 1},
+    "quoting_asset": {"id": 12, "symbol": "USD", "precision": 8, "minimum_precision": 2},
+    "settling_asset": {"id": 12, "symbol": "USD", "precision": 8, "minimum_precision": 2}
+  },
+  {
+    "id": 1203,
+    "symbol": "NEWUSD-UNKNOWN-CAT",
+    "contract_type": "future_contract_added_later",
+    "notional_type": "model_added_later",
+    "contract_value": "0.1",
+    "contract_unit_currency": "NEW",
+    "tick_size": "0.001",
+    "state": "settled",
+    "trading_status": "venue_status_added_later",
+    "is_quanto": true,
+    "product_specs": {"only_reduce_only_orders_allowed": false},
+    "underlying_asset": {"id": 15, "symbol": "NEW", "precision": 8, "minimum_precision": 1},
+    "quoting_asset": {"id": 12, "symbol": "USD", "precision": 8, "minimum_precision": 2},
+    "settling_asset": {"id": 12, "symbol": "USD", "precision": 8, "minimum_precision": 2}
+  }
+]

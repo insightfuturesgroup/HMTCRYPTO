@@ -189,6 +189,27 @@ class PaginationLimitError(HmtCryptoError):
     _message = "Pagination safety limit reached"
 
 
+class CatalogUnavailableError(HmtCryptoError):
+    """No complete validated product-catalogue snapshot is available."""
+
+    _code = "catalog_unavailable"
+    _message = "Product catalogue is unavailable"
+
+
+class StaleCatalogError(HmtCryptoError):
+    """The last complete product-catalogue snapshot has expired."""
+
+    _code = "catalog_stale"
+    _message = "Product catalogue is stale"
+
+
+class ProductNotFoundError(HmtCryptoError):
+    """A product identifier is absent from the active catalogue snapshot."""
+
+    _code = "product_not_found"
+    _message = "Product was not found in the catalogue"
+
+
 class AmbiguousExchangeResult(ExchangeError):
     """A write outcome cannot be established without reconciliation."""
 
@@ -206,6 +227,7 @@ class UnsupportedProductError(HmtCryptoError):
 __all__ = [
     "AmbiguousExchangeResult",
     "AuthError",
+    "CatalogUnavailableError",
     "ConfigurationError",
     "ExchangeDownError",
     "ExchangeError",
@@ -214,8 +236,10 @@ __all__ = [
     "HmtCryptoError",
     "OrderRejected",
     "PaginationLimitError",
+    "ProductNotFoundError",
     "RateLimitError",
     "SignatureExpiredError",
+    "StaleCatalogError",
     "UnauthorizedApiAccessError",
     "UnsupportedProductError",
 ]
