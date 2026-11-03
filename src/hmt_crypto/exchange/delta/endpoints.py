@@ -98,6 +98,30 @@ _CANONICAL_ENDPOINTS: dict[tuple[str, str], DeltaEndpointSet] = {
         streaming_capability=StreamingCapability.DISABLED_PENDING_TESTNET_CONTRACT,
     ),
 }
+_CANONICAL_REST_HOSTS = frozenset(
+    host
+    for endpoint in _CANONICAL_ENDPOINTS.values()
+    if (host := urlsplit(endpoint.rest_base_url).hostname) is not None
+)
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    if port is not None:
+        return port
+    return {"http": 80, "https": 443}.get(scheme)
+
+
+def _same_origin(left: str, right: str) -> bool:
+    left_url = urlsplit(left)
+    right_url = urlsplit(right)
+    return (
+        left_url.scheme.casefold() == right_url.scheme.casefold()
+        and left_url.hostname is not None
+        and right_url.hostname is not None
+        and left_url.hostname.casefold() == right_url.hostname.casefold()
+        and _effective_port(left_url.scheme.casefold(), left_url.port)
+        == _effective_port(right_url.scheme.casefold(), right_url.port)
+    )
 
 
 def _selection_value(value: object) -> str:
@@ -192,6 +216,11 @@ def get_delta_endpoints(
     if not allow_development_override or live_requested or canonical.environment != "testnet":
         raise ConfigurationError(context={"operation": "resolve_delta_development_override"})
     base_url = _development_base_url(development_rest_base_url)
+    candidate_host = urlsplit(base_url).hostname
+    if candidate_host is not None and candidate_host.casefold() in _CANONICAL_REST_HOSTS:
+        if _same_origin(base_url, canonical.rest_base_url):
+            return canonical
+        raise ConfigurationError(context={"operation": "resolve_delta_development_override"})
     return replace(
         canonical,
         rest_base_url=base_url,

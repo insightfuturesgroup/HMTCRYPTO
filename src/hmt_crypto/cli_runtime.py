@@ -13,6 +13,7 @@ from hmt_crypto.clock import (
 )
 from hmt_crypto.config import Settings
 from hmt_crypto.domain import Asset, Candle, Product, Ticker, parse_utc_datetime
+from hmt_crypto.errors import ConfigurationError
 from hmt_crypto.exchange.base import CandleRequest, CandleResolution, ProductRef
 from hmt_crypto.exchange.delta.catalog import CatalogProductLoad, CatalogSource, ProductCatalog
 from hmt_crypto.exchange.delta.client import DeltaPublicClient
@@ -177,6 +178,15 @@ def _build_public_client(settings: Settings) -> DeltaPublicClient:
 
 
 def _source(settings: Settings) -> CatalogSource:
+    endpoints = get_delta_endpoints(
+        settings.delta_region,
+        settings.delta_env,
+        development_rest_base_url=settings.delta_development_rest_base_url,
+        allow_development_override=settings.delta_allow_development_endpoint_override,
+        live_requested=settings.execution_mode.value == "LIVE",
+    )
+    if endpoints.is_development_override:
+        raise ConfigurationError(context={"operation": "catalog_development_override"})
     return CatalogSource(region=settings.delta_region, environment=settings.delta_env)
 
 
@@ -210,6 +220,7 @@ async def _refresh_catalog(
 
 async def products_sync_payload(settings: Settings) -> dict[str, JsonValue]:
     """Fetch and publish a complete process-local catalogue snapshot."""
+    _source(settings)
     async with _build_public_client(settings) as client:
         catalog, evidence = await _refresh_catalog(settings, client)
     catalog.require_snapshot(at=datetime.now(UTC))
@@ -239,6 +250,7 @@ async def product_show_payload(
 ) -> dict[str, JsonValue]:
     """Refresh then select one product from a complete catalogue."""
     selected = _selector(product_id, symbol)
+    _source(settings)
     async with _build_public_client(settings) as client:
         catalog, evidence = await _refresh_catalog(settings, client)
     snapshot = catalog.require_snapshot(at=datetime.now(UTC))

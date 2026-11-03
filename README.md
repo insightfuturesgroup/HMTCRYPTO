@@ -52,6 +52,13 @@ Each credential pair is optional in Phase 1. If supplied, both key and secret mu
 the selected slot. Generic `DELTA_API_KEY` and `DELTA_API_SECRET` variables are rejected. Never
 put exchange credentials in source control, logs, command arguments, Supabase, or Vercel.
 
+An explicitly enabled development endpoint override is limited to non-LIVE testnet diagnostics.
+A known Delta host must exactly match the selected region/environment or configuration fails; an
+exact match resolves as the canonical endpoint, not as a development source. Genuine custom hosts
+remain visibly marked as development endpoints and cannot publish a trusted product catalogue, so
+`products sync` and `products show` fail closed before opening a client. This prevents custom or
+cross-region data from acquiring canonical catalogue provenance.
+
 ## Read-only commands
 
 Command results are one allowlisted JSON object. Help text is human-readable.

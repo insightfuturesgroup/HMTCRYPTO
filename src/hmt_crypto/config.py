@@ -280,5 +280,6 @@ class Settings(BaseSettings):
                 allow_development_override=True,
                 live_requested=False,
             )
-            diagnostics["development_rest_host"] = urlsplit(endpoints.rest_base_url).hostname
+            if endpoints.is_development_override:
+                diagnostics["development_rest_host"] = urlsplit(endpoints.rest_base_url).hostname
         return diagnostics
