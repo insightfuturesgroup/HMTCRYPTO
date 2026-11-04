@@ -74,6 +74,17 @@ class PnlSnapshot(ScopedRow, Base):
         *evidence_constraints(),
         scoped_fk(__tablename__, "run_id", "reconciliation_runs"),
         UniqueConstraint(*SCOPE, "snapshot_key", name="uq_pnl_snapshots_scope_key"),
+        UniqueConstraint(
+            "id",
+            *SCOPE,
+            "completeness",
+            "calculation_version",
+            "reference_asset_id",
+            "reference_asset_symbol",
+            "evidence_sha256",
+            "input_set_sha256",
+            name="uq_pnl_snapshots_risk_decision_parent",
+        ),
         Index("ix_pnl_snapshots_run_parent", "run_id", *SCOPE),
         Index(
             "ix_pnl_snapshots_scope_window",

@@ -32,6 +32,7 @@ from hmt_crypto.persistence.reconciliation_drift_models import (
 )
 from hmt_crypto.persistence.reconciliation_models import ReconciliationRun
 from hmt_crypto.persistence.reconciliation_resource_models import ReconciliationResource
+from hmt_crypto.persistence.risk_decision_models import RiskDecision
 from hmt_crypto.persistence.risk_models import RiskHalt, RiskHaltEvent, RiskState
 from hmt_crypto.persistence.signal_models import Signal
 from hmt_crypto.persistence.snapshot_models import BalanceSnapshot, PositionSnapshot
@@ -66,6 +67,7 @@ __all__ = [
     "RiskState",
     "RiskHalt",
     "RiskHaltEvent",
+    "RiskDecision",
     "PositionSnapshot",
     "BalanceSnapshot",
     "WalletTransaction",

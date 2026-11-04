@@ -54,6 +54,7 @@ def test_exact_four_protection_tables_are_present():
         "risk_state",
         "risk_halts",
         "risk_halt_events",
+        "risk_decisions",
     }
     assert {t.name for t in schema_api().metadata.tables.values()} - baseline == NEW_TABLES
 

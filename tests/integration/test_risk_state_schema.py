@@ -327,7 +327,12 @@ def test_exact_three_tables_exports_columns_constraints_indexes_and_postgres_ddl
         CreateIndex(release_index).compile(dialect=dialect)
     )
     for prior in api.metadata.tables.values():
-        if prior not in {state_table, halt_table, event_table}:
+        if prior not in {
+            state_table,
+            halt_table,
+            event_table,
+            api.RiskDecision.__table__,
+        }:
             assert not {"risk_state", "risk_halts", "risk_halt_events"} & {
                 fk.referred_table.name for fk in prior.foreign_key_constraints
             }

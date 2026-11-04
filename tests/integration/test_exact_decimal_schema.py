@@ -31,6 +31,11 @@ EXPECTED_COLUMNS = {
         "conservative_daily_loss",
     },
     "risk_state": {"baseline_equity", "conservative_daily_loss"},
+    "risk_decisions": {
+        "reserved_incremental_gross_exposure",
+        "reserved_worst_case_loss",
+        "reserved_collateral",
+    },
 }
 
 
@@ -50,7 +55,7 @@ def test_metadata_discovers_the_complete_exact_decimal_inventory():
         for table_name, column_names in EXPECTED_COLUMNS.items()
         for column_name in column_names
     }
-    assert len(discovered) == 28
+    assert len(discovered) == 31
     assert set(discovered) == expected
     assert {
         (decimal_type.precision, decimal_type.scale) for decimal_type in discovered.values()

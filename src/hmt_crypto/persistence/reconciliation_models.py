@@ -11,7 +11,15 @@ triggers, locking and concurrency enforcement remain later reviewed work.
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Index, Uuid, event, select
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKeyConstraint,
+    Index,
+    UniqueConstraint,
+    Uuid,
+    event,
+    select,
+)
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,6 +42,13 @@ class ReconciliationRun(ScopedRow, Base):
     __tablename__ = "reconciliation_runs"
     __table_args__ = (
         *scoped_constraints(__tablename__),
+        UniqueConstraint(
+            "id",
+            *SCOPE,
+            "requirements_version",
+            "requirements_sha256",
+            name="uq_reconciliation_runs_risk_decision_parent",
+        ),
         checked("trigger", ("STARTUP", "PERIODIC", "MANUAL", "RECOVERY", "RECONNECT")),
         checked("backend", ("VENUE", "SIMULATOR")),
         checked("state", ("PENDING", "COLLECTING", "FINISHED", "FAILED", "CANCELLED")),

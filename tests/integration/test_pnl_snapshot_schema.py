@@ -139,7 +139,20 @@ def test_exact_table_keys_fks_indexes_and_postgres_ddl():
         tuple(column.name for column in key.columns)
         for key in table.constraints
         if isinstance(key, UniqueConstraint)
-    } == {("id", *SCOPE), (*SCOPE, "snapshot_key")}
+    } == {
+        ("id", *SCOPE),
+        (*SCOPE, "snapshot_key"),
+        (
+            "id",
+            *SCOPE,
+            "completeness",
+            "calculation_version",
+            "reference_asset_id",
+            "reference_asset_symbol",
+            "evidence_sha256",
+            "input_set_sha256",
+        ),
+    }
     expected = {
         "accounts": (SCOPE, ("id", *SCOPE[1:])),
         "reconciliation_runs": (("run_id", *SCOPE), ("id", *SCOPE)),
@@ -162,7 +175,11 @@ def test_exact_table_keys_fks_indexes_and_postgres_ddl():
     for index in table.indexes:
         assert index.name in str(CreateIndex(index).compile(dialect=postgresql.dialect()))
     for prior in api.metadata.tables.values():
-        if prior is not table and prior.name not in {"risk_state", "risk_halt_events"}:
+        if prior is not table and prior.name not in {
+            "risk_state",
+            "risk_halt_events",
+            "risk_decisions",
+        }:
             assert "pnl_snapshots" not in {
                 fk.referred_table.name for fk in prior.foreign_key_constraints
             }

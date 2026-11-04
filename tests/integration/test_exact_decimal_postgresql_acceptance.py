@@ -463,7 +463,7 @@ async def test_raw_postgres_decimal_boundary_and_catalogue_contract():
                 expected_constraints = _decimal_constraint_names(
                     translated, (*metadata.tables.values(), probe)
                 )
-                assert len(expected_constraints) == 93
+                assert len(expected_constraints) == 102
                 assert expected_constraints <= set(actual_constraints)
                 assert all(actual_constraints[name] for name in expected_constraints)
             finally:

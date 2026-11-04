@@ -121,6 +121,7 @@ def test_exact_run_root_export_columns_complete_scoped_keys_and_postgres_ddl():
         "risk_state",
         "risk_halts",
         "risk_halt_events",
+        "risk_decisions",
     }
     table = api.ReconciliationRun.__table__
     assert set(table.c.keys()) == {
@@ -179,6 +180,7 @@ def test_exact_run_root_export_columns_complete_scoped_keys_and_postgres_ddl():
             "pnl_snapshots",
             "risk_state",
             "risk_halt_events",
+            "risk_decisions",
         }:
             assert "reconciliation_runs" not in {
                 fk.referred_table.name for fk in prior.foreign_key_constraints

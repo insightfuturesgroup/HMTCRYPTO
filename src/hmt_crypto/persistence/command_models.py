@@ -29,6 +29,13 @@ class CommandOperation(ScopedRow, EvidenceRow, Base):
         *scoped_constraints(__tablename__),
         *evidence_constraints(),
         checked("operation_kind", OPERATIONS),
+        UniqueConstraint(
+            "id",
+            *SCOPE,
+            "operation_kind",
+            "evidence_sha256",
+            name="uq_command_operations_risk_decision_parent",
+        ),
         bounded("request_id"),
         checked("status", ("QUEUED", "CLAIMED", "COMPLETED", "FAILED", "CANCELLED")),
         CheckConstraint(
