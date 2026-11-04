@@ -278,8 +278,6 @@ def _validate_command_intent(values: dict[str, object]) -> None:
         requested = intent.get("requested_contracts")
         if requested != values["command_requested_contracts"]:
             _fail()
-        if requested is not None and requested != values["order_requested_contracts"]:
-            _fail()
         if requested is None and values["outcome"] == "APPROVED":
             _fail()
 
@@ -292,7 +290,7 @@ def _owned_checks(values: object, context: dict[str, object]) -> tuple[RiskCheck
     for kind in CHECK_KINDS:
         item = supplied[kind]
         if type(item) is RiskCheckV1:
-            check = item
+            check = RiskCheckV1.model_validate(item.model_dump())
         elif type(item) is dict and set(item) == CHECK_INPUT_FIELDS:
             check = RiskCheckV1.model_validate(dict(item))
         else:
@@ -322,6 +320,14 @@ def _validate_check(check: RiskCheckV1, context: dict[str, object]) -> None:
         or (outcome == "FAIL" and check.reason_code not in FAIL_REASONS[check.check_kind])
     ):
         _fail()
+    if check.outcome == "PASS":
+        if check.check_kind == "KILL_HALT" and context["observed_halt_set_state"] != "INITIALIZED":
+            _fail()
+        if check.check_kind == "FRESHNESS_RECONCILIATION" and (
+            context["observed_reconciliation_state"] != "READY_CLAIM"
+            or context["reconciliation_completeness"] != "COMPLETE"
+        ):
+            _fail()
     numeric = _NUMERIC_SHAPES.get(check.check_kind)
     if outcome == "NOT_APPLICABLE" or (
         outcome == "UNKNOWN" and check.reason_code in {"MISSING_EVIDENCE", "AMBIGUOUS_EVIDENCE"}
@@ -428,6 +434,12 @@ def _validate_reduction(check: RiskCheckV1, context: dict[str, object]) -> None:
 
 def _validate_truth_table(checks: tuple[RiskCheckV1, ...], context: dict[str, object]) -> None:
     outcomes = {check.check_kind: check.outcome for check in checks}
+    if (
+        context["command_operation_kind"] == "MODIFY_ORDER"
+        and context["command_requested_contracts"] is None
+        and outcomes["REDUCE_ONLY_NO_REVERSAL"] != "UNKNOWN"
+    ):
+        _fail()
     allowed_na = (
         frozenset({"REDUCE_ONLY_NO_REVERSAL"})
         if context["risk_effect"] == "RISK_INCREASE"
@@ -458,7 +470,7 @@ def _owned_plan(value: object, context: dict[str, object]) -> ReservationPlanV1 
             _fail()
         return None
     if type(value) is ReservationPlanV1:
-        plan = value
+        plan = ReservationPlanV1.model_validate(value.model_dump())
     elif type(value) is dict and set(value) == RESERVATION_PLAN_INPUT_FIELDS:
         plan = ReservationPlanV1.model_validate(dict(value))
     else:

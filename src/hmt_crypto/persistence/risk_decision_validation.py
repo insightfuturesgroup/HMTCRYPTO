@@ -24,29 +24,31 @@ from hmt_crypto.persistence.types import _decimal_text, _utc
 
 
 def _load_values(
-    target: Any, fields: tuple[str, ...], connection: Connection | None
+    target: Any,
+    fields: tuple[str, ...],
+    connection: Connection | None,
+    *,
+    stored: bool,
 ) -> dict[str, object]:
     state = cast(InstanceState[Any], sa_inspect(target))
-    values = {field: state.dict[field] for field in fields if field in state.dict}
-    missing = [field for field in fields if field not in values]
-    if missing:
-        session = object_session(target)
-        if state.identity is None or (connection is None and session is None):
+    if not stored:
+        if any(field not in state.dict for field in fields):
             raise PersistenceValueError()
-        if connection is None:
-            assert session is not None
-            connection = session.connection()
-        table = target.__table__
-        values.update(
-            connection.execute(
-                select(*(table.c[field] for field in missing)).where(
-                    table.c.id == state.identity[0]
-                )
-            )
-            .mappings()
-            .one()
+        return {field: state.dict[field] for field in fields}
+    session = object_session(target)
+    if state.identity is None or (connection is None and session is None):
+        raise PersistenceValueError()
+    if connection is None:
+        assert session is not None
+        connection = session.connection()
+    table = target.__table__
+    return dict(
+        connection.execute(
+            select(*(table.c[field] for field in fields)).where(table.c.id == state.identity[0])
         )
-    return values
+        .mappings()
+        .one()
+    )
 
 
 def _json_value(value: object) -> object:
@@ -56,14 +58,25 @@ def _json_value(value: object) -> object:
         return _utc(value).isoformat(timespec="microseconds")
     if type(value) is Decimal:
         return _decimal_text(value, 38, 18)
-    return value
+    if value is None or type(value) in {str, int, bool}:
+        return value
+    raise PersistenceValueError()
+
+
+def _agrees(stored: object, canonical: object) -> bool:
+    normalized = _json_value(stored)
+    return type(normalized) is type(canonical) and normalized == canonical
 
 
 def _validate_decision(
-    target: Any, plan_fields: tuple[str, ...], connection: Connection | None = None
+    target: Any,
+    plan_fields: tuple[str, ...],
+    connection: Connection | None = None,
+    *,
+    stored: bool,
 ) -> None:
     fields = tuple(column.name for column in target.__table__.c)
-    values = _load_values(target, fields, connection)
+    values = _load_values(target, fields, connection, stored=stored)
     validate_risk_decision_evidence(
         values["evidence_schema_version"],
         values["evidence_payload"],
@@ -72,18 +85,18 @@ def _validate_decision(
     decoded = decode_risk_decision_evidence(values["evidence_payload"])
     payload = json.loads(decoded.payload)
     if (
-        values["check_set_version"] != 1
-        or values["check_set_sha256"] != decoded.check_set_sha256
-        or values["reservation_plan_sha256"] != decoded.reservation_plan_sha256
+        not _agrees(values["check_set_version"], 1)
+        or not _agrees(values["check_set_sha256"], decoded.check_set_sha256)
+        or not _agrees(values["reservation_plan_sha256"], decoded.reservation_plan_sha256)
     ):
         raise PersistenceValueError()
     for field in CONTEXT_FIELDS:
         sibling = values["id"] if field == "decision_id" else values[field]
-        if payload[field] != _json_value(sibling):
+        if not _agrees(sibling, payload[field]):
             raise PersistenceValueError()
     plan_payload = payload["reservation_plan"]
     for field in plan_fields:
-        if plan_payload[field] != _json_value(values[field]):
+        if not _agrees(values[field], plan_payload[field]):
             raise PersistenceValueError()
     if connection is None:
         session = object_session(target)
@@ -106,10 +119,17 @@ def _validate_decision(
             command_table.c.evidence_sha256 == values["command_evidence_sha256"],
         )
     ).one_or_none()
-    if parent is None or tuple(parent) != (
-        values["command_evidence_schema_version"],
-        values["command_evidence_payload"],
-        values["command_evidence_sha256"],
+    if parent is None or not all(
+        _agrees(child, stored_parent)
+        for child, stored_parent in zip(
+            (
+                values["command_evidence_schema_version"],
+                values["command_evidence_payload"],
+                values["command_evidence_sha256"],
+            ),
+            tuple(parent),
+            strict=True,
+        )
     ):
         raise PersistenceValueError()
 
@@ -118,13 +138,13 @@ def install_risk_decision_validation(model: type[Any], plan_fields: tuple[str, .
     """Install append-only insert/load/full-or-partial-refresh guards."""
 
     def before_insert(mapper: object, connection: Connection, target: Any) -> None:
-        _validate_decision(target, plan_fields, connection)
+        _validate_decision(target, plan_fields, connection, stored=False)
 
     def on_load(target: Any, context: object) -> None:
-        _validate_decision(target, plan_fields)
+        _validate_decision(target, plan_fields, stored=True)
 
     def on_refresh(target: Any, context: object, attrs: Iterable[str] | None) -> None:
-        _validate_decision(target, plan_fields)
+        _validate_decision(target, plan_fields, stored=True)
 
     guard_model(model, immutable=True)
     event.listen(model, "before_insert", before_insert)

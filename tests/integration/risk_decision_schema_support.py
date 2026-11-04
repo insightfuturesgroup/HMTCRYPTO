@@ -6,8 +6,17 @@ from decimal import Decimal
 from uuid import uuid4
 
 from execution_test_support import command, order
-from schema_test_support import HASH, NOW, product, schema_api, scope, snapshot
-from test_coordination_schema import graph, save
+from schema_test_support import (
+    HASH,
+    NOW,
+    account,
+    credential,
+    product,
+    schema_api,
+    scope,
+    snapshot,
+)
+from test_coordination_schema import incarnation, lease, save
 from test_pnl_snapshot_schema import pnl
 from test_reconciliation_run_schema import outcome, run
 from test_risk_state_schema import claimed_state
@@ -80,6 +89,8 @@ NUMERIC = {
     "PROTECTION": ("INTEGER", "CONTRACTS", None, None, 2, 2),
 }
 
+_DEFAULT_RESERVATION = object()
+
 
 def check_results():
     results = OrderedDict()
@@ -138,25 +149,35 @@ def reservation_plan(**changes):
     return values
 
 
-async def decision_graph(db):
+async def decision_graph(
+    db,
+    *,
+    catalogue_revision=1,
+    profile_name="fixture",
+    mode="PAPER",
+    region="india",
+    environment="testnet",
+):
     api = schema_api()
-    owner, recovery = await graph(db)
-    publication = snapshot()
+    owner = account(
+        profile_name=profile_name,
+        mode=mode,
+        region=region,
+        environment=environment,
+    )
+    recovery = incarnation(owner)
+    await save(db, owner)
+    await save(db, recovery)
+    publication = snapshot(
+        revision=catalogue_revision,
+        region=region,
+        environment=environment,
+    )
     await save(db, publication)
     await save(
         db,
         api.CatalogueProduct.from_product(snapshot_id=publication.id, product=product()),
     )
-    reconciliation = run(
-        owner,
-        recovery,
-        **outcome(completeness="COMPLETE"),
-    )
-    await save(db, reconciliation)
-    calculation = pnl(owner, reconciliation)
-    await save(db, calculation)
-    state = claimed_state(owner, reconciliation, calculation)
-    await save(db, state)
     claim_owner = api.WorkerHeartbeat(
         id=uuid4(),
         **scope(owner),
@@ -169,20 +190,79 @@ async def decision_graph(db):
         version=1,
     )
     await save(db, claim_owner)
+    leadership = None
+    command_fence = {}
+    reconciliation_provenance = {}
+    if mode == "LIVE":
+        await save(db, credential(owner))
+        leadership = lease(
+            owner,
+            recovery,
+            state="HELD",
+            owner_id=claim_owner.id,
+            generation=3,
+            heartbeat_at=NOW,
+            expires_at=NOW + timedelta(minutes=3),
+            version=1,
+            updated_at=NOW + timedelta(seconds=1),
+        )
+        await save(db, leadership)
+        command_fence = {
+            "leader_ref": leadership.id,
+            "leader_generation": leadership.generation,
+            "recovery_ref": recovery.id,
+            "recovery_generation": leadership.generation,
+        }
+        reconciliation_provenance = {
+            "backend": "VENUE",
+            "credential_version": 1,
+            "owner_id": claim_owner.id,
+            "lease_id": leadership.id,
+            "leadership_generation": leadership.generation,
+        }
+    reconciliation = run(
+        owner,
+        recovery,
+        **outcome(completeness="COMPLETE"),
+        **reconciliation_provenance,
+    )
+    await save(db, reconciliation)
+    calculation = pnl(owner, reconciliation)
+    await save(db, calculation)
+    state = claimed_state(owner, reconciliation, calculation)
+    await save(db, state)
     cmd = command(
         owner,
         status="CLAIMED",
         claim_owner=claim_owner.id,
         claim_generation=1,
         claim_expires_at=NOW + timedelta(minutes=3),
+        **command_fence,
     )
     await save(db, cmd)
-    row = order(owner, cmd, publication)
+    row = order(
+        owner,
+        cmd,
+        publication,
+        origin="LOCAL_INTENT" if mode == "LIVE" else "SIMULATOR_INTENT",
+    )
     await save(db, row)
-    return owner, recovery, reconciliation, calculation, state, claim_owner, cmd, row
+    return owner, recovery, reconciliation, calculation, state, claim_owner, cmd, row, leadership
 
 
-def decision(owner, reconciliation, calculation, state, claim_owner, cmd, row, **changes):
+def decision(
+    owner,
+    reconciliation,
+    calculation,
+    state,
+    claim_owner,
+    cmd,
+    row,
+    *,
+    check_results_override=None,
+    reservation_plan_override=_DEFAULT_RESERVATION,
+    **changes,
+):
     values = dict(
         id=uuid4(),
         **scope(owner),
@@ -242,7 +322,11 @@ def decision(owner, reconciliation, calculation, state, claim_owner, cmd, row, *
     values.update(changes)
     return schema_api().RiskDecision.from_evidence(
         command=cmd,
-        check_results=check_results(),
-        reservation_plan=reservation_plan(),
+        check_results=check_results() if check_results_override is None else check_results_override,
+        reservation_plan=(
+            reservation_plan()
+            if reservation_plan_override is _DEFAULT_RESERVATION
+            else reservation_plan_override
+        ),
         **values,
     )

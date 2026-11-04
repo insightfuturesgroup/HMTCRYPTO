@@ -550,6 +550,18 @@ def test_price_only_modify_can_only_be_denied():
     )
     envelope = '{"operation":"MODIFY_ORDER","payload":' + modify_payload + ',"schema_version":1}'
     values, results = denied("DUPLICATE_ORDER", reason="DUPLICATE_ORDER")
+    results["REDUCE_ONLY_NO_REVERSAL"] = {
+        **results["REDUCE_ONLY_NO_REVERSAL"],
+        "outcome": "UNKNOWN",
+        "reason_code": "MISSING_EVIDENCE",
+        "metric_kind": "NONE",
+        "unit": "NONE",
+        "observed_decimal": None,
+        "limit_decimal": None,
+        "observed_integer": None,
+        "limit_integer": None,
+        "evidence_observed_at": None,
+    }
     values = values | {
         "command_id": UUID("90000000-0000-4000-8000-000000000009"),
         "command_operation_kind": "MODIFY_ORDER",
@@ -558,6 +570,12 @@ def test_price_only_modify_can_only_be_denied():
         "command_requested_contracts": None,
     }
     assert encode(values=values, results=results, reservation=None)
+    not_applicable = deepcopy(results)
+    not_applicable["REDUCE_ONLY_NO_REVERSAL"] = {
+        **checks()["REDUCE_ONLY_NO_REVERSAL"],
+    }
+    with pytest.raises(PersistenceValueError):
+        encode(values=values, results=not_applicable, reservation=None)
     with pytest.raises(PersistenceValueError):
         encode(values=values | {"outcome": "APPROVED"}, results=checks(), reservation=plan())
     wrong_target = values | {"order_id": UUID("50000000-0000-4000-8000-000000000099")}
@@ -620,6 +638,23 @@ def test_payload_models_are_strict_frozen_extra_forbidden_and_owned():
         evidence().validate_risk_decision_evidence(1, encoded.payload, encoded.evidence_sha256)
         is None
     )
+
+
+def test_constructed_or_copied_models_are_strictly_revalidated():
+    module = evidence()
+    supplied = checks()
+    invalid_check = module.RiskCheckV1.model_validate(supplied["PRODUCT_CATALOGUE"]).model_copy(
+        update={"input_set_sha256": "not-a-sha"}
+    )
+    supplied["PRODUCT_CATALOGUE"] = invalid_check
+    with pytest.raises(PersistenceValueError):
+        encode(results=supplied)
+
+    invalid_plan = module.ReservationPlanV1.model_construct(
+        **(plan() | {"rate_policy_sha256": "not-a-sha"})
+    )
+    with pytest.raises(PersistenceValueError):
+        encode(reservation=invalid_plan)
 
 
 def test_derived_hash_payload_or_version_overrides_are_not_input_fields():
@@ -852,7 +887,7 @@ def test_denied_decisions_retain_the_effect_specific_na_allowlist():
 def test_size_changing_modify_can_be_approved_with_zero_new_order_slot():
     modify_command = UUID("90000000-0000-4000-8000-000000000009")
     payload = (
-        '{"product_id":1101,"requested_contracts":2,'
+        '{"product_id":1101,"requested_contracts":3,'
         '"target_order_id":"50000000-0000-4000-8000-000000000005"}'
     )
     envelope = '{"operation":"MODIFY_ORDER","payload":' + payload + ',"schema_version":1}'
@@ -861,9 +896,33 @@ def test_size_changing_modify_can_be_approved_with_zero_new_order_slot():
         command_operation_kind="MODIFY_ORDER",
         command_evidence_payload=payload,
         command_evidence_sha256=sha256(envelope.encode("ascii")).hexdigest(),
+        command_requested_contracts=3,
     )
-    encoded = encode(values=values, reservation=plan(reserved_open_order_slots=0))
+    encoded = encode(
+        values=values,
+        reservation=plan(approved_contracts=3, reserved_open_order_slots=0),
+    )
+    raw = json.loads(encoded.payload)
+    assert raw["order_requested_contracts"] == 2
+    assert raw["command_requested_contracts"] == 3
+    assert raw["reservation_plan"]["approved_contracts"] == 3
     assert json.loads(encoded.payload)["reservation_plan"]["reserved_open_order_slots"] == 0
+
+
+@pytest.mark.parametrize(
+    "context_changes",
+    [
+        {"observed_halt_set_state": "UNINITIALIZED"},
+        {
+            "observed_reconciliation_state": "BLOCKED",
+            "reconciliation_completeness": "PARTIAL",
+        },
+    ],
+)
+def test_denied_pass_checks_cannot_contradict_copied_state(context_changes):
+    values, results = denied("DUPLICATE_ORDER", reason="DUPLICATE_ORDER")
+    with pytest.raises(PersistenceValueError):
+        encode(values=values | context_changes, results=results, reservation=None)
 
 
 def test_payload_adapter_checks_bind_and_result_without_sibling_columns():
@@ -892,5 +951,11 @@ def test_evidence_payload_limit_admits_maximum_documented_values_and_rejects_exc
     )
     encoded = encode(values=maximum, reservation=reservation)
     assert len(encoded.payload.encode("ascii")) <= 16_384
+    oversized_payload = encoded.payload + (" " * (16_385 - len(encoded.payload.encode("ascii"))))
+    assert len(oversized_payload.encode("ascii")) == 16_385
     with pytest.raises(PersistenceValueError):
-        encode(values=maximum | {"decision_key": "x" * 129}, reservation=reservation)
+        evidence().decode_risk_decision_evidence(oversized_payload)
+    with pytest.raises(PersistenceValueError):
+        evidence().RiskDecisionEvidencePayload().process_bind_param(
+            oversized_payload, sqlite.dialect()
+        )
