@@ -84,6 +84,8 @@ def test_fill_schema_adds_only_two_tables_with_no_direct_order_foreign_key():
         "position_protection_orders",
         "recovery_incarnations",
         "leadership_leases",
+        "worker_heartbeats",
+        "scheduler_state",
     }
     assert {table.name for table in api.metadata.tables.values()} - baseline == {
         "fills",

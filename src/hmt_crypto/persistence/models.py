@@ -7,7 +7,12 @@ to later reviewed migration units. Import this module before inspecting metadata
 from hmt_crypto.persistence.attempt_models import OrderAttempt
 from hmt_crypto.persistence.catalogue_models import CatalogueProduct, CatalogueSnapshot
 from hmt_crypto.persistence.command_models import CommandOperation
-from hmt_crypto.persistence.coordination_models import LeadershipLease, RecoveryIncarnation
+from hmt_crypto.persistence.coordination_models import (
+    LeadershipLease,
+    RecoveryIncarnation,
+    SchedulerState,
+    WorkerHeartbeat,
+)
 from hmt_crypto.persistence.db import Base
 from hmt_crypto.persistence.execution_event_models import OrderAttemptEvent, OrderTransition
 from hmt_crypto.persistence.fill_models import Fill, FillOrderLink
@@ -42,5 +47,7 @@ __all__ = [
     "PositionProtectionOrder",
     "RecoveryIncarnation",
     "LeadershipLease",
+    "WorkerHeartbeat",
+    "SchedulerState",
     "metadata",
 ]

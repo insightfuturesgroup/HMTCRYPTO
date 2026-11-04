@@ -97,7 +97,10 @@ async def graph(db):
 
 def test_exact_two_coordination_tables_and_aggregate_exports():
     api = schema_api()
-    assert {t.name for t in api.metadata.tables.values()} == BASELINE | NEW_TABLES
+    assert {t.name for t in api.metadata.tables.values()} == BASELINE | NEW_TABLES | {
+        "worker_heartbeats",
+        "scheduler_state",
+    }
     assert api.RecoveryIncarnation.__tablename__ == "recovery_incarnations"
     assert api.LeadershipLease.__tablename__ == "leadership_leases"
     assert set(api.RecoveryIncarnation.__table__.c.keys()) == {
