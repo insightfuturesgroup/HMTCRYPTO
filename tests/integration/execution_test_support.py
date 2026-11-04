@@ -47,7 +47,7 @@ def order(owner, cmd, publication, **changes):
         product_id=1101,
         requested_contracts=2,
         requested_side="buy",
-        requested_order_type="limit",
+        requested_order_type="market",
         requested_limit_price=None,
         requested_reduce_only=False,
         state="PREPARED",

@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from execution_test_support import attempt, attempt_event, command, order, transition
 from execution_test_support import execution_db as execution_db
-from schema_test_support import NOW, schema_api
+from schema_test_support import NOW, account, schema_api
 from schema_test_support import schema_db as schema_db
 from sqlalchemy import insert, select, text
 
@@ -37,7 +37,12 @@ async def test_requested_prices_are_positive_exact_local_storage_values(executio
         async with db.transaction() as session:
             session.add(
                 order(
-                    owner, cmd, publication, client_order_id="priced", requested_limit_price=price
+                    owner,
+                    cmd,
+                    publication,
+                    client_order_id="priced",
+                    requested_limit_price=price,
+                    requested_order_type="limit",
                 )
             )
 
@@ -45,12 +50,27 @@ async def test_requested_prices_are_positive_exact_local_storage_values(executio
 @pytest.mark.asyncio
 async def test_microseconds_exact_decimal_and_unknown_fields_round_trip(execution_db):
     db, owner, publication, cmd, *_ = execution_db
+    cmd = command(
+        owner,
+        request_id="priced",
+        evidence={
+            "product_id": 1101,
+            "requested_contracts": 2,
+            "side": "buy",
+            "order_type": "limit",
+            "reduce_only": False,
+            "limit_price": Decimal("12345678901234567890.123456789012345678"),
+        },
+    )
+    async with db.transaction() as session:
+        session.add(cmd)
     instant = NOW.astimezone(timezone(timedelta(hours=5, minutes=30))).replace(microsecond=123456)
     row = order(
         owner,
         cmd,
         publication,
         client_order_id="x" * 32,
+        requested_order_type="limit",
         requested_limit_price=Decimal("12345678901234567890.123456789012345678"),
         created_at=instant,
         updated_at=instant,
@@ -216,4 +236,143 @@ async def test_filled_order_observation_is_strict_nonnegative_integer(execution_
                 .Order.__table__.update()
                 .where(schema_api().Order.id == row.id)
                 .values(observed_filled_contracts=invalid)
+            )
+
+
+async def basic_intent(db, mode, order_type):
+    owner = account(mode=mode, profile_name="basic-price-contract")
+    evidence = {
+        "product_id": 1101,
+        "requested_contracts": 2,
+        "side": "buy",
+        "order_type": order_type,
+        "reduce_only": False,
+    }
+    if order_type == "limit":
+        evidence["limit_price"] = Decimal("11")
+    cmd = command(owner, evidence=evidence)
+    async with db.transaction() as session:
+        session.add(owner)
+    async with db.transaction() as session:
+        session.add(cmd)
+    return owner, cmd
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["orm", "core"])
+@pytest.mark.parametrize("mode", ["LIVE", "PAPER", "BACKTEST"])
+@pytest.mark.parametrize(
+    "order_type,price,stop",
+    [
+        ("market", None, Decimal("10")),
+        ("limit", Decimal("11"), Decimal("10")),
+        ("market", Decimal("10"), None),
+        ("limit", None, None),
+        ("limit", Decimal("0"), None),
+        ("limit", Decimal("-1"), None),
+    ],
+)
+async def test_basic_order_rejects_stop_or_inconsistent_limit_price(
+    execution_db,
+    channel,
+    mode,
+    order_type,
+    price,
+    stop,
+):
+    db, _, publication, *_ = execution_db
+    owner, cmd = await basic_intent(db, mode, order_type)
+    candidate = order(
+        owner,
+        cmd,
+        publication,
+        origin="LOCAL_INTENT" if mode == "LIVE" else "SIMULATOR_INTENT",
+        requested_order_type=order_type,
+        requested_limit_price=price,
+        requested_stop_price=stop,
+    )
+    with pytest.raises(PersistenceError):
+        async with db.transaction() as session:
+            if channel == "orm":
+                session.add(candidate)
+            else:
+                values = {c.name: getattr(candidate, c.name) for c in candidate.__table__.columns}
+                await session.execute(insert(candidate.__table__).values(**values))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["orm", "core"])
+@pytest.mark.parametrize("mode", ["LIVE", "PAPER", "BACKTEST"])
+@pytest.mark.parametrize("order_type,price", [("market", None), ("limit", Decimal("11"))])
+async def test_complete_basic_market_and_limit_order_round_trip(
+    execution_db,
+    channel,
+    mode,
+    order_type,
+    price,
+):
+    db, _, publication, *_ = execution_db
+    owner, cmd = await basic_intent(db, mode, order_type)
+    candidate = order(
+        owner,
+        cmd,
+        publication,
+        origin="LOCAL_INTENT" if mode == "LIVE" else "SIMULATOR_INTENT",
+        requested_order_type=order_type,
+        requested_limit_price=price,
+    )
+    async with db.transaction() as session:
+        if channel == "orm":
+            session.add(candidate)
+        else:
+            values = {c.name: getattr(candidate, c.name) for c in candidate.__table__.columns}
+            await session.execute(insert(candidate.__table__).values(**values))
+    async with db.transaction() as session:
+        loaded = await session.get(schema_api().Order, candidate.id)
+        assert loaded.requested_order_type == order_type
+        assert loaded.requested_limit_price == price
+        assert loaded.requested_stop_price is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("requested_stop_price", Decimal("10")),
+        ("requested_limit_price", Decimal("11")),
+        ("requested_order_type", "market"),
+    ],
+)
+async def test_adopted_order_still_forbids_fabricated_price_and_type_intent(
+    execution_db, field, value
+):
+    db, *_ = execution_db
+    owner = account(mode="LIVE", profile_name="adopted-price")
+    async with db.transaction() as session:
+        session.add(owner)
+    candidate = schema_api().Order(
+        id=uuid4(),
+        account_id=owner.id,
+        region=owner.region,
+        environment=owner.environment,
+        mode=owner.mode,
+        origin="ADOPTED",
+        exchange_order_id="observed-order",
+        product_id=1101,
+        state="UNKNOWN",
+        version=1,
+        last_transition_sequence=0,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    async with db.transaction() as session:
+        session.add(candidate)
+    async with db.transaction() as session:
+        assert (await session.get(schema_api().Order, candidate.id)).requested_stop_price is None
+    with pytest.raises(PersistenceError):
+        async with db.transaction() as session:
+            await session.execute(
+                candidate.__table__.update()
+                .where(candidate.__table__.c.id == candidate.id)
+                .values(**{field: value})
             )

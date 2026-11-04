@@ -99,6 +99,13 @@ class Order(ScopedRow, Base):
             name="intent_provenance",
         ),
         CheckConstraint(
+            "origin = 'ADOPTED' OR (requested_stop_price IS NULL AND "
+            "((requested_order_type = 'market' AND requested_limit_price IS NULL) OR "
+            "(requested_order_type = 'limit' AND requested_limit_price IS NOT NULL "
+            "AND requested_limit_price > 0)))",
+            name="basic_intent_prices",
+        ),
+        CheckConstraint(
             "requested_limit_price IS NULL OR requested_limit_price > 0",
             name="limit_price_positive",
         ),
