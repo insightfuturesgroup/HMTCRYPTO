@@ -25,6 +25,7 @@ from hmt_crypto.persistence.protection_models import (
     ProtectionAuthorization,
 )
 from hmt_crypto.persistence.reconciliation_models import ReconciliationRun
+from hmt_crypto.persistence.reconciliation_resource_models import ReconciliationResource
 from hmt_crypto.persistence.signal_models import Signal
 
 metadata = Base.metadata
@@ -51,5 +52,6 @@ __all__ = [
     "WorkerHeartbeat",
     "SchedulerState",
     "ReconciliationRun",
+    "ReconciliationResource",
     "metadata",
 ]

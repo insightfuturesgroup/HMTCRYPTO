@@ -56,6 +56,7 @@ def test_postgres_ddl_has_private_scoped_named_restrict_constraints():
         "worker_heartbeats",
         "scheduler_state",
         "reconciliation_runs",
+        "reconciliation_resources",
     }
     assert "CREATE TABLE hmt_crypto.accounts" in ddl
     assert "TIMESTAMP WITH TIME ZONE" in ddl

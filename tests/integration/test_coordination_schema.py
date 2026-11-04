@@ -101,6 +101,7 @@ def test_exact_two_coordination_tables_and_aggregate_exports():
         "worker_heartbeats",
         "scheduler_state",
         "reconciliation_runs",
+        "reconciliation_resources",
     }
     assert api.RecoveryIncarnation.__tablename__ == "recovery_incarnations"
     assert api.LeadershipLease.__tablename__ == "leadership_leases"
