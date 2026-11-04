@@ -104,6 +104,8 @@ async def test_children_reject_existing_parent_in_another_scope(
     }
     candidate = candidates[kind]
     setattr(candidate, field, parents[field].id)
+    if kind == "transition" and field == "attempt_id":
+        candidate.attempt_backend = other_attempt.backend
     with pytest.raises(PersistenceError):
         await save(db, candidate)
 
@@ -190,7 +192,12 @@ async def test_identity_reuse_is_scoped_but_duplicates_inside_scope_fail(
 async def test_execution_parent_deletion_is_restricted(execution_db):
     db, owner, publication, cmd, row, prepared = execution_db
     await save(db, attempt_event(owner, prepared))
-    await save(db, transition(owner, row, attempt_id=prepared.id, command_id=cmd.id))
+    await save(
+        db,
+        transition(
+            owner, row, attempt_id=prepared.id, attempt_backend=prepared.backend, command_id=cmd.id
+        ),
+    )
     for parent in (owner, publication, cmd, row, prepared):
         with pytest.raises(PersistenceError):
             async with db.transaction() as session:
@@ -257,5 +264,19 @@ async def test_execution_children_cannot_reference_missing_parent(execution_db, 
         "transition": transition(owner, row),
     }[kind]
     setattr(candidate, field, uuid4())
+    if kind == "transition" and field == "attempt_id":
+        candidate.attempt_backend = "SIMULATOR"
     with pytest.raises(PersistenceError):
         await save(db, candidate)
+
+
+@pytest.mark.asyncio
+async def test_transition_attempt_backend_cannot_disagree_with_existing_candidate_key(execution_db):
+    db, owner, _, _, row, prepared = execution_db
+    with pytest.raises(PersistenceError):
+        await save(
+            db,
+            transition(
+                owner, row, source="RECONCILIATION", attempt_id=prepared.id, attempt_backend="VENUE"
+            ),
+        )

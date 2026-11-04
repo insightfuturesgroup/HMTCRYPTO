@@ -170,7 +170,12 @@ async def test_attempt_requires_command_and_consistent_backend_evidence(executio
 @pytest.mark.asyncio
 async def test_attempt_identity_is_command_scoped_and_order_independent(execution_db):
     db, owner, _, _, row, _ = execution_db
-    modify = command(owner, request_id="modify", operation_kind="MODIFY_ORDER", evidence={})
+    modify = command(
+        owner,
+        request_id="modify",
+        operation_kind="MODIFY_ORDER",
+        evidence={"product_id": 1101, "target_order_id": row.id, "requested_contracts": 3},
+    )
     await persist(db, modify)
     await persist(db, attempt(owner, modify, row, operation_kind="MODIFY_ORDER"))
     account_command = command(
@@ -270,3 +275,118 @@ async def test_simulator_events_cannot_claim_venue_response_and_resolution_has_o
             reconciliation_ref=uuid4(),
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_paper_transition_cannot_attribute_venue_response_to_simulator_attempt(execution_db):
+    db, owner, _, _, row, prepared = execution_db
+    with pytest.raises(PersistenceError):
+        await persist(
+            db,
+            transition(owner, row, event_kind="RESPONSE", source="VENUE", attempt_id=prepared.id),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"source": "VENUE"},
+        {"attempt_backend": "VENUE"},
+        {"attempt_id": None, "attempt_backend": None},
+        {"attempt_backend": None},
+        {"attempt_id": None},
+        {"source": "LOCAL"},
+        {"source": "RECONCILIATION"},
+    ],
+)
+async def test_response_transition_rejects_invalid_provenance_even_through_core(
+    execution_db, changes
+):
+    db, owner, _, _, row, prepared = execution_db
+    candidate = transition(
+        owner,
+        row,
+        event_kind="RESPONSE",
+        source="SIMULATOR",
+        attempt_id=prepared.id,
+        attempt_backend="SIMULATOR",
+    )
+    values = {c.name: getattr(candidate, c.name) for c in candidate.__table__.columns}
+    values.update(changes)
+    with pytest.raises(PersistenceError):
+        async with db.transaction() as session:
+            await session.execute(insert(candidate.__table__).values(**values))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["PAPER", "BACKTEST", "LIVE"])
+async def test_response_transition_backend_and_neutral_observations_round_trip(execution_db, mode):
+    db, _, publication, *_ = execution_db
+    owner = account(mode=mode, profile_name="provenance")
+    await persist(db, owner)
+    cmd = command(owner)
+    await persist(db, cmd)
+    row = order(
+        owner, cmd, publication, origin="LOCAL_INTENT" if mode == "LIVE" else "SIMULATOR_INTENT"
+    )
+    await persist(db, row)
+    if mode == "LIVE":
+        await persist(db, credential(owner))
+        prepared = venue_attempt(owner, cmd, row)
+    else:
+        prepared = attempt(owner, cmd, row, simulator_kind=mode)
+    await persist(db, prepared)
+    response = transition(
+        owner,
+        row,
+        event_kind="RESPONSE",
+        source=prepared.backend,
+        attempt_id=prepared.id,
+        attempt_backend=prepared.backend,
+    )
+    await persist(db, response)
+    for sequence, source in enumerate(("LOCAL", "RECONCILIATION"), start=2):
+        await persist(
+            db,
+            transition(
+                owner,
+                row,
+                event_kind="OBSERVATION",
+                source=source,
+                sequence=sequence,
+                event_key=f"neutral-{sequence}",
+            ),
+        )
+    # Reconciliation may cite a real attempt, or remain independent of an attempt.
+    await persist(
+        db,
+        transition(
+            owner,
+            row,
+            event_kind="RECONCILIATION",
+            source="RECONCILIATION",
+            sequence=4,
+            event_key="linked-recon",
+            attempt_id=prepared.id,
+            attempt_backend=prepared.backend,
+        ),
+    )
+    async with db.transaction() as session:
+        loaded = await session.get(type(response), response.id)
+        assert loaded.attempt_backend == prepared.backend
+    wrong_source = "SIMULATOR" if mode == "LIVE" else "VENUE"
+    with pytest.raises(PersistenceError):
+        await persist(
+            db,
+            transition(
+                owner,
+                row,
+                event_kind="RESPONSE",
+                source=wrong_source,
+                sequence=5,
+                event_key="wrong-source",
+                attempt_id=prepared.id,
+                attempt_backend=prepared.backend,
+            ),
+        )

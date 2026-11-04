@@ -85,7 +85,13 @@ class OrderTransition(ScopedRow, EvidenceRow, RecordedRow, Base):
         *scoped_constraints(__tablename__),
         *evidence_constraints(),
         scoped_fk(__tablename__, "order_id", "orders"),
-        scoped_fk(__tablename__, "attempt_id", "order_attempts"),
+        ForeignKeyConstraint(
+            ["attempt_id", *SCOPE, "attempt_backend"],
+            [f"hmt_crypto.order_attempts.{c}" for c in ("id", *SCOPE, "backend")],
+            name="fk_order_transitions_attempt_scope_backend",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
         scoped_fk(__tablename__, "command_id", "command_operations"),
         UniqueConstraint(*SCOPE, "order_id", "sequence", name="uq_order_transitions_sequence"),
         UniqueConstraint(*SCOPE, "event_key", name="uq_order_transitions_identity"),
@@ -93,13 +99,26 @@ class OrderTransition(ScopedRow, EvidenceRow, RecordedRow, Base):
         checked("from_state", STATES),
         checked("to_state", STATES),
         checked("source", ("LOCAL", "VENUE", "SIMULATOR", "RECONCILIATION")),
+        checked("attempt_backend", ("VENUE", "SIMULATOR")),
+        CheckConstraint(
+            "(attempt_id IS NULL AND attempt_backend IS NULL) OR "
+            "(attempt_id IS NOT NULL AND attempt_backend IS NOT NULL)",
+            name="attempt_backend_pair",
+        ),
+        CheckConstraint(
+            "event_kind <> 'RESPONSE' OR (attempt_id IS NOT NULL AND "
+            "((source = 'VENUE' AND mode = 'LIVE' AND attempt_backend = 'VENUE') OR "
+            "(source = 'SIMULATOR' AND mode IN ('PAPER','BACKTEST') "
+            "AND attempt_backend = 'SIMULATOR')))",
+            name="response_provenance",
+        ),
         bounded("event_key"),
         CheckConstraint("sequence >= 1", name="sequence_positive"),
         CheckConstraint("observed_at IS NULL OR observed_at <= recorded_at", name="time_order"),
         pair_check("leader_ref", "leader_generation"),
         pair_check("recovery_ref", "recovery_generation"),
         Index("ix_order_transitions_order", "order_id", *SCOPE),
-        Index("ix_order_transitions_attempt", "attempt_id", *SCOPE),
+        Index("ix_order_transitions_attempt", "attempt_id", *SCOPE, "attempt_backend"),
         Index("ix_order_transitions_command", "command_id", *SCOPE),
     )
 
@@ -111,6 +130,7 @@ class OrderTransition(ScopedRow, EvidenceRow, RecordedRow, Base):
     to_state: Mapped[str] = mapped_column(NulFreeString(32))
     source: Mapped[str] = mapped_column(NulFreeString(16))
     attempt_id: Mapped[UUID | None] = mapped_column(Uuid)
+    attempt_backend: Mapped[str | None] = mapped_column(NulFreeString(16))
     command_id: Mapped[UUID | None] = mapped_column(Uuid)
     observed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     leader_ref: Mapped[UUID | None] = mapped_column(Uuid)

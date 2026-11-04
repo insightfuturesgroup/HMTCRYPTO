@@ -1,7 +1,9 @@
 """Real database execution fixtures; no transport or private credentials."""
 
+import json
 from datetime import timedelta
-from uuid import uuid4
+from decimal import Decimal
+from uuid import UUID, uuid4
 
 import pytest_asyncio
 from schema_test_support import NOW, account, credential, product, schema_api, scope, snapshot
@@ -22,7 +24,13 @@ def command(owner, **changes):
         version=1,
         created_at=NOW,
         updated_at=NOW,
-        evidence={"product_id": 1101, "requested_contracts": 2, "side": "buy"},
+        evidence={
+            "product_id": 1101,
+            "requested_contracts": 2,
+            "side": "buy",
+            "order_type": "market",
+            "reduce_only": False,
+        },
     )
     values.update(changes)
     return schema_api().CommandOperation.from_evidence(**values)
@@ -53,19 +61,25 @@ def order(owner, cmd, publication, **changes):
 
 
 def attempt(owner, cmd, row=None, **changes):
+    evidence = json.loads(cmd.evidence_payload)
+    for field in ("limit_price", "leverage", "margin_delta"):
+        if field in evidence:
+            evidence[field] = Decimal(evidence[field])
+    if "target_order_id" in evidence:
+        evidence["target_order_id"] = UUID(evidence["target_order_id"])
     values = dict(
         id=uuid4(),
         **scope(owner),
         command_id=cmd.id,
         order_id=row.id if row else None,
         attempt_number=1,
-        operation_kind="PLACE_ORDER",
+        operation_kind=cmd.operation_kind,
         backend="SIMULATOR",
         simulator_kind="PAPER",
         correlation_id=uuid4(),
         prepared_at=NOW,
         recorded_at=NOW,
-        evidence={"product_id": 1101, "requested_contracts": 2},
+        evidence=evidence,
     )
     values.update(changes)
     return schema_api().OrderAttempt.from_evidence(**values)

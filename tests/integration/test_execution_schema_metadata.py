@@ -55,3 +55,31 @@ def test_execution_metadata_adds_exact_five_tables_and_compiles_postgres():
             for constraint in metadata.tables[f"hmt_crypto.{name}"].constraints
             if isinstance(constraint, UniqueConstraint)
         }
+    transition_table = metadata.tables["hmt_crypto.order_transitions"]
+    attempt_fk = next(
+        fk
+        for fk in transition_table.foreign_key_constraints
+        if fk.referred_table.name == "order_attempts"
+    )
+    assert tuple(attempt_fk.column_keys) == (
+        "attempt_id",
+        "account_id",
+        "region",
+        "environment",
+        "mode",
+        "attempt_backend",
+    )
+    assert tuple(element.column.name for element in attempt_fk.elements) == (
+        "id",
+        "account_id",
+        "region",
+        "environment",
+        "mode",
+        "backend",
+    )
+    attempt_table = metadata.tables["hmt_crypto.order_attempts"]
+    assert ("id", "account_id", "region", "environment", "mode", "backend") in {
+        tuple(c.name for c in constraint.columns)
+        for constraint in attempt_table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }

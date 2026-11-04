@@ -21,12 +21,9 @@ OPERATIONS = (
     "PLACE_ORDER",
     "MODIFY_ORDER",
     "CANCEL_ORDER",
-    "CANCEL_ALL",
     "SET_LEVERAGE",
     "SET_MARGIN_MODE",
     "CHANGE_POSITION_MARGIN",
-    "CREATE_BRACKET",
-    "EDIT_BRACKET",
 )
 ATTEMPT_EVENT_KINDS = (
     "DEFINITE_NOT_SENT",
@@ -51,19 +48,61 @@ class IntentEvidence(DomainModel):
     order_type: Literal["limit", "market"] | None = None
     reduce_only: StrictBool | None = None
     limit_price: Decimal | None = None
-    stop_price: Decimal | None = None
     target_order_id: UUID | None = None
     margin_mode: Literal["isolated", "portfolio"] | None = None
+    leverage: Decimal | None = None
+    margin_delta: Decimal | None = None
 
-    @field_validator("limit_price", "stop_price", mode="before")
+    @field_validator("limit_price", "leverage", "margin_delta", mode="before")
     @classmethod
-    def _price(cls, value: object) -> Decimal | None:
+    def _exact_amount(cls, value: object) -> Decimal | None:
         if value is None:
             return None
         _decimal_text(value, 38, 18)
-        if not isinstance(value, Decimal) or value <= 0:
+        if not isinstance(value, Decimal) or value == 0:
             raise PersistenceValueError()
         return value
+
+
+_REQUIRED = {
+    "PLACE_ORDER": frozenset(
+        {"product_id", "requested_contracts", "side", "order_type", "reduce_only"}
+    ),
+    "MODIFY_ORDER": frozenset({"product_id", "target_order_id"}),
+    "CANCEL_ORDER": frozenset({"product_id", "target_order_id"}),
+    "SET_LEVERAGE": frozenset({"product_id", "leverage"}),
+    "SET_MARGIN_MODE": frozenset({"margin_mode"}),
+    "CHANGE_POSITION_MARGIN": frozenset({"product_id", "margin_delta"}),
+}
+_OPTIONAL = {
+    "PLACE_ORDER": frozenset({"limit_price"}),
+    "MODIFY_ORDER": frozenset({"requested_contracts", "limit_price"}),
+}
+
+
+def _validate_intent(operation: str, value: dict[str, object], owned: DomainModel) -> None:
+    """Validate complete basic semantic variants, without building exchange DTOs."""
+    required = _REQUIRED[operation]
+    allowed = required | _OPTIONAL.get(operation, frozenset())
+    present = {field for field, item in value.items() if item is not None}
+    if (
+        set(value) - allowed
+        or not required <= present
+        or any(item is None for item in value.values())
+    ):
+        raise PersistenceValueError()
+    if not isinstance(owned, IntentEvidence):
+        raise PersistenceValueError()
+    intent = owned
+    if any(amount is not None and amount <= 0 for amount in (intent.limit_price, intent.leverage)):
+        raise PersistenceValueError()
+    if operation == "PLACE_ORDER":
+        if (intent.order_type == "limit" and intent.limit_price is None) or (
+            intent.order_type == "market" and "limit_price" in value
+        ):
+            raise PersistenceValueError()
+    if operation == "MODIFY_ORDER" and not ({"requested_contracts", "limit_price"} & present):
+        raise PersistenceValueError()
 
 
 class EventEvidence(DomainModel):
@@ -102,10 +141,12 @@ def encode_evidence(
             raise PersistenceValueError()
         contract = _CONTRACTS[kind]
         if isinstance(value, DomainModel) and type(value) is contract:
-            value = value.model_dump(mode="python", exclude_none=True)
+            value = value.model_dump(mode="python", exclude_unset=True)
         if type(value) is not dict:
             raise PersistenceValueError()
         owned = contract.model_validate(value, strict=True)
+        if kind == "intent":
+            _validate_intent(operation, value, owned)
         raw = owned.model_dump(mode="python", exclude_none=True)
         for key, item in raw.items():
             if type(item) is Decimal:
@@ -139,7 +180,7 @@ def validate_stored_evidence(
         if type(raw) is not dict:
             raise PersistenceValueError()
         if kind == "intent":
-            for key in ("limit_price", "stop_price"):
+            for key in ("limit_price", "leverage", "margin_delta"):
                 if key in raw:
                     raw[key] = Decimal(raw[key])
             if "target_order_id" in raw:
