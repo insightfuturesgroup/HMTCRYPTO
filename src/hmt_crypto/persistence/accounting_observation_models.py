@@ -50,7 +50,7 @@ from hmt_crypto.persistence.schema_support import (
     StrictBigInteger,
     bounded,
 )
-from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime
+from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime, exact_decimal_checks
 
 EVIDENCE_FIELDS = ("evidence_schema_version", "evidence_payload", "evidence_sha256")
 
@@ -124,6 +124,8 @@ class WalletTransaction(ScopedRow, Base):
         bounded("exchange_transaction_id"),
         bounded("transaction_type"),
         bounded("asset_symbol"),
+        *exact_decimal_checks("amount", ExactDecimal(38, 18)),
+        *exact_decimal_checks("post_balance", ExactDecimal(38, 18)),
         CheckConstraint(
             "requested_at <= received_at AND received_at <= recorded_at", name="time_order"
         ),
@@ -209,6 +211,8 @@ class FundingSnapshot(ScopedRow, Base):
         ),
         bounded("observation_key"),
         bounded("asset_symbol"),
+        *exact_decimal_checks("amount", ExactDecimal(38, 18)),
+        *exact_decimal_checks("rate", ExactDecimal(38, 18)),
         CheckConstraint(
             "(source_kind = 'WALLET_TRANSACTION' "
             "AND wallet_transaction_id IS NOT NULL AND position_snapshot_id IS NULL "

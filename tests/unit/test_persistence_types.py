@@ -126,9 +126,54 @@ def test_dialect_ddl_uses_exact_postgres_types_and_sqlite_text():
     )
     pg = str(CreateTable(table).compile(dialect=postgresql.dialect()))
     local = str(CreateTable(table).compile(dialect=sqlite.dialect()))
-    assert "NUMERIC(20, 8)" in pg
+    assert "amount NUMERIC" in pg
+    assert "NUMERIC(" not in pg
     assert "TIMESTAMP WITH TIME ZONE" in pg
     assert local.count("TEXT") == 2
+
+
+def test_decimal_statement_cache_identity_includes_precision_and_scale():
+    from hmt_crypto.persistence.types import ExactDecimal
+
+    baseline = ExactDecimal(precision=20, scale=8)._static_cache_key
+    assert ExactDecimal(precision=20, scale=8)._static_cache_key == baseline
+    assert ExactDecimal(precision=20, scale=7)._static_cache_key != baseline
+    assert ExactDecimal(precision=19, scale=8)._static_cache_key != baseline
+
+
+@pytest.mark.parametrize(
+    ("precision", "scale"),
+    [(20, 8), (8, 4), (6, 3), (3, 3), (38, 18)],
+)
+def test_decimal_postgres_checks_derive_exact_type_contract(precision, scale):
+    from sqlalchemy import Column, MetaData, Table
+    from sqlalchemy.dialects import postgresql, sqlite
+    from sqlalchemy.schema import CreateTable
+
+    from hmt_crypto.persistence.types import ExactDecimal, exact_decimal_checks
+
+    adapter = ExactDecimal(precision=precision, scale=scale)
+    table = Table(
+        "probe",
+        MetaData(),
+        Column("amount", adapter),
+        *exact_decimal_checks("amount", adapter),
+    )
+
+    pg = str(CreateTable(table).compile(dialect=postgresql.dialect()))
+    local = str(CreateTable(table).compile(dialect=sqlite.dialect()))
+    bound = 10 ** (precision - scale)
+    assert "CONSTRAINT decimal_amount_finite" in pg
+    assert "CAST(amount AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')" in pg
+    assert "CONSTRAINT decimal_amount_magnitude" in pg
+    assert f"abs(amount) < {bound}" in pg
+    assert "CONSTRAINT decimal_amount_scale" in pg
+    assert f"amount = trunc(amount, {scale})" in pg
+    assert "NUMERIC(" not in pg
+    assert "amount TEXT" in local
+    assert "decimal_amount_" not in local
+    assert "abs(" not in local
+    assert "trunc(" not in local
 
 
 @pytest.mark.parametrize("text", ["NaN", "1e0", "01", "1.0000", "-0", "1000", "0.0001"])

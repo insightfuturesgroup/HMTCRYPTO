@@ -201,9 +201,8 @@ def test_postgresql_named_constraints_and_product_candidates_compile():
                 for key in table.constraints
                 if isinstance(key, UniqueConstraint)
             }
-    assert "NUMERIC(38, 18)" in str(
-        CreateTable(api.ExitIntent.__table__).compile(dialect=postgresql.dialect())
-    )
+    exit_ddl = str(CreateTable(api.ExitIntent.__table__).compile(dialect=postgresql.dialect()))
+    assert "NUMERIC" in exit_ddl and "NUMERIC(" not in exit_ddl
 
 
 @pytest.mark.asyncio

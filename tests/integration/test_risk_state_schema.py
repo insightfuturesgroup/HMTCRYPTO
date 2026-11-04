@@ -319,7 +319,8 @@ def test_exact_three_tables_exports_columns_constraints_indexes_and_postgres_ddl
         for index in table.indexes:
             compiled = str(CreateIndex(index).compile(dialect=dialect))
             assert index.name and "CREATE" in compiled
-    assert "NUMERIC(38, 18)" in str(CreateTable(state_table).compile(dialect=dialect))
+    state_ddl = str(CreateTable(state_table).compile(dialect=dialect))
+    assert "NUMERIC" in state_ddl and "NUMERIC(" not in state_ddl
     release_index = next(index for index in event_table.indexes if "one_release" in index.name)
     assert release_index.unique
     assert "WHERE event_kind = 'RELEASED'" in str(

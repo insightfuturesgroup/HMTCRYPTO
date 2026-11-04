@@ -33,7 +33,7 @@ from hmt_crypto.persistence.schema_support import (
     StrictBigInteger,
     bounded,
 )
-from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime
+from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime, exact_decimal_checks
 
 
 class _PositiveFillSize(ExactDecimal):
@@ -87,6 +87,10 @@ class Fill(ScopedRow, EvidenceRow, RecordedRow, Base):
         checked("side", ("buy", "sell", "UNKNOWN")),
         checked("fill_type", FILL_TYPES),
         checked("source", ("VENUE", "SIMULATOR", "RECONCILIATION")),
+        *exact_decimal_checks("size", _PositiveFillSize(38, 18)),
+        *exact_decimal_checks("price", ExactDecimal(38, 18)),
+        *exact_decimal_checks("notional", ExactDecimal(38, 18)),
+        *exact_decimal_checks("commission", ExactDecimal(38, 18)),
         CheckConstraint("product_id >= 1", name="product_positive"),
         CheckConstraint("settling_asset_id >= 1", name="settling_asset_positive"),
         CheckConstraint(

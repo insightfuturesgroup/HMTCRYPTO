@@ -1,9 +1,9 @@
 """Exact SQLAlchemy bind/result boundaries for Decimal and UTC datetime values.
 
-Raw SQL bypasses these adapters. PostgreSQL NUMERIC rounds excess scale before
-CHECK/trigger inspection; adapter rejection is not raw-SQL precision enforcement.
-SQLite canonical text has no numeric SQL ordering/arithmetic semantics. Use the
-domain's Decimal arithmetic or PostgreSQL when numeric SQL operations are needed.
+Raw SQL bypasses these adapters. PostgreSQL models pair typmod-free NUMERIC with
+per-column checks so scale is inspected before any storage rounding. SQLite
+canonical text has no numeric SQL ordering/arithmetic semantics. Use the domain's
+Decimal arithmetic or PostgreSQL when numeric SQL operations are needed.
 """
 
 from datetime import UTC, datetime, timezone
@@ -11,8 +11,10 @@ from decimal import Decimal
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import DateTime, Numeric, Text
+from sqlalchemy import CheckConstraint, DateTime, Numeric, Text, column, func, literal
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.engine import Dialect
+from sqlalchemy.sql.elements import ColumnClause
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 from hmt_crypto.persistence.errors import PersistenceValueError
@@ -44,7 +46,7 @@ def _utc(value: object) -> datetime:
 
 
 class ExactDecimal(TypeDecorator[Decimal]):
-    """Require an explicit NUMERIC precision/scale and reject loss before binding.
+    """Require an application precision/scale and reject loss before binding.
 
     Finite exact Decimal instances only; trailing zeros do not consume scale.
     Tuple validation and fixed formatting are independent of ambient context.
@@ -69,9 +71,9 @@ class ExactDecimal(TypeDecorator[Decimal]):
         super().__init__()
 
     def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[Any]:
-        """Select native exact NUMERIC or canonical SQLite TEXT."""
+        """Select typmod-free native NUMERIC or canonical SQLite TEXT."""
         if dialect.name == "postgresql":
-            return dialect.type_descriptor(Numeric(self.precision, self.scale, asdecimal=True))
+            return dialect.type_descriptor(Numeric(asdecimal=True))
         if dialect.name == "sqlite":
             return dialect.type_descriptor(Text())
         raise PersistenceValueError()
@@ -104,6 +106,29 @@ class ExactDecimal(TypeDecorator[Decimal]):
         if _decimal_text(result, self.precision, self.scale) != value:
             raise PersistenceValueError()
         return result
+
+
+def exact_decimal_checks(
+    column_name: str, decimal_type: ExactDecimal
+) -> tuple[CheckConstraint, CheckConstraint, CheckConstraint]:
+    """Derive PostgreSQL raw-SQL checks from one exact Decimal type contract."""
+    target: ColumnClause[Any] = column(column_name)
+    magnitude = literal(10 ** (decimal_type.precision - decimal_type.scale))
+    scale = literal(decimal_type.scale)
+    return (
+        CheckConstraint(
+            sql_cast(target, Text).not_in(("NaN", "Infinity", "-Infinity")),
+            name=f"decimal_{column_name}_finite",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            func.abs(target) < magnitude,
+            name=f"decimal_{column_name}_magnitude",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            target == func.trunc(target, scale),
+            name=f"decimal_{column_name}_scale",
+        ).ddl_if(dialect="postgresql"),
+    )
 
 
 class UTCDateTime(TypeDecorator[datetime]):

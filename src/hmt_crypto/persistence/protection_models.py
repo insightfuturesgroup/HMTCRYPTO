@@ -41,7 +41,7 @@ from hmt_crypto.persistence.schema_support import (
     bounded,
     sha_check,
 )
-from hmt_crypto.persistence.types import UTCDateTime
+from hmt_crypto.persistence.types import UTCDateTime, exact_decimal_checks
 
 
 class ExitIntent(ScopedRow, EvidenceRow, Base):
@@ -71,6 +71,7 @@ class ExitIntent(ScopedRow, EvidenceRow, Base):
         checked("mechanism", MECHANISMS),
         checked("state", ("REQUESTED", "ACTIVE", "CANCELLED", "COMPLETED", "FAILED")),
         bounded("intent_key"),
+        *exact_decimal_checks("requested_trigger_price", PositivePrice(38, 18)),
         CheckConstraint("reduce_only = true", name="strict_reduce_only"),
         CheckConstraint(
             "product_id >= 1 AND requested_contracts >= 1 AND policy_version >= 1 AND version >= 1",

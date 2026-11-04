@@ -149,9 +149,11 @@ def test_exact_table_keys_fks_indexes_and_postgres_ddl():
     assert (*SCOPE, "window_start_at", "window_end_at") in indexes
     ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
     assert "UUID" in ddl and "BIGINT" in ddl and "TIMESTAMP WITH TIME ZONE" in ddl
-    assert "NUMERIC(38, 18)" in ddl
+    assert "NUMERIC" in ddl and "NUMERIC(" not in ddl
     for constraint in table.constraints:
-        assert constraint.name and constraint.name in ddl
+        assert constraint.name
+        compiled_name = postgresql.dialect().identifier_preparer.format_constraint(constraint)
+        assert compiled_name in ddl
     for fk in table.foreign_key_constraints:
         source, target = expected[fk.referred_table.name]
         assert tuple(fk.column_keys) == source

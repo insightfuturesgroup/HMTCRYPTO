@@ -42,7 +42,7 @@ from hmt_crypto.persistence.schema_support import (
     bounded,
     sha_check,
 )
-from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime
+from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime, exact_decimal_checks
 
 EVIDENCE_FIELDS = ("evidence_schema_version", "evidence_payload", "evidence_sha256")
 SEMANTIC_COLUMN = {
@@ -89,6 +89,11 @@ class PnlSnapshot(ScopedRow, Base):
         CheckConstraint("calculation_version >= 1", name="calculation_version_positive"),
         sha_check("calculation_policy_sha256"),
         sha_check("input_set_sha256"),
+        *(
+            constraint
+            for field in MEASURE_FIELDS
+            for constraint in exact_decimal_checks(field, ExactDecimal(38, 18))
+        ),
         *(
             CheckConstraint(f"{field} IS NULL OR {field} >= 0", name=f"{field}_nonnegative")
             for field in LOSS_FIELDS

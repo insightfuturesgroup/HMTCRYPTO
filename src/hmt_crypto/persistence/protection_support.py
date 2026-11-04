@@ -2,7 +2,7 @@
 
 Column adapters cover ORM/Core binds and results. Cross-column canonical/hash
 identity and coverage sufficiency are ORM checks, not Core/raw-SQL guarantees.
-Raw-SQL append-only/numeric and concurrent-writer enforcement belongs to 2.1f.
+Raw-SQL append-only and concurrent-writer enforcement belongs to later 2.1f work.
 """
 
 import json

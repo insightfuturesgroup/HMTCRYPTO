@@ -21,7 +21,7 @@ from hmt_crypto.persistence.execution_support import (
     scoped_fk,
 )
 from hmt_crypto.persistence.schema_support import SCOPE, NulFreeString, StrictBigInteger, bounded
-from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime
+from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime, exact_decimal_checks
 
 
 def _client_charset() -> tuple[CheckConstraint, CheckConstraint]:
@@ -73,6 +73,8 @@ class Order(ScopedRow, Base):
         bounded("client_order_id", 32),
         *_client_charset(),
         bounded("exchange_order_id"),
+        *exact_decimal_checks("requested_limit_price", ExactDecimal(38, 18)),
+        *exact_decimal_checks("requested_stop_price", ExactDecimal(38, 18)),
         CheckConstraint("product_id >= 1 AND requested_contracts >= 1", name="positive_contracts"),
         CheckConstraint("version >= 1 AND last_transition_sequence >= 0", name="counters"),
         CheckConstraint("observed_filled_contracts >= 0", name="observed_filled_nonnegative"),

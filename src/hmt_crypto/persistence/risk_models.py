@@ -54,7 +54,7 @@ from hmt_crypto.persistence.schema_support import (
     bounded,
     sha_check,
 )
-from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime
+from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime, exact_decimal_checks
 
 RECONCILIATION_STATES = ("UNKNOWN", "BLOCKED", "READY_CLAIM")
 ACCOUNTING_STATES = ("UNKNOWN", "PARTIAL", "COMPLETE_CLAIM")
@@ -193,6 +193,8 @@ class RiskState(ScopedRow, Base):
         ),
         sha_check("accounting_input_set_sha256"),
         bounded("reference_asset_symbol"),
+        *exact_decimal_checks("baseline_equity", ExactDecimal(38, 18)),
+        *exact_decimal_checks("conservative_daily_loss", ExactDecimal(38, 18)),
         CheckConstraint(
             "conservative_daily_loss IS NULL OR conservative_daily_loss >= 0",
             name="conservative_daily_loss_nonnegative",

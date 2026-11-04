@@ -134,7 +134,7 @@ def test_fill_postgres_ddl_has_exact_product_qualified_link_keys():
         ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
         assert "TIMESTAMP WITH TIME ZONE" in ddl
         if name == "fills":
-            assert "NUMERIC(38, 18)" in ddl
+            assert "NUMERIC" in ddl and "NUMERIC(" not in ddl
         assert all(c.name for c in table.constraints)
         for index in table.indexes:
             assert index.name

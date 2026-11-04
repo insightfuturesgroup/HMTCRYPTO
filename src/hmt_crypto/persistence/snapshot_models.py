@@ -47,7 +47,7 @@ from hmt_crypto.persistence.snapshot_observation import (
     encode_snapshot,
     validate_snapshot,
 )
-from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime
+from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime, exact_decimal_checks
 
 COMMON_FIELDS = (
     "resource_kind",
@@ -120,6 +120,17 @@ class PositionSnapshot(ScopedRow, Base):
         ),
         checked("resource_kind", POSITION_KINDS),
         checked("margin_mode", ("isolated", "portfolio", "UNKNOWN")),
+        *(
+            constraint
+            for field in (
+                "entry_price",
+                "mark_price",
+                "liquidation_price",
+                "margin",
+                "unrealized_pnl",
+            )
+            for constraint in exact_decimal_checks(field, ExactDecimal(38, 18))
+        ),
         CheckConstraint("product_id >= 1", name="product_positive"),
         CheckConstraint(
             "resource_kind = 'MARGINED_POSITIONS' OR "
@@ -180,6 +191,11 @@ class BalanceSnapshot(ScopedRow, Base):
         CheckConstraint("resource_kind = 'BALANCES'", name="resource_kind"),
         CheckConstraint("asset_id >= 1", name="asset_positive"),
         bounded("asset_symbol"),
+        *(
+            constraint
+            for field in ("available_balance", "balance", "blocked_margin")
+            for constraint in exact_decimal_checks(field, ExactDecimal(38, 18))
+        ),
     )
 
     resource_id: Mapped[UUID] = mapped_column(Uuid)

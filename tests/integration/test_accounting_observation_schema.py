@@ -268,7 +268,7 @@ def test_exact_tables_keys_fks_indexes_and_postgres_ddl():
         indexes = {tuple(column.name for column in index.columns) for index in table.indexes}
         ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
         assert "UUID" in ddl and "BIGINT" in ddl and "TIMESTAMP WITH TIME ZONE" in ddl
-        assert "NUMERIC(38, 18)" in ddl and "TEXT" in ddl
+        assert "NUMERIC" in ddl and "NUMERIC(" not in ddl and "TEXT" in ddl
         for constraint in table.constraints:
             assert constraint.name and constraint.name in ddl
         for fk in table.foreign_key_constraints:
