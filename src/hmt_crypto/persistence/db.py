@@ -10,6 +10,7 @@ import asyncio
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import TracebackType
 from typing import Any
 
 from pydantic import ValidationError
@@ -157,12 +158,19 @@ class Database:
             session = self._sessions()
             transaction = session.begin()
             entered = False
+            exit_error: tuple[
+                type[BaseException] | None, BaseException | None, TracebackType | None
+            ] = (None, None, None)
             try:
                 await transaction.__aenter__()
                 entered = True
                 yield session
-            finally:
+            except BaseException:
+                # Only exceptions from this entry/body can request rollback.
+                # An outer except handler may leave an unrelated exc_info active.
                 exit_error = sys.exc_info()
+                raise
+            finally:
 
                 async def finish() -> None:
                     try:

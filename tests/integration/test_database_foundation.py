@@ -440,3 +440,49 @@ async def test_cancellation_during_teardown_keeps_disposal_blocked_until_session
         # Also drain dependency-created cleanup tasks on the expected RED path.
         if owned_sessions and not close_finished.is_set():
             await asyncio.wait_for(close_finished.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_successful_transaction_inside_outer_except_commits(database):
+    table = await probe_table(database)
+    try:
+        raise ValueError("already handled outside the database transaction")
+    except ValueError:
+        async with database.transaction() as session:
+            await session.execute(insert(table).values(id=1, amount=Decimal("12.5")))
+    async with database.transaction() as session:
+        assert (await session.execute(select(table.c.id, table.c.amount))).all() == [
+            (1, Decimal("12.5"))
+        ]
+
+
+@pytest.mark.asyncio
+async def test_interrupted_entry_closes_session_and_rolls_back_partial_work(database, monkeypatch):
+    from sqlalchemy.exc import InvalidRequestError
+    from sqlalchemy.ext.asyncio import AsyncSessionTransaction
+
+    table = await probe_table(database)
+    original_enter = AsyncSessionTransaction.__aenter__
+    sessions = []
+
+    class EntryInterrupted(BaseException):
+        pass
+
+    interruption = EntryInterrupted()
+
+    async def interrupted_enter(transaction):
+        await original_enter(transaction)
+        sessions.append(transaction.session)
+        await transaction.session.execute(insert(table).values(id=1))
+        raise interruption
+
+    with monkeypatch.context() as patched:
+        patched.setattr(AsyncSessionTransaction, "__aenter__", interrupted_enter)
+        with pytest.raises(EntryInterrupted) as error:
+            async with database.transaction():
+                pytest.fail("interrupted entry admitted a transaction body")
+        assert error.value is interruption
+    with pytest.raises(InvalidRequestError):
+        await sessions[0].execute(text("SELECT 1"))
+    async with database.transaction() as session:
+        assert (await session.execute(select(table))).all() == []
