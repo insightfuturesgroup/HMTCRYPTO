@@ -187,6 +187,7 @@ def test_exact_resource_keys_columns_and_complete_postgres_ddl():
             "position_snapshots",
             "balance_snapshots",
             "wallet_transactions",
+            "reconciliation_drifts",
         }:
             assert "reconciliation_resources" not in {
                 fk.referred_table.name for fk in prior.foreign_key_constraints

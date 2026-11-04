@@ -111,6 +111,8 @@ def test_exact_run_root_export_columns_complete_scoped_keys_and_postgres_ddl():
         "scheduler_state",
         "reconciliation_runs",
         "reconciliation_resources",
+        "reconciliation_drifts",
+        "reconciliation_acknowledgements",
         "position_snapshots",
         "balance_snapshots",
         "wallet_transactions",
@@ -170,6 +172,7 @@ def test_exact_run_root_export_columns_complete_scoped_keys_and_postgres_ddl():
     for prior in api.metadata.tables.values():
         if prior is not table and prior.name not in {
             "reconciliation_resources",
+            "reconciliation_drifts",
             "pnl_snapshots",
         }:
             assert "reconciliation_runs" not in {

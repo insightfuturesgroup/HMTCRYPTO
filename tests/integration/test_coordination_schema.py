@@ -102,6 +102,8 @@ def test_exact_two_coordination_tables_and_aggregate_exports():
         "scheduler_state",
         "reconciliation_runs",
         "reconciliation_resources",
+        "reconciliation_drifts",
+        "reconciliation_acknowledgements",
         "position_snapshots",
         "balance_snapshots",
         "wallet_transactions",

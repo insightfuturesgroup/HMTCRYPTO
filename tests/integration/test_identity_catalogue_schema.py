@@ -57,6 +57,8 @@ def test_postgres_ddl_has_private_scoped_named_restrict_constraints():
         "scheduler_state",
         "reconciliation_runs",
         "reconciliation_resources",
+        "reconciliation_drifts",
+        "reconciliation_acknowledgements",
         "position_snapshots",
         "balance_snapshots",
         "wallet_transactions",

@@ -88,6 +88,8 @@ def test_fill_schema_adds_only_two_tables_with_no_direct_order_foreign_key():
         "scheduler_state",
         "reconciliation_runs",
         "reconciliation_resources",
+        "reconciliation_drifts",
+        "reconciliation_acknowledgements",
         "position_snapshots",
         "balance_snapshots",
         "wallet_transactions",

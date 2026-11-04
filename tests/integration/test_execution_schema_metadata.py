@@ -31,6 +31,8 @@ def test_execution_metadata_tables_and_compiles_postgres():
         "scheduler_state",
         "reconciliation_runs",
         "reconciliation_resources",
+        "reconciliation_drifts",
+        "reconciliation_acknowledgements",
         "position_snapshots",
         "balance_snapshots",
         "wallet_transactions",

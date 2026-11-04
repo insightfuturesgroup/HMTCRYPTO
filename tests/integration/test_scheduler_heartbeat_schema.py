@@ -83,6 +83,8 @@ def test_exact_two_added_tables_exports_and_acyclic_stable_scoped_keys():
         *ADDED,
         "reconciliation_runs",
         "reconciliation_resources",
+        "reconciliation_drifts",
+        "reconciliation_acknowledgements",
         "position_snapshots",
         "balance_snapshots",
         "wallet_transactions",
