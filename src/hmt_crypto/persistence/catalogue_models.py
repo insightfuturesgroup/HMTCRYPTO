@@ -43,6 +43,7 @@ class CatalogueSnapshot(Base):
         UniqueConstraint(
             "region", "environment", "revision", name="uq_catalogue_snapshots_venue_revision"
         ),
+        UniqueConstraint("id", "region", "environment", name="uq_catalogue_snapshots_id_venue"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)

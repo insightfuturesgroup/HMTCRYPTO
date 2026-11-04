@@ -40,6 +40,7 @@ class Signal(Base):
         CheckConstraint("product_id >= 1", name="product_id_positive"),
         CheckConstraint("generated_at <= recorded_at", name="time_order"),
         UniqueConstraint(*SCOPE, "signal_key", name="uq_signals_scope_key"),
+        UniqueConstraint("id", *SCOPE, name="uq_signals_id_scope"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
