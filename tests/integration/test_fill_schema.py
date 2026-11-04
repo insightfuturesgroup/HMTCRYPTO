@@ -78,6 +78,10 @@ def test_fill_schema_adds_only_two_tables_with_no_direct_order_foreign_key():
         "order_attempts",
         "order_attempt_events",
         "order_transitions",
+        "exit_intents",
+        "protection_authorizations",
+        "position_protections",
+        "position_protection_orders",
     }
     assert {table.name for table in api.metadata.tables.values()} - baseline == {
         "fills",

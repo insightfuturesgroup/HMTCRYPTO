@@ -12,6 +12,12 @@ from hmt_crypto.persistence.execution_event_models import OrderAttemptEvent, Ord
 from hmt_crypto.persistence.fill_models import Fill, FillOrderLink
 from hmt_crypto.persistence.identity_models import Account, CredentialVersion
 from hmt_crypto.persistence.order_models import Order
+from hmt_crypto.persistence.protection_models import (
+    ExitIntent,
+    PositionProtection,
+    PositionProtectionOrder,
+    ProtectionAuthorization,
+)
 from hmt_crypto.persistence.signal_models import Signal
 
 metadata = Base.metadata
@@ -29,5 +35,9 @@ __all__ = [
     "OrderTransition",
     "Fill",
     "FillOrderLink",
+    "ExitIntent",
+    "ProtectionAuthorization",
+    "PositionProtection",
+    "PositionProtectionOrder",
     "metadata",
 ]

@@ -37,6 +37,14 @@ ATTEMPT_EVENT_KINDS = (
 )
 TRANSITION_KINDS = ("LOCAL_INTENT", "OBSERVATION", "RESPONSE", "RECONCILIATION")
 FILL_TYPES = ("normal", "adl", "liquidation", "settlement", "otc", "UNKNOWN")
+EXIT_PURPOSES = ("STOP_LOSS", "TAKE_PROFIT", "CLOSE_POSITION")
+PROTECTION_DECISIONS = (
+    "PAPER_AUTHORIZED",
+    "DENIED",
+    "UNVERIFIED",
+    "TESTNET_NATIVE_VERIFIED",
+    "SYNTHETIC_AUTHORIZED",
+)
 
 
 class IntentEvidence(DomainModel):
@@ -126,17 +134,39 @@ class FillEvidence(DomainModel):
     role: Literal["maker", "taker", "UNKNOWN"] | None = None
 
 
+class ExitPolicyEvidence(DomainModel):
+    """Requested trigger basis only; no private order or bracket wire semantics."""
+
+    trigger_basis: Literal["MARK_PRICE", "LAST_PRICE", "NONE"]
+
+
+class ProtectionAuthorizationEvidence(DomainModel):
+    """Classified immutable evidence, never an executable capability."""
+
+    basis: Literal[
+        "SIMULATION",
+        "DENIED",
+        "UNVERIFIED",
+        "TESTNET_VERIFICATION",
+        "EXPLICIT_SYNTHETIC_AUTHORIZATION",
+    ]
+
+
 _CONTRACTS: dict[str, type[DomainModel]] = {
     "intent": IntentEvidence,
     "event": EventEvidence,
     "transition": TransitionEvidence,
     "fill": FillEvidence,
+    "exit_policy": ExitPolicyEvidence,
+    "protection_authorization": ProtectionAuthorizationEvidence,
 }
 _OPERATIONS = {
     "intent": OPERATIONS,
     "event": ATTEMPT_EVENT_KINDS,
     "transition": TRANSITION_KINDS,
     "fill": FILL_TYPES,
+    "exit_policy": EXIT_PURPOSES,
+    "protection_authorization": PROTECTION_DECISIONS,
 }
 
 
