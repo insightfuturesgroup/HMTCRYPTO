@@ -81,6 +81,7 @@ def test_exact_two_added_tables_exports_and_acyclic_stable_scoped_keys():
         "recovery_incarnations",
         "leadership_leases",
         *ADDED,
+        "reconciliation_runs",
     }
     expected = {
         "WorkerHeartbeat": {
@@ -148,7 +149,7 @@ def test_exact_two_added_tables_exports_and_acyclic_stable_scoped_keys():
         for index in table.indexes:
             assert index.name in str(CreateIndex(index).compile(dialect=postgresql.dialect()))
     for table in api.metadata.tables.values():
-        if table.name not in ADDED:
+        if table.name not in ADDED | {"reconciliation_runs"}:
             assert not ADDED & {fk.referred_table.name for fk in table.foreign_key_constraints}
     scheduler = api.SchedulerState.__table__
     assert (*SCOPE, "job_key") in {

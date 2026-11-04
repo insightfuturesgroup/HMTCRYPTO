@@ -100,6 +100,7 @@ def test_exact_two_coordination_tables_and_aggregate_exports():
     assert {t.name for t in api.metadata.tables.values()} == BASELINE | NEW_TABLES | {
         "worker_heartbeats",
         "scheduler_state",
+        "reconciliation_runs",
     }
     assert api.RecoveryIncarnation.__tablename__ == "recovery_incarnations"
     assert api.LeadershipLease.__tablename__ == "leadership_leases"

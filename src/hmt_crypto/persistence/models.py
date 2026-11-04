@@ -24,6 +24,7 @@ from hmt_crypto.persistence.protection_models import (
     PositionProtectionOrder,
     ProtectionAuthorization,
 )
+from hmt_crypto.persistence.reconciliation_models import ReconciliationRun
 from hmt_crypto.persistence.signal_models import Signal
 
 metadata = Base.metadata
@@ -49,5 +50,6 @@ __all__ = [
     "LeadershipLease",
     "WorkerHeartbeat",
     "SchedulerState",
+    "ReconciliationRun",
     "metadata",
 ]
