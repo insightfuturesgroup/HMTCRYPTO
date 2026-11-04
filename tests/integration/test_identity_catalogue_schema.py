@@ -51,6 +51,8 @@ def test_postgres_ddl_has_private_scoped_named_restrict_constraints():
         "protection_authorizations",
         "position_protections",
         "position_protection_orders",
+        "recovery_incarnations",
+        "leadership_leases",
     }
     assert "CREATE TABLE hmt_crypto.accounts" in ddl
     assert "TIMESTAMP WITH TIME ZONE" in ddl

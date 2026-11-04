@@ -38,6 +38,8 @@ def test_exact_four_protection_tables_are_present():
         "order_transitions",
         "fills",
         "fill_order_links",
+        "recovery_incarnations",
+        "leadership_leases",
     }
     assert {t.name for t in schema_api().metadata.tables.values()} - baseline == NEW_TABLES
 
