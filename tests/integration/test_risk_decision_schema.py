@@ -269,7 +269,7 @@ def test_only_the_reviewed_new_table_and_reverse_parent_edges_exist():
     api = schema_api()
     table_names = {table.name for table in api.metadata.tables.values()}
     assert "risk_decisions" in table_names
-    assert len(table_names) == 34
+    assert len(table_names) == 35
     expected_parents = {
         "accounts",
         "risk_state",

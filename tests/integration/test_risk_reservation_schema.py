@@ -208,8 +208,8 @@ def test_exact_table_export_columns_candidates_fks_indexes_checks_and_offline_dd
     local = str(CreateTable(table).compile(dialect=sqlite.dialect()))
     assert pg.count(" NUMERIC") == 6
     assert "NUMERIC(" not in pg
-    assert "DISPATCH_COMMITTED" not in pg + local
-    assert "PENDING_DISPATCH" in pg and "RELEASED" in pg
+    reservation_statuses = ("PENDING_DISPATCH", "DISPATCH_COMMITTED", "RELEASED")
+    assert all(status in pg + local for status in reservation_statuses)
     names = {constraint.name for constraint in table.constraints}
     assert None not in names
     check_names = {
@@ -1063,4 +1063,4 @@ async def test_populated_schema_can_drop_and_recreate_the_single_reservation_tab
             ).all()
         }
     assert "risk_reservations" in names
-    assert len(api.metadata.tables) == 34
+    assert len(api.metadata.tables) == 35

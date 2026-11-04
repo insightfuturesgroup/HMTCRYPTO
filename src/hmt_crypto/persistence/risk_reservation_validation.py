@@ -303,7 +303,7 @@ def _expected_release_payload(values: dict[str, object]) -> dict[str, object]:
 
 
 def _validate_lifecycle(values: dict[str, object], release_fields: tuple[str, ...]) -> None:
-    status = _enum(values["status"], ("PENDING_DISPATCH", "RELEASED"))
+    status = _enum(values["status"], ("PENDING_DISPATCH", "DISPATCH_COMMITTED", "RELEASED"))
     version = _integer(values["version"])
     if status == "PENDING_DISPATCH":
         if (
@@ -316,6 +316,27 @@ def _validate_lifecycle(values: dict[str, object], release_fields: tuple[str, ..
             or values["remaining_collateral"] != values["planned_collateral"]
             or values["remaining_open_order_slots"] != values["planned_open_order_slots"]
             or values["pending_rate_units"] != values["planned_pending_rate_units"]
+            or any(values[field] is not None for field in release_fields)
+        ):
+            raise PersistenceValueError()
+        return
+
+    if status == "DISPATCH_COMMITTED":
+        created_at = _time(values["created_at"])
+        updated_at = _time(values["updated_at"])
+        window_end = _time(values["rate_window_end_at"])
+        assert created_at is not None and updated_at is not None and window_end is not None
+        if (
+            version != 2
+            or updated_at < created_at
+            or updated_at >= window_end
+            or values["remaining_contracts"] != values["approved_contracts"]
+            or values["remaining_incremental_gross_exposure"]
+            != values["planned_incremental_gross_exposure"]
+            or values["remaining_worst_case_loss"] != values["planned_worst_case_loss"]
+            or values["remaining_collateral"] != values["planned_collateral"]
+            or values["remaining_open_order_slots"] != values["planned_open_order_slots"]
+            or values["pending_rate_units"] != 0
             or any(values[field] is not None for field in release_fields)
         ):
             raise PersistenceValueError()
@@ -424,7 +445,9 @@ def install_risk_reservation_validation(
                 proposed[column.name] = state.dict[column.name]
         if stored_values["status"] != "PENDING_DISPATCH" or stored_values["version"] != 1:
             raise PersistenceValueError()
-        if proposed["status"] != "RELEASED" or proposed["version"] != 2:
+        if proposed["status"] not in {"DISPATCH_COMMITTED", "RELEASED"} or (
+            proposed["version"] != 2
+        ):
             raise PersistenceValueError()
         if any(not _same(proposed[field], stored_values[field]) for field in immutable_fields):
             raise PersistenceValueError()

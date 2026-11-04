@@ -123,6 +123,7 @@ def test_exact_run_root_export_columns_complete_scoped_keys_and_postgres_ddl():
         "risk_halt_events",
         "risk_decisions",
         "risk_reservations",
+        "risk_rate_consumptions",
     }
     table = api.ReconciliationRun.__table__
     assert set(table.c.keys()) == {

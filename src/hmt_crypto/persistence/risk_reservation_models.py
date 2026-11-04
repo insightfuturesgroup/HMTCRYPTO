@@ -199,7 +199,7 @@ class RiskReservation(ScopedRow, Base):
         checked("decision_outcome", ("APPROVED",)),
         checked("risk_effect", ("RISK_INCREASE", "REDUCE_ONLY")),
         checked("approved_side", ("buy", "sell")),
-        checked("status", ("PENDING_DISPATCH", "RELEASED")),
+        checked("status", ("PENDING_DISPATCH", "DISPATCH_COMMITTED", "RELEASED")),
         checked("release_reason_code", ("DEFINITE_NOT_DISPATCHED",)),
         checked("observed_terminal_command_status", ("FAILED", "CANCELLED")),
         bounded("reference_asset_symbol"),
@@ -261,6 +261,15 @@ class RiskReservation(ScopedRow, Base):
             "AND remaining_collateral = planned_collateral "
             "AND remaining_open_order_slots = planned_open_order_slots "
             "AND pending_rate_units = planned_pending_rate_units AND "
+            + " AND ".join(f"{field} IS NULL" for field in RELEASE_FIELDS)
+            + ") OR (status = 'DISPATCH_COMMITTED' AND version = 2 "
+            "AND updated_at >= created_at AND updated_at < rate_window_end_at "
+            "AND remaining_contracts = approved_contracts "
+            "AND remaining_incremental_gross_exposure = planned_incremental_gross_exposure "
+            "AND remaining_worst_case_loss = planned_worst_case_loss "
+            "AND remaining_collateral = planned_collateral "
+            "AND remaining_open_order_slots = planned_open_order_slots "
+            "AND pending_rate_units = 0 AND "
             + " AND ".join(f"{field} IS NULL" for field in RELEASE_FIELDS)
             + ") OR (status = 'RELEASED' AND version = 2 "
             "AND remaining_contracts = 0 "

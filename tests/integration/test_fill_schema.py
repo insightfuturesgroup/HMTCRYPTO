@@ -100,6 +100,7 @@ def test_fill_schema_adds_only_two_tables_with_no_direct_order_foreign_key():
         "risk_halt_events",
         "risk_decisions",
         "risk_reservations",
+        "risk_rate_consumptions",
     }
     assert {table.name for table in api.metadata.tables.values()} - baseline == {
         "fills",
