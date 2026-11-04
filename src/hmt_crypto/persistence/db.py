@@ -7,6 +7,7 @@ connections. PostgreSQL pooler/TLS/role suitability requires deployment evidence
 """
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -57,6 +58,26 @@ def _sqlite_connect(dbapi_connection: Any, connection_record: Any) -> None:
 
 def _sqlite_begin(connection: Connection) -> None:
     connection.exec_driver_sql("BEGIN")
+
+
+async def _complete_cleanup(task: asyncio.Task[None]) -> None:
+    """Retain ownership until cleanup finishes, then propagate caller cancellation."""
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if task.cancelled():
+                raise
+            cancellation = error
+        except Exception:
+            if cancellation is not None:
+                raise cancellation from None
+            raise
+        else:
+            if cancellation is not None:
+                raise cancellation from None
+            return
 
 
 class Database:
@@ -125,13 +146,34 @@ class Database:
         Database errors become stable safe errors. Caller/domain exceptions and
         cancellation retain their type. The yielded session cannot be reopened
         after exit; use a fresh transaction for subsequent/concurrent work.
+        Caller cancellation waits for owned rollback/commit and session closure;
+        disposal remains blocked throughout cleanup, independent of SQLAlchemy's
+        context-manager cancellation behavior.
         """
         if self._closing:
             raise PersistenceError()
         self._active += 1
         try:
-            async with self._sessions.begin() as session:
+            session = self._sessions()
+            transaction = session.begin()
+            entered = False
+            try:
+                await transaction.__aenter__()
+                entered = True
                 yield session
+            finally:
+                exit_error = sys.exc_info()
+
+                async def finish() -> None:
+                    try:
+                        if entered:
+                            await transaction.__aexit__(*exit_error)
+                    finally:
+                        await session.close()
+
+                # Own the task and await its actual completion. A shield alone
+                # can return cancellation while the protected task still runs.
+                await _complete_cleanup(asyncio.create_task(finish()))
         except (SQLAlchemyError, OSError):
             raise PersistenceError() from None
         finally:
