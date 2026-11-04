@@ -85,6 +85,8 @@ def test_exact_two_added_tables_exports_and_acyclic_stable_scoped_keys():
         "reconciliation_resources",
         "position_snapshots",
         "balance_snapshots",
+        "wallet_transactions",
+        "funding_snapshots",
     }
     expected = {
         "WorkerHeartbeat": {

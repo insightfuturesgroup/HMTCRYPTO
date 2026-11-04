@@ -177,7 +177,7 @@ def test_exact_snapshot_tables_keys_and_complete_postgres_ddl():
         for index in table.indexes:
             assert index.name in str(CreateIndex(index).compile(dialect=postgresql.dialect()))
     for prior in api.metadata.tables.values():
-        if prior not in {position_table, balance_table}:
+        if prior not in {position_table, balance_table, api.FundingSnapshot.__table__}:
             assert not {
                 "position_snapshots",
                 "balance_snapshots",

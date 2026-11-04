@@ -183,7 +183,11 @@ def test_exact_resource_keys_columns_and_complete_postgres_ddl():
     for index in table.indexes:
         assert index.name in str(CreateIndex(index).compile(dialect=postgresql.dialect()))
     for prior in api.metadata.tables.values():
-        if prior is not table and prior.name not in {"position_snapshots", "balance_snapshots"}:
+        if prior is not table and prior.name not in {
+            "position_snapshots",
+            "balance_snapshots",
+            "wallet_transactions",
+        }:
             assert "reconciliation_resources" not in {
                 fk.referred_table.name for fk in prior.foreign_key_constraints
             }

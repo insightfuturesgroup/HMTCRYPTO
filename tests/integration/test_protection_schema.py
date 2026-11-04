@@ -46,6 +46,8 @@ def test_exact_four_protection_tables_are_present():
         "reconciliation_resources",
         "position_snapshots",
         "balance_snapshots",
+        "wallet_transactions",
+        "funding_snapshots",
     }
     assert {t.name for t in schema_api().metadata.tables.values()} - baseline == NEW_TABLES
 
