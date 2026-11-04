@@ -147,11 +147,14 @@ def test_exact_one_table_export_columns_parent_candidates_fks_indexes_and_ddl():
             *SCOPE,
             "risk_state_id",
             "command_id",
+            "command_operation_kind",
             "order_id",
             "product_id",
             "outcome",
             "risk_effect",
             "reservation_plan_sha256",
+            "evaluated_at",
+            "recorded_at",
         ): "uq_risk_decisions_reservation_parent",
     }
     parent_candidates = {
@@ -266,7 +269,7 @@ def test_only_the_reviewed_new_table_and_reverse_parent_edges_exist():
     api = schema_api()
     table_names = {table.name for table in api.metadata.tables.values()}
     assert "risk_decisions" in table_names
-    assert len(table_names) == 33
+    assert len(table_names) == 34
     expected_parents = {
         "accounts",
         "risk_state",

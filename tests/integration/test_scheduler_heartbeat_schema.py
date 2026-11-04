@@ -94,6 +94,7 @@ def test_exact_two_added_tables_exports_and_acyclic_stable_scoped_keys():
         "risk_halts",
         "risk_halt_events",
         "risk_decisions",
+        "risk_reservations",
     }
     expected = {
         "WorkerHeartbeat": {

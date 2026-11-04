@@ -42,6 +42,7 @@ async def schema_db(tmp_path):
             # this disposable test DB explicitly before testing empty drop_all.
             await connection.execute(update(api.Account).values(current_credential_version=None))
             for model in (
+                api.RiskReservation,
                 api.RiskDecision,
                 api.RiskHaltEvent,
                 api.RiskHalt,
@@ -133,9 +134,9 @@ def snapshot(**changes):
     return schema_api().CatalogueSnapshot(**values)
 
 
-def product():
+def product(index=0):
     path = Path(__file__).parents[1] / "fixtures/delta/products_catalog_valid.json"
-    return parse_product(json.loads(path.read_text())[0], endpoint_id="persistence_fixture")
+    return parse_product(json.loads(path.read_text())[index], endpoint_id="persistence_fixture")
 
 
 def signal(owner, **changes):

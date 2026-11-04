@@ -332,6 +332,7 @@ def test_exact_three_tables_exports_columns_constraints_indexes_and_postgres_ddl
             halt_table,
             event_table,
             api.RiskDecision.__table__,
+            api.RiskReservation.__table__,
         }:
             assert not {"risk_state", "risk_halts", "risk_halt_events"} & {
                 fk.referred_table.name for fk in prior.foreign_key_constraints

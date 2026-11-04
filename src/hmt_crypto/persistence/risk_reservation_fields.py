@@ -1,0 +1,270 @@
+"""Binding field sets and resource ceilings for Task 2.1d9b evidence."""
+
+MAX_RELEASE_PROOF_ATTEMPTS = 64
+MAX_RELEASE_PROOF_EVENTS = 64
+MAX_ATTEMPT_SET_CANONICAL_BYTES = 524_288
+MAX_RELEASE_PROOF_PAYLOAD_BYTES = 16_384
+
+RESERVATION_KEY_FIELDS = frozenset(
+    {
+        "account_id",
+        "command_id",
+        "command_operation_kind",
+        "decision_evaluated_at",
+        "decision_id",
+        "decision_outcome",
+        "decision_recorded_at",
+        "environment",
+        "mode",
+        "order_id",
+        "product_id",
+        "region",
+        "reservation_plan_sha256",
+        "risk_effect",
+        "risk_state_id",
+    }
+)
+
+RELEASE_KEY_FIELDS = frozenset(
+    {
+        "account_id",
+        "command_id",
+        "command_operation_kind",
+        "decision_id",
+        "environment",
+        "mode",
+        "observed_terminal_command_status",
+        "order_id",
+        "product_id",
+        "region",
+        "reservation_id",
+        "reservation_key",
+    }
+)
+
+ATTEMPT_EVENT_FIELDS = frozenset(
+    {
+        "id",
+        "account_id",
+        "region",
+        "environment",
+        "mode",
+        "attempt_id",
+        "backend",
+        "sequence",
+        "event_key",
+        "event_kind",
+        "observed_at",
+        "recorded_at",
+        "ingester_id",
+        "ingester_generation",
+        "reconciliation_ref",
+        "ingester_leader_ref",
+        "ingester_leader_generation",
+        "ingester_recovery_ref",
+        "ingester_recovery_generation",
+        "evidence_schema_version",
+        "evidence_payload",
+        "evidence_sha256",
+    }
+)
+
+ATTEMPT_FIELDS = frozenset(
+    {
+        "id",
+        "account_id",
+        "region",
+        "environment",
+        "mode",
+        "command_id",
+        "order_id",
+        "attempt_number",
+        "operation_kind",
+        "backend",
+        "simulator_kind",
+        "credential_version",
+        "correlation_id",
+        "prepared_at",
+        "recorded_at",
+        "original_claim_owner",
+        "original_claim_generation",
+        "original_claim_expires_at",
+        "original_leader_ref",
+        "original_leader_generation",
+        "original_recovery_ref",
+        "original_recovery_generation",
+        "evidence_schema_version",
+        "evidence_payload",
+        "evidence_sha256",
+        "events",
+    }
+)
+
+ATTEMPT_SET_INPUT_FIELDS = frozenset(
+    {
+        "account_id",
+        "region",
+        "environment",
+        "mode",
+        "reservation_id",
+        "decision_id",
+        "risk_state_id",
+        "command_id",
+        "command_operation_kind",
+        "order_id",
+        "product_id",
+        "proof_observed_at",
+    }
+)
+
+CURRENT_COMMAND_DECISION_ORDER_FIELDS = frozenset(
+    {
+        "command_evidence_schema_version",
+        "command_evidence_payload",
+        "command_evidence_sha256",
+        "decision_approved_contracts",
+        "decision_approved_side",
+        "decision_risk_effect",
+        "order_origin_command_id",
+        "order_product_id",
+        "order_requested_contracts",
+        "order_requested_side",
+        "order_requested_order_type",
+        "order_requested_limit_price",
+        "order_requested_stop_price",
+        "order_requested_reduce_only",
+    }
+)
+
+ATTEMPT_SET_PAYLOAD_FIELDS = frozenset(
+    {
+        "account_id",
+        "attempts",
+        "command_id",
+        "command_operation_kind",
+        "decision_id",
+        "environment",
+        "mode",
+        "observed_command_attempt_count",
+        "order_attempt_event_evidence_count",
+        "order_attempt_evidence_count",
+        "order_id",
+        "product_id",
+        "proof_observed_at",
+        "region",
+        "reservation_id",
+        "risk_state_id",
+    }
+)
+
+RELEASE_INPUT_FIELDS = frozenset(
+    {
+        *RESERVATION_KEY_FIELDS,
+        "reservation_id",
+        "reservation_key",
+        "reservation_created_at",
+        "approved_contracts",
+        "approved_side",
+        "reference_asset_id",
+        "reference_asset_symbol",
+        "collateral_asset_id",
+        "collateral_asset_symbol",
+        "planned_incremental_gross_exposure",
+        "planned_worst_case_loss",
+        "planned_collateral",
+        "planned_open_order_slots",
+        "planned_pending_rate_units",
+        "remaining_contracts",
+        "remaining_incremental_gross_exposure",
+        "remaining_worst_case_loss",
+        "remaining_collateral",
+        "remaining_open_order_slots",
+        "pending_rate_units",
+        "rate_policy_version",
+        "rate_policy_sha256",
+        "rate_window_start_at",
+        "rate_window_end_at",
+        "observed_terminal_command_status",
+        "observed_command_version",
+        "observed_order_version",
+        "proof_observed_at",
+    }
+)
+
+RELEASE_PAYLOAD_FIELDS = frozenset(
+    {
+        "account_id",
+        "approved_contracts",
+        "approved_side",
+        "attempt_evidence_set_sha256",
+        "collateral_asset_id",
+        "collateral_asset_symbol",
+        "command_id",
+        "command_operation_kind",
+        "decision_evaluated_at",
+        "decision_id",
+        "decision_outcome",
+        "decision_recorded_at",
+        "environment",
+        "mode",
+        "observed_command_attempt_count",
+        "observed_command_version",
+        "observed_order_version",
+        "observed_terminal_command_status",
+        "order_attempt_event_evidence_count",
+        "order_attempt_evidence_count",
+        "order_id",
+        "planned_collateral",
+        "planned_incremental_gross_exposure",
+        "planned_open_order_slots",
+        "planned_pending_rate_units",
+        "planned_worst_case_loss",
+        "prior_reservation_version",
+        "product_id",
+        "proof_observed_at",
+        "rate_policy_sha256",
+        "rate_policy_version",
+        "rate_window_end_at",
+        "rate_window_start_at",
+        "reference_asset_id",
+        "reference_asset_symbol",
+        "region",
+        "release_key",
+        "release_reason_code",
+        "released_collateral",
+        "released_contracts",
+        "released_incremental_gross_exposure",
+        "released_open_order_slots",
+        "released_pending_rate_units",
+        "released_worst_case_loss",
+        "reservation_created_at",
+        "reservation_id",
+        "reservation_key",
+        "reservation_plan_sha256",
+        "resulting_reservation_version",
+        "risk_effect",
+        "risk_state_id",
+    }
+)
+
+RELEASE_DERIVED_INPUT_FIELDS = frozenset(
+    {
+        "release_key",
+        "release_reason_code",
+        "release_proof_version",
+        "release_proof_payload",
+        "release_proof_sha256",
+        "observed_command_attempt_count",
+        "order_attempt_evidence_count",
+        "order_attempt_event_evidence_count",
+        "attempt_evidence_set_sha256",
+        "prior_reservation_version",
+        "resulting_reservation_version",
+        "released_contracts",
+        "released_incremental_gross_exposure",
+        "released_worst_case_loss",
+        "released_collateral",
+        "released_open_order_slots",
+        "released_pending_rate_units",
+    }
+)
