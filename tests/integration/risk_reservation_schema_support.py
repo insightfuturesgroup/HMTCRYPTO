@@ -350,7 +350,6 @@ async def run_test_only_non_authoritative_atomic_terminalize_and_release(
     command.status = terminal_status
     command.claim_owner = None
     command.claim_expires_at = None
-    command.version += 1
     command.completed_at = proof_observed_at
     command.updated_at = proof_observed_at
     session.add_all([command, reservation])

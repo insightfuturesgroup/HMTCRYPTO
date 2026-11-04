@@ -92,8 +92,9 @@ async def test_test_only_creation_rejects_stale_d9a_mutable_evidence(schema_db):
     async with schema_db.transaction() as session:
         command = await session.get(type(graph[6]), graph[6].id)
         assert command is not None
-        command.version = 2
         command.updated_at = NOW + timedelta(seconds=1)
+        await session.flush()
+        assert command.version == 2
     with pytest.raises(PersistenceValueError):
         await _create(schema_db, graph[9].id)
     assert await _reservation_count(schema_db) == 0

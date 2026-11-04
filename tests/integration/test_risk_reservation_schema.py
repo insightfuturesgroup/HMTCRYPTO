@@ -1028,7 +1028,6 @@ async def test_pending_reservation_with_preexisting_terminal_command_is_not_adop
         command.status = "FAILED"
         command.claim_owner = None
         command.claim_expires_at = None
-        command.version += 1
         command.completed_at = NOW + timedelta(seconds=20)
         command.updated_at = NOW + timedelta(seconds=20)
     with pytest.raises(PersistenceValueError):

@@ -3,10 +3,11 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, Index, UniqueConstraint, Uuid
+from sqlalchemy import CheckConstraint, Index, UniqueConstraint, Uuid, event
 from sqlalchemy.orm import Mapped, mapped_column
 
 from hmt_crypto.persistence.db import Base
+from hmt_crypto.persistence.errors import PersistenceValueError
 from hmt_crypto.persistence.execution_evidence import OPERATIONS
 from hmt_crypto.persistence.execution_support import (
     EvidenceRow,
@@ -80,11 +81,14 @@ class CommandOperation(ScopedRow, EvidenceRow, Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
+    __mapper_args__ = {"version_id_col": version}
+
 
 guard_model(
     CommandOperation,
     evidence_kind="intent",
     protected=(
+        "version",
         "request_id",
         "operation_kind",
         "correlation_id",
@@ -94,3 +98,10 @@ guard_model(
         "evidence_sha256",
     ),
 )
+
+
+@event.listens_for(CommandOperation, "before_insert")
+@event.listens_for(CommandOperation, "before_update")
+def _validate_version(mapper: object, connection: object, target: CommandOperation) -> None:
+    if type(target.version) is not int or not 1 <= target.version < 2**63:
+        raise PersistenceValueError()
