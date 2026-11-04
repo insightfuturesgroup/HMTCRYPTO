@@ -24,12 +24,14 @@ from pydantic_settings import (
 
 from hmt_crypto.errors import ConfigurationError
 from hmt_crypto.exchange.delta.endpoints import get_delta_endpoints
+from hmt_crypto.persistence.configuration import database_url
 
 _STRICT_BOOLEAN_ALIASES = frozenset(
     {
         "DELTA_ALLOW_DEVELOPMENT_ENDPOINT_OVERRIDE",
         "DELTA_LIVE_TRADING_ENABLED",
         "PRODUCTION_WRITES_FORBIDDEN",
+        "DATABASE_SINGLE_PROCESS",
     }
 )
 
@@ -60,7 +62,7 @@ class DeltaEnvironment(StrEnum):
 
 
 class _DeltaEnvSource(EnvSettingsSource):
-    """Reject misspelled/generic Delta variables while ignoring unrelated OS settings."""
+    """Reject unknown Delta/database variables while ignoring unrelated OS settings."""
 
     def __call__(self) -> dict[str, Any]:
         values = super().__call__()
@@ -68,7 +70,7 @@ class _DeltaEnvSource(EnvSettingsSource):
             str(field.validation_alias).lower() for field in self.settings_cls.model_fields.values()
         }
         for name, value in self.env_vars.items():
-            if name.lower().startswith("delta_") and name.lower() not in known:
+            if name.lower().startswith(("delta_", "database_")) and name.lower() not in known:
                 values[name] = SecretStr(value) if value is not None else None
         return _normalize_source_booleans(values)
 
@@ -148,6 +150,11 @@ class Settings(BaseSettings):
     production_writes_forbidden: StrictBool = Field(
         default=True, alias="PRODUCTION_WRITES_FORBIDDEN"
     )
+    database_url: SecretStr = Field(
+        default=SecretStr("sqlite+aiosqlite:///./hmt_crypto.db"), alias="DATABASE_URL"
+    )
+    database_migration_url: SecretStr | None = Field(default=None, alias="DATABASE_MIGRATION_URL")
+    database_single_process: StrictBool = Field(default=True, alias="DATABASE_SINGLE_PROCESS")
 
     @classmethod
     def settings_customise_sources(
@@ -202,6 +209,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_selected_credentials_and_live_gates(self) -> Self:
+        database_url(self.database_url)
+        if self.database_migration_url is not None:
+            database_url(self.database_migration_url)
         key, secret = self.selected_api_key, self.selected_api_secret
         if (key is None) != (secret is None):
             raise ValueError("Selected credential slot requires a complete API key/secret pair")

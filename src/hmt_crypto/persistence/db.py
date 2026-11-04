@@ -1,0 +1,159 @@
+"""Lazy async database ownership; no connections, files or engines at import.
+
+Application code uses one ``transaction()`` per concurrent task and never shares
+its session. Schema setup/migrations are explicit and are never run at startup.
+SQLite is development-only, single-process PAPER/BACKTEST, with separate pooled
+connections. PostgreSQL pooler/TLS/role suitability requires deployment evidence.
+"""
+
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
+
+from pydantic import ValidationError
+from sqlalchemy import MetaData, event
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase
+
+from hmt_crypto.config import ExecutionMode, Settings
+from hmt_crypto.errors import ConfigurationError
+from hmt_crypto.persistence.configuration import database_url
+from hmt_crypto.persistence.errors import PersistenceError
+
+APP_SCHEMA = "hmt_crypto"
+NAMING_CONVENTION = {
+    "ix": "ix_%(table_name)s_%(column_0_name)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+
+class Base(DeclarativeBase):
+    """Application-only ORM metadata shared with the future Alembic history."""
+
+    metadata = MetaData(schema=APP_SCHEMA, naming_convention=NAMING_CONVENTION)
+
+
+def _sqlite_connect(dbapi_connection: Any, connection_record: Any) -> None:
+    # Explicit BEGIN avoids sqlite3's legacy nontransactional SELECT/DDL behavior
+    # on Python 3.11 as well as later Python versions. Enable FK on EVERY connection.
+    dbapi_connection.isolation_level = None
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
+
+
+def _sqlite_begin(connection: Connection) -> None:
+    connection.exec_driver_sql("BEGIN")
+
+
+class Database:
+    """Own a lazy engine, task-local transactions and explicit asynchronous disposal.
+
+    Construct explicitly after loading settings. This validates backend policy
+    before creating the engine; the first actual operation opens the database.
+    No migration URL is used for runtime connections. Never log a raw SQLAlchemy
+    URL, driver exception or literal SQL containing secrets.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        try:
+            if type(settings) is not Settings:
+                raise ValueError
+            # Revalidate even model_copy/model_construct inputs before admission.
+            owned = Settings.model_validate(settings.model_dump())
+            url = database_url(owned.database_url)
+        except (ValidationError, ValueError):
+            raise ConfigurationError() from None
+        if url.drivername == "sqlite+aiosqlite" and (
+            owned.execution_mode not in (ExecutionMode.PAPER, ExecutionMode.BACKTEST)
+            or not owned.database_single_process
+        ):
+            raise ConfigurationError()
+        options: dict[str, Any] = {
+            "echo": False,
+            "hide_parameters": True,
+            "pool_size": 5,
+            "max_overflow": 0,
+        }
+        if url.drivername == "sqlite+aiosqlite":
+            options["execution_options"] = {"schema_translate_map": {APP_SCHEMA: None}}
+        else:
+            options["connect_args"] = {"server_settings": {"timezone": "UTC"}}
+        try:
+            self._engine = create_async_engine(url, **options)
+        except Exception:
+            raise ConfigurationError() from None
+        if url.drivername == "sqlite+aiosqlite":
+            event.listen(self._engine.sync_engine, "connect", _sqlite_connect)
+            event.listen(self._engine.sync_engine, "begin", _sqlite_begin)
+        self._sessions = async_sessionmaker(
+            self._engine, expire_on_commit=False, close_resets_only=False
+        )
+        self._active = 0
+        self._closed = False
+        self._closing = False
+        self._close_task: asyncio.Task[None] | None = None
+
+    @property
+    def engine(self) -> AsyncEngine:
+        """Expose the engine for explicit schema tooling; callers own those connections.
+
+        Runtime work must use ``transaction()`` so sessions are tracked and closed.
+        External schema-tool connections must be drained before owner disposal.
+        """
+        if self._closing:
+            raise PersistenceError()
+        return self._engine
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[AsyncSession]:
+        """Own one session/transaction: commit success, roll back failure/cancellation.
+
+        Database errors become stable safe errors. Caller/domain exceptions and
+        cancellation retain their type. The yielded session cannot be reopened
+        after exit; use a fresh transaction for subsequent/concurrent work.
+        """
+        if self._closing:
+            raise PersistenceError()
+        self._active += 1
+        try:
+            async with self._sessions.begin() as session:
+                yield session
+        except (SQLAlchemyError, OSError):
+            raise PersistenceError() from None
+        finally:
+            self._active -= 1
+
+    async def aclose(self) -> None:
+        """Dispose idempotently after transactions drain; permit cleanup retry.
+
+        An active transaction prevents disposal. While closing, admission is
+        denied. Shield disposal from caller cancellation and allow a later call
+        to await that same cleanup task.
+        """
+        if self._closed:
+            return
+        if self._active:
+            raise PersistenceError()
+        self._closing = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._engine.dispose())
+        try:
+            await asyncio.shield(self._close_task)
+        except Exception:
+            self._close_task = None
+            raise PersistenceError() from None
+        self._closed = True

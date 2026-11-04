@@ -1,5 +1,5 @@
 """Persistence-boundary helpers.
 
-Database persistence is introduced in Phase 2. Redaction lives here now so
-future audit records cannot be persisted before they are made safe.
+Database ownership, exact adapters and redaction are deliberately separate.
+Importing this package never creates an engine, connection, file or schema.
 """

@@ -9,6 +9,10 @@ description = "Safety-first Delta Exchange research and paper trading core"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "SQLAlchemy[asyncio]>=2.0.44,<2.1",
+    "alembic>=1.17.1,<2",
+    "aiosqlite>=0.21.0,<0.23",
+    "asyncpg>=0.30.0,<0.32",
     "httpx>=0.28.1,<0.29",
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.7,<3",
