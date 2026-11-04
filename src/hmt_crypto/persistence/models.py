@@ -9,6 +9,7 @@ from hmt_crypto.persistence.catalogue_models import CatalogueProduct, CatalogueS
 from hmt_crypto.persistence.command_models import CommandOperation
 from hmt_crypto.persistence.db import Base
 from hmt_crypto.persistence.execution_event_models import OrderAttemptEvent, OrderTransition
+from hmt_crypto.persistence.fill_models import Fill, FillOrderLink
 from hmt_crypto.persistence.identity_models import Account, CredentialVersion
 from hmt_crypto.persistence.order_models import Order
 from hmt_crypto.persistence.signal_models import Signal
@@ -26,5 +27,7 @@ __all__ = [
     "OrderAttempt",
     "OrderAttemptEvent",
     "OrderTransition",
+    "Fill",
+    "FillOrderLink",
     "metadata",
 ]

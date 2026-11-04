@@ -36,6 +36,7 @@ ATTEMPT_EVENT_KINDS = (
     "SIMULATED_REJECTED",
 )
 TRANSITION_KINDS = ("LOCAL_INTENT", "OBSERVATION", "RESPONSE", "RECONCILIATION")
+FILL_TYPES = ("normal", "adl", "liquidation", "settlement", "otc", "UNKNOWN")
 
 
 class IntentEvidence(DomainModel):
@@ -119,12 +120,24 @@ class TransitionEvidence(DomainModel):
     )
 
 
+class FillEvidence(DomainModel):
+    """Only observed liquidity role; private metadata/product summaries are excluded."""
+
+    role: Literal["maker", "taker", "UNKNOWN"] | None = None
+
+
 _CONTRACTS: dict[str, type[DomainModel]] = {
     "intent": IntentEvidence,
     "event": EventEvidence,
     "transition": TransitionEvidence,
+    "fill": FillEvidence,
 }
-_OPERATIONS = {"intent": OPERATIONS, "event": ATTEMPT_EVENT_KINDS, "transition": TRANSITION_KINDS}
+_OPERATIONS = {
+    "intent": OPERATIONS,
+    "event": ATTEMPT_EVENT_KINDS,
+    "transition": TRANSITION_KINDS,
+    "fill": FILL_TYPES,
+}
 
 
 def encode_evidence(

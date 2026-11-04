@@ -6,7 +6,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import AddConstraint, CreateIndex, CreateTable
 
 
-def test_execution_metadata_adds_exact_five_tables_and_compiles_postgres():
+def test_execution_metadata_tables_and_compiles_postgres():
     api = schema_api()
     assert {table.name for table in api.metadata.tables.values()} == {
         "accounts",
@@ -19,7 +19,9 @@ def test_execution_metadata_adds_exact_five_tables_and_compiles_postgres():
         "order_attempts",
         "order_attempt_events",
         "order_transitions",
-    }, "The five execution evidence tables are missing"
+        "fills",
+        "fill_order_links",
+    }, "The approved persistence evidence tables are missing"
     metadata = MetaData(schema="hmt_crypto", naming_convention=api.metadata.naming_convention)
     for table in api.metadata.tables.values():
         table.to_metadata(metadata)
