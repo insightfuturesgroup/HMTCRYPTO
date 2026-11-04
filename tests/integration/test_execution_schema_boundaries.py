@@ -204,7 +204,7 @@ httpx.Client.send = forbidden
 httpx.AsyncClient.send = forbidden
 sqlalchemy.ext.asyncio.create_async_engine = forbidden
 from hmt_crypto.persistence import models
-assert len(models.metadata.tables) == 26
+assert len(models.metadata.tables) == 27
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

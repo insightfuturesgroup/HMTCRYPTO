@@ -19,6 +19,7 @@ from hmt_crypto.persistence.execution_event_models import OrderAttemptEvent, Ord
 from hmt_crypto.persistence.fill_models import Fill, FillOrderLink
 from hmt_crypto.persistence.identity_models import Account, CredentialVersion
 from hmt_crypto.persistence.order_models import Order
+from hmt_crypto.persistence.pnl_models import PnlSnapshot
 from hmt_crypto.persistence.protection_models import (
     ExitIntent,
     PositionProtection,
@@ -59,5 +60,6 @@ __all__ = [
     "BalanceSnapshot",
     "WalletTransaction",
     "FundingSnapshot",
+    "PnlSnapshot",
     "metadata",
 ]

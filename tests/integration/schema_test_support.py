@@ -42,6 +42,7 @@ async def schema_db(tmp_path):
             # this disposable test DB explicitly before testing empty drop_all.
             await connection.execute(update(api.Account).values(current_credential_version=None))
             for model in (
+                api.PnlSnapshot,
                 api.FundingSnapshot,
                 api.WalletTransaction,
                 api.BalanceSnapshot,

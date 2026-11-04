@@ -115,6 +115,7 @@ def test_exact_run_root_export_columns_complete_scoped_keys_and_postgres_ddl():
         "balance_snapshots",
         "wallet_transactions",
         "funding_snapshots",
+        "pnl_snapshots",
     }
     table = api.ReconciliationRun.__table__
     assert set(table.c.keys()) == {
@@ -167,7 +168,10 @@ def test_exact_run_root_export_columns_complete_scoped_keys_and_postgres_ddl():
     for index in table.indexes:
         assert index.name in str(CreateIndex(index).compile(dialect=postgresql.dialect()))
     for prior in api.metadata.tables.values():
-        if prior is not table and prior.name != "reconciliation_resources":
+        if prior is not table and prior.name not in {
+            "reconciliation_resources",
+            "pnl_snapshots",
+        }:
             assert "reconciliation_runs" not in {
                 fk.referred_table.name for fk in prior.foreign_key_constraints
             }

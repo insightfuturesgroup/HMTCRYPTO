@@ -106,6 +106,7 @@ def test_exact_two_coordination_tables_and_aggregate_exports():
         "balance_snapshots",
         "wallet_transactions",
         "funding_snapshots",
+        "pnl_snapshots",
     }
     assert api.RecoveryIncarnation.__tablename__ == "recovery_incarnations"
     assert api.LeadershipLease.__tablename__ == "leadership_leases"

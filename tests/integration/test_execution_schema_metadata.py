@@ -35,6 +35,7 @@ def test_execution_metadata_tables_and_compiles_postgres():
         "balance_snapshots",
         "wallet_transactions",
         "funding_snapshots",
+        "pnl_snapshots",
     }, "The approved persistence evidence tables are missing"
     metadata = MetaData(schema="hmt_crypto", naming_convention=api.metadata.naming_convention)
     for table in api.metadata.tables.values():

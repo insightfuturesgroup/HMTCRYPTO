@@ -92,6 +92,7 @@ def test_fill_schema_adds_only_two_tables_with_no_direct_order_foreign_key():
         "balance_snapshots",
         "wallet_transactions",
         "funding_snapshots",
+        "pnl_snapshots",
     }
     assert {table.name for table in api.metadata.tables.values()} - baseline == {
         "fills",
