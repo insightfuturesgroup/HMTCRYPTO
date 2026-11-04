@@ -7,6 +7,7 @@ connections. PostgreSQL pooler/TLS/role suitability requires deployment evidence
 """
 
 import asyncio
+import socket
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -38,6 +39,21 @@ NAMING_CONVENTION = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
+
+# Exact native types with the verified OSError slot contract below. In
+# particular, SSL errors and custom OSError subclasses are not admitted.
+_NATIVE_CONNECTION_ERRORS = frozenset(
+    {
+        OSError,
+        ConnectionError,
+        ConnectionAbortedError,
+        ConnectionRefusedError,
+        ConnectionResetError,
+        BrokenPipeError,
+        TimeoutError,
+        socket.gaierror,
+    }
+)
 
 
 class Base(DeclarativeBase):
@@ -72,6 +88,16 @@ def _safe_driver_error(context: ExceptionContext) -> DBAPIError | None:
         or isinstance(original, PersistenceError)
     ):
         return None
+    dbapi = context.dialect.loaded_dbapi
+    adapted_error = isinstance(original, dbapi.Error)
+    # SQLAlchemy's asyncpg adapter exposes the installed native module; server
+    # and authentication PostgresError can arrive before DBAPI adaptation.
+    native_server_error = context.dialect.driver == "asyncpg" and isinstance(
+        original, dbapi.asyncpg.PostgresError
+    )
+    native_connection_error = type(original) in _NATIVE_CONNECTION_ERRORS
+    if not (adapted_error or native_server_error or native_connection_error):
+        return None
     error = context.sqlalchemy_exception
     kind = type(error) if isinstance(error, DBAPIError) else DBAPIError
     replacement = kind(
@@ -81,9 +107,13 @@ def _safe_driver_error(context: ExceptionContext) -> DBAPIError | None:
         hide_parameters=True,
         connection_invalidated=context.is_disconnect,
     )
-    # Both supported adapters expose ordinary mutable exception diagnostics.
-    # Discard fields/notes and detach *all* nested chains before SQLAlchemy can
-    # attach this object as the replacement's cause. Never render the raw error.
+    # OSError's C-level diagnostics survive args/dictionary clearing. DNS errors
+    # in the exact admitted family use these same slots; SSL is excluded.
+    if native_connection_error:
+        for field in ("errno", "strerror", "filename", "filename2"):
+            setattr(original, field, None)
+    # Discard remaining diagnostics/notes and detach all nested chains before
+    # SQLAlchemy attaches this object as the replacement's cause. Never render it.
     original.args = ("Database operation failed",)
     vars(original).clear()
     original.__cause__ = None

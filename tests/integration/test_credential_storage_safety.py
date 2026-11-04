@@ -1,6 +1,9 @@
 """Credential storage cannot retain values PostgreSQL may echo in failing rows."""
 
+import asyncio
 import json
+import socket
+import ssl
 import traceback
 
 import asyncpg
@@ -127,6 +130,156 @@ async def test_offline_driver_tracebacks_discard_secret_diagnostic_chains(
         assert marker not in "".join(traceback.format_exception(normalized.value))
         assert normalized.value.__suppress_context__
         assert not sqlite_path.exists()
+    finally:
+        await database.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("driver", ["postgresql", "sqlite"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "filename",
+        OSError,
+        ConnectionError,
+        ConnectionAbortedError,
+        ConnectionRefusedError,
+        ConnectionResetError,
+        BrokenPipeError,
+        TimeoutError,
+        socket.gaierror,
+    ],
+)
+@pytest.mark.parametrize("disconnected", [False, True])
+async def test_native_connection_slots_cannot_escape_actual_raise_path(
+    tmp_path, driver, kind, disconnected
+):
+    fingerprint = "0123456789abcdef" * 4
+    marker = "SECRET-NATIVE-CONNECTION-MARKER"
+    detail = f"{marker}: {fingerprint}"
+    if kind == "filename":
+        native = OSError(5, detail, marker, None, marker)
+    elif kind is socket.gaierror:
+        native = socket.gaierror(socket.EAI_NONAME, detail)
+    else:
+        native = kind(5, detail)
+    native.add_note(detail)
+    url = (
+        "postgresql+asyncpg://invalid.example/offline"
+        if driver == "postgresql"
+        else f"sqlite+aiosqlite:///{tmp_path}/offline.db"
+    )
+    database = Database(Settings(_env_file=None, DATABASE_URL=url))
+    try:
+        try:
+            raise native from RuntimeError(detail)
+        except OSError as original:
+            with pytest.raises(DBAPIError) as caught:
+                # No connection exists; explicitly supplied classification must
+                # survive just as already-classified pooled failures do.
+                Connection._handle_dbapi_exception_noconnection(
+                    original,
+                    database.engine.dialect,
+                    database.engine.sync_engine,
+                    is_disconnect=disconnected,
+                )
+        exposed = caught.value
+        rendered = "".join(traceback.format_exception(exposed)) + _render_exception_graph(exposed)
+        assert fingerprint not in rendered
+        assert marker not in rendered
+        assert exposed.connection_invalidated is disconnected
+        assert exposed.statement is None and exposed.params is None
+        assert all(
+            getattr(native, field) is None
+            for field in ("errno", "strerror", "filename", "filename2")
+        )
+        assert not (tmp_path / "offline.db").exists()
+    finally:
+        await database.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [asyncpg.CheckViolationError, asyncpg.InvalidPasswordError])
+async def test_native_asyncpg_server_and_auth_details_are_safe_before_adaptation(kind):
+    marker = "SECRET-NATIVE-SERVER-MARKER"
+    native = kind("server failure")
+    native.detail = marker
+    native.hint = marker
+    database = Database(
+        Settings(_env_file=None, DATABASE_URL="postgresql+asyncpg://invalid.example/offline")
+    )
+    try:
+        try:
+            raise native from ValueError(marker)
+        except kind as original:
+            with pytest.raises(DBAPIError) as caught:
+                Connection._handle_dbapi_exception_noconnection(
+                    original,
+                    database.engine.dialect,
+                    database.engine.sync_engine,
+                )
+        rendered = "".join(traceback.format_exception(caught.value)) + _render_exception_graph(
+            caught.value
+        )
+        assert marker not in rendered
+        assert not caught.value.connection_invalidated
+    finally:
+        await database.aclose()
+
+
+class _UnadmittedOSError(OSError):
+    """A third-party subclass without a supported diagnostic slot contract."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("driver", ["postgresql", "sqlite"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        ValueError,
+        RuntimeError,
+        asyncio.CancelledError,
+        KeyboardInterrupt,
+        PersistenceError,
+        ssl.SSLError,
+        _UnadmittedOSError,
+    ],
+)
+async def test_unadmitted_exceptions_keep_identity_diagnostics_and_control_flow(
+    tmp_path, driver, kind
+):
+    error = kind() if kind is PersistenceError else kind("unrelated diagnostic")
+    error.add_note("preserve this note")
+    cause = RuntimeError("preserve cause")
+    original_args, original_attributes = error.args, dict(vars(error))
+    url = (
+        "postgresql+asyncpg://invalid.example/offline"
+        if driver == "postgresql"
+        else f"sqlite+aiosqlite:///{tmp_path}/offline.db"
+    )
+    database = Database(Settings(_env_file=None, DATABASE_URL=url))
+    try:
+        try:
+            raise error from cause
+        except BaseException as original:
+            with pytest.raises(kind) as caught:
+                Connection._handle_dbapi_exception_noconnection(
+                    original,
+                    database.engine.dialect,
+                    database.engine.sync_engine,
+                )
+        assert caught.value is error
+        assert error.args == original_args
+        assert vars(error) == original_attributes
+        assert error.__cause__ is cause
+        if isinstance(error, OSError):
+            with pytest.raises(PersistenceError) as normalized:
+                async with database.transaction():
+                    raise error
+            assert "unrelated diagnostic" not in "".join(
+                traceback.format_exception(normalized.value)
+            )
+            assert normalized.value.__suppress_context__
     finally:
         await database.aclose()
 
