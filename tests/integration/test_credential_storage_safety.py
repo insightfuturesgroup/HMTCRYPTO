@@ -1,6 +1,7 @@
 """Credential storage cannot retain values PostgreSQL may echo in failing rows."""
 
 import json
+import traceback
 
 import asyncpg
 import pytest
@@ -8,8 +9,8 @@ from schema_test_support import account, credential, schema_api
 from schema_test_support import schema_db as schema_db
 from sqlalchemy import insert, select, text
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
-from sqlalchemy.engine.base import ExceptionContextImpl
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.engine.base import Connection
+from sqlalchemy.exc import DBAPIError
 
 from hmt_crypto.config import Settings
 from hmt_crypto.persistence.db import Database
@@ -33,58 +34,99 @@ def test_arbitrary_credential_slot_marker_is_rejected_before_it_can_be_retained(
     assert marker not in str(caught.value) + repr(caught.value)
 
 
+def _render_exception_graph(error):
+    """Inspect all exposed links, even contexts suppressed by standard rendering."""
+    pending, seen, rendered = [error], set(), []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        rendered.extend(
+            [
+                str(current),
+                repr(current),
+                repr(vars(current)),
+                repr(getattr(current, "statement", None)),
+                repr(getattr(current, "params", None)),
+            ]
+        )
+        for name in ("__cause__", "__context__", "orig"):
+            linked = getattr(current, name, None)
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+            else:
+                rendered.append(repr(linked))
+    return "\n".join(rendered)
+
+
 @pytest.mark.asyncio
-async def test_offline_postgres_detail_cannot_escape_database_error_boundary():
+@pytest.mark.parametrize("driver", ["postgresql", "sqlite"])
+@pytest.mark.parametrize("disconnected", [False, True])
+async def test_offline_driver_tracebacks_discard_secret_diagnostic_chains(
+    tmp_path, driver, disconnected
+):
     fingerprint = "0123456789abcdef" * 4
     marker = "SECRET-CREDENTIAL-MARKER"
-    driver_error = asyncpg.CheckViolationError("credential constraint failed")
-    driver_error.detail = f"Failing row contains ({fingerprint}, {marker})."
-    # Use the installed dialect's actual DBAPI exception type/formatting. There
-    # is no connection, fake SQL transport, or assertion about a mock's calls.
-    adapted = AsyncAdapt_asyncpg_dbapi.IntegrityError(f"{type(driver_error)}: {driver_error}")
-    original = IntegrityError(
-        "INSERT INTO credential_versions ...", None, adapted, hide_parameters=True
+    detail = f"Failing row contains ({fingerprint}, {marker})."
+    sqlite_path = tmp_path / "offline.db"
+    url = (
+        "postgresql+asyncpg://invalid.example/offline"
+        if driver == "postgresql"
+        else f"sqlite+aiosqlite:///{sqlite_path}"
     )
-    assert fingerprint in str(original) and marker in str(original)
-    database = Database(
-        Settings(
-            _env_file=None,
-            DATABASE_URL="postgresql+asyncpg://invalid.example/offline",
-        )
-    )
+    database = Database(Settings(_env_file=None, DATABASE_URL=url))
     try:
-        context = ExceptionContextImpl(
-            adapted,
-            original,
-            database.engine.sync_engine,
-            database.engine.dialect,
-            None,
-            None,
-            original.statement,
-            None,
-            None,
-            False,
-            True,
-            False,
-        )
-        exposed = original
-        for handler in database.engine.sync_engine.dialect.dispatch.handle_error:
-            replacement = handler(context)
-            if replacement is not None:
-                exposed = replacement
-        rendered = str(exposed) + repr(exposed)
+        dialect = database.engine.dialect
+        if driver == "postgresql":
+            cause = asyncpg.CheckViolationError("credential constraint failed")
+            cause.detail = detail
+            kind = (
+                AsyncAdapt_asyncpg_dbapi.InterfaceError
+                if disconnected
+                else AsyncAdapt_asyncpg_dbapi.IntegrityError
+            )
+            message = "connection is closed" if disconnected else "constraint failed"
+            adapted = kind(f"{message}: {cause}")
+        else:
+            cause = RuntimeError(detail)
+            kind = (
+                dialect.loaded_dbapi.ProgrammingError
+                if disconnected
+                else dialect.loaded_dbapi.IntegrityError
+            )
+            message = (
+                "Cannot operate on a closed database." if disconnected else "constraint failed"
+            )
+            adapted = kind(f"{message} {detail}")
+        cause.__context__ = ValueError(detail)
+        assert fingerprint in str(adapted) and marker in str(adapted)
+        try:
+            raise adapted from cause
+        except type(adapted) as original:
+            with pytest.raises(DBAPIError) as caught:
+                # Installed SQLAlchemy performs classification, dispatches the
+                # registered listener, then actually raises replacement from e.
+                Connection._handle_dbapi_exception_noconnection(
+                    original,
+                    dialect,
+                    database.engine.sync_engine,
+                )
+        exposed = caught.value
+        rendered = "".join(traceback.format_exception(exposed)) + _render_exception_graph(exposed)
         assert fingerprint not in rendered
         assert marker not in rendered
+        assert exposed.connection_invalidated is disconnected
         assert exposed.orig is not adapted
+        assert exposed.statement is None
         assert exposed.params is None
-        with pytest.raises(PersistenceError) as caught:
-            # Beginning a lazy transaction does not connect. Preserve the public
-            # normalization contract even if an unsafe wrapper reaches this API.
+        with pytest.raises(PersistenceError) as normalized:
             async with database.transaction():
-                raise original
-        assert fingerprint not in str(caught.value) + repr(caught.value)
-        assert marker not in str(caught.value) + repr(caught.value)
-        assert caught.value.__suppress_context__
+                raise exposed
+        assert fingerprint not in "".join(traceback.format_exception(normalized.value))
+        assert marker not in "".join(traceback.format_exception(normalized.value))
+        assert normalized.value.__suppress_context__
+        assert not sqlite_path.exists()
     finally:
         await database.aclose()
 

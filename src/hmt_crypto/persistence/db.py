@@ -62,18 +62,35 @@ def _sqlite_begin(connection: Connection) -> None:
 
 
 def _safe_driver_error(context: ExceptionContext) -> DBAPIError | None:
-    # hide_parameters does not hide PostgreSQL DETAIL/failing-row diagnostics.
-    # Expose neither driver text nor literal SQL/parameters in a DBAPI wrapper.
+    # SQLAlchemy classifies disconnects before this listener, then unconditionally
+    # raises any replacement "from" the original driver error. A safe wrapper
+    # alone therefore leaves raw DETAIL/messages reachable in formatted chains.
+    original = context.original_exception
+    if (
+        context.dialect.driver not in {"asyncpg", "aiosqlite"}
+        or not isinstance(original, Exception)
+        or isinstance(original, PersistenceError)
+    ):
+        return None
     error = context.sqlalchemy_exception
-    if isinstance(error, DBAPIError):
-        return type(error)(
-            None,
-            None,
-            PersistenceError(),
-            hide_parameters=True,
-            connection_invalidated=error.connection_invalidated,
-        )
-    return None
+    kind = type(error) if isinstance(error, DBAPIError) else DBAPIError
+    replacement = kind(
+        None,
+        None,
+        PersistenceError(),
+        hide_parameters=True,
+        connection_invalidated=context.is_disconnect,
+    )
+    # Both supported adapters expose ordinary mutable exception diagnostics.
+    # Discard fields/notes and detach *all* nested chains before SQLAlchemy can
+    # attach this object as the replacement's cause. Never render the raw error.
+    original.args = ("Database operation failed",)
+    vars(original).clear()
+    original.__cause__ = None
+    original.__context__ = None
+    original.__suppress_context__ = True
+    original.__traceback__ = None
+    return replacement
 
 
 async def _complete_cleanup(task: asyncio.Task[None]) -> None:
