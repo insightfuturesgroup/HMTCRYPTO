@@ -27,6 +27,7 @@ from hmt_crypto.persistence.protection_models import (
 from hmt_crypto.persistence.reconciliation_models import ReconciliationRun
 from hmt_crypto.persistence.reconciliation_resource_models import ReconciliationResource
 from hmt_crypto.persistence.signal_models import Signal
+from hmt_crypto.persistence.snapshot_models import BalanceSnapshot, PositionSnapshot
 
 metadata = Base.metadata
 
@@ -53,5 +54,7 @@ __all__ = [
     "SchedulerState",
     "ReconciliationRun",
     "ReconciliationResource",
+    "PositionSnapshot",
+    "BalanceSnapshot",
     "metadata",
 ]
