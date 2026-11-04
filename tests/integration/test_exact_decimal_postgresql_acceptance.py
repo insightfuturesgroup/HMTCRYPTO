@@ -8,15 +8,19 @@ skip. Its normalized target must differ from ``DATABASE_URL`` and
 """
 
 import os
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import CheckConstraint, Column, Integer, MetaData, Table, column, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.schema import CreateSchema
 
+from hmt_crypto.persistence.configuration import database_url
 from hmt_crypto.persistence.db import APP_SCHEMA, NAMING_CONVENTION
 from hmt_crypto.persistence.models import metadata
 from hmt_crypto.persistence.types import ExactDecimal, exact_decimal_checks
@@ -25,6 +29,20 @@ URL_ENV = "HMT_CRYPTO_DECIMAL_POSTGRES_URL"
 REQUIRED_ENV = "HMT_CRYPTO_REQUIRE_DECIMAL_POSTGRES"
 DISPOSABLE_ENV = "HMT_CRYPTO_DECIMAL_POSTGRES_DISPOSABLE"
 RUNTIME_URL_ENVS = ("DATABASE_URL", "DATABASE_MIGRATION_URL")
+
+
+class _RuntimeDatabaseSources(BaseSettings):
+    """Load only database targets with runtime's case-insensitive env/dotenv precedence."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    runtime_url: SecretStr | None = Field(default=None, alias="DATABASE_URL")
+    migration_url: SecretStr | None = Field(default=None, alias="DATABASE_MIGRATION_URL")
+
 
 VALID_38_18 = (
     "99999999999999999999.999999999999999999",
@@ -56,6 +74,25 @@ def _database_target(url: URL) -> tuple[str, int, str]:
         pytest.fail("PostgreSQL database target is not safely comparable", pytrace=False)
 
 
+def _configured_database_urls() -> tuple[tuple[URL, bool], ...]:
+    """Resolve runtime targets without loading unrelated exchange configuration."""
+    try:
+        settings = _RuntimeDatabaseSources()
+        resolved: list[tuple[URL, bool]] = []
+        for value in (settings.runtime_url, settings.migration_url):
+            if value is None:
+                continue
+            parsed = make_url(value.get_secret_value())
+            if parsed.get_backend_name() in {"postgres", "postgresql"}:
+                _database_target(parsed)
+                resolved.append((parsed, parsed.drivername == "postgresql+asyncpg"))
+            else:
+                resolved.append((database_url(value), True))
+        return tuple(resolved)
+    except Exception:
+        pytest.fail("Runtime database configuration is not safely comparable", pytrace=False)
+
+
 def _acceptance_url() -> URL:
     required_setting = os.environ.get(REQUIRED_ENV, "false").lower()
     if required_setting not in {"true", "false"}:
@@ -76,22 +113,18 @@ def _acceptance_url() -> URL:
     if url.drivername != "postgresql+asyncpg":
         pytest.fail("PostgreSQL Decimal acceptance requires postgresql+asyncpg", pytrace=False)
     target = _database_target(url)
-    for variable in RUNTIME_URL_ENVS:
-        runtime_raw = os.environ.get(variable)
-        if not runtime_raw:
-            continue
-        try:
-            runtime_url = make_url(runtime_raw)
-        except Exception:
-            pytest.fail("Runtime database target is not safely comparable", pytrace=False)
+    runtime_urls = _configured_database_urls()
+    for runtime_url, _ in runtime_urls:
         if (
-            runtime_url.get_backend_name() == "postgresql"
+            runtime_url.get_backend_name() in {"postgres", "postgresql"}
             and _database_target(runtime_url) == target
         ):
             pytest.fail(
                 "PostgreSQL Decimal acceptance must not use a runtime database target",
                 pytrace=False,
             )
+    if any(not supported for _, supported in runtime_urls):
+        pytest.fail("Runtime database configuration is not safely comparable", pytrace=False)
     return url
 
 
@@ -175,6 +208,79 @@ def test_postgres_acceptance_rejects_equivalent_runtime_target(monkeypatch, runt
         monkeypatch.delenv(other, raising=False)
     with pytest.raises(pytest.fail.Exception, match="runtime database target"):
         _acceptance_url()
+
+
+@pytest.mark.parametrize("runtime_variable", ("database_url", "DaTaBaSe_MiGrAtIoN_Url"))
+def test_postgres_acceptance_rejects_case_insensitive_runtime_target(
+    monkeypatch: pytest.MonkeyPatch, runtime_variable: str
+) -> None:
+    monkeypatch.setenv(
+        URL_ENV,
+        "postgresql+asyncpg://acceptance@DB.EXAMPLE:5432/hmt_test?ssl=require",
+    )
+    monkeypatch.setenv(DISPOSABLE_ENV, "true")
+    for name in tuple(os.environ):
+        if name.lower() in {value.lower() for value in RUNTIME_URL_ENVS}:
+            monkeypatch.delenv(name)
+    monkeypatch.setenv(runtime_variable, "postgresql+asyncpg://runtime@db.example/hmt_test")
+    with pytest.raises(pytest.fail.Exception, match="runtime database target"):
+        _acceptance_url()
+
+
+@pytest.mark.parametrize("runtime_variable", RUNTIME_URL_ENVS)
+def test_postgres_acceptance_rejects_dotenv_only_runtime_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, runtime_variable: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        f"{runtime_variable}=postgresql+asyncpg://runtime@db.example/hmt_test\n"
+    )
+    monkeypatch.setenv(
+        URL_ENV,
+        "postgresql+asyncpg://acceptance@DB.EXAMPLE:5432/hmt_test?ssl=require",
+    )
+    monkeypatch.setenv(DISPOSABLE_ENV, "true")
+    for name in tuple(os.environ):
+        if name.lower() in {value.lower() for value in RUNTIME_URL_ENVS}:
+            monkeypatch.delenv(name)
+    with pytest.raises(pytest.fail.Exception, match="runtime database target"):
+        _acceptance_url()
+
+
+@pytest.mark.parametrize("runtime_variable", ("database_url", "DaTaBaSe_MiGrAtIoN_Url"))
+def test_postgres_acceptance_fails_closed_for_postgres_runtime_alias(
+    monkeypatch: pytest.MonkeyPatch, runtime_variable: str
+) -> None:
+    monkeypatch.setenv(
+        URL_ENV,
+        "postgresql+asyncpg://acceptance@DB.EXAMPLE:5432/hmt_test?ssl=require",
+    )
+    monkeypatch.setenv(DISPOSABLE_ENV, "true")
+    for name in tuple(os.environ):
+        if name.lower() in {value.lower() for value in RUNTIME_URL_ENVS}:
+            monkeypatch.delenv(name)
+    monkeypatch.setenv(runtime_variable, "postgres://runtime@db.example/hmt_test")
+    with pytest.raises(
+        pytest.fail.Exception,
+        match="runtime database target",
+    ):
+        _acceptance_url()
+
+
+def test_postgres_acceptance_fails_closed_without_leaking_invalid_runtime_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_value = "private-invalid-runtime-dsn"
+    monkeypatch.setenv(
+        URL_ENV,
+        "postgresql+asyncpg://acceptance@db.example:5432/hmt_test",
+    )
+    monkeypatch.setenv(DISPOSABLE_ENV, "true")
+    monkeypatch.setenv("database_url", private_value)
+    with pytest.raises(pytest.fail.Exception) as error:
+        _acceptance_url()
+    assert str(error.value) == "Runtime database configuration is not safely comparable"
+    assert private_value not in str(error.value)
 
 
 @pytest.mark.asyncio

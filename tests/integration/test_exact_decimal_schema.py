@@ -63,20 +63,19 @@ def test_every_discovered_decimal_has_exact_postgres_checks_and_no_sqlite_leakag
     sqlite_dialect = sqlite.dialect()
     for (table_name, column_name), decimal_type in _decimal_columns().items():
         table = api.metadata.tables[f"hmt_crypto.{table_name}"]
-        constraints = {
-            str(constraint.name): constraint
+        decimal_constraints = [
+            constraint
             for constraint in table.constraints
             if isinstance(constraint, CheckConstraint)
-        }
+            and str(constraint.name).startswith(f"ck_{table_name}_decimal_{column_name}_")
+        ]
+        constraints = {str(constraint.name): constraint for constraint in decimal_constraints}
         expected_names = {
             f"ck_{table_name}_decimal_{column_name}_{kind}"
             for kind in ("finite", "magnitude", "scale")
         }
-        actual_names = {
-            name
-            for name in constraints
-            if name.startswith(f"ck_{table_name}_decimal_{column_name}_")
-        }
+        actual_names = {str(constraint.name) for constraint in decimal_constraints}
+        assert len(decimal_constraints) == 3
         assert actual_names == expected_names, (
             f"{table_name}.{column_name} lacks its Decimal boundary"
         )
