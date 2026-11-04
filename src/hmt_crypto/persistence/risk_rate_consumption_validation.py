@@ -19,6 +19,10 @@ from hmt_crypto.persistence.risk_rate_consumption_evidence import (
 )
 from hmt_crypto.persistence.risk_reservation_contracts import _time
 from hmt_crypto.persistence.risk_reservation_intent import validate_current_intent_snapshot
+from hmt_crypto.persistence.risk_reservation_parent import (
+    RESERVATION_DECISION_COLUMNS,
+    validate_reservation_decision_agreement,
+)
 from hmt_crypto.persistence.schema_support import SCOPE
 
 RESERVATION_CHILD = (
@@ -269,11 +273,7 @@ def _validate_parents(
         RESERVATION_CHILD,
         RESERVATION_PARENT,
         (
-            "approved_contracts",
-            "planned_incremental_gross_exposure",
-            "planned_worst_case_loss",
-            "planned_collateral",
-            "planned_open_order_slots",
+            *RESERVATION_DECISION_COLUMNS,
             "remaining_contracts",
             "remaining_incremental_gross_exposure",
             "remaining_worst_case_loss",
@@ -315,8 +315,7 @@ def _validate_parents(
             "command_evidence_schema_version",
             "command_evidence_payload",
             "command_evidence_sha256",
-            "approved_contracts",
-            "approved_side",
+            *RESERVATION_DECISION_COLUMNS.values(),
             "order_origin_command_id",
             "order_requested_contracts",
             "order_requested_side",
@@ -364,6 +363,7 @@ def _validate_parents(
         raise PersistenceValueError()
     _validate_intent_parity(values, decision, current_command, current_order)
     if stored:
+        validate_reservation_decision_agreement(reservation, decision)
         _validate_committed_parent(values, reservation)
 
 

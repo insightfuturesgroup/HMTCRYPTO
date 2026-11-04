@@ -38,41 +38,13 @@ from hmt_crypto.persistence.risk_reservation_fields import (
     RELEASE_PAYLOAD_FIELDS,
     RESERVATION_KEY_FIELDS,
 )
+from hmt_crypto.persistence.risk_reservation_parent import (
+    RESERVATION_DECISION_COLUMNS,
+    validate_reservation_decision_agreement,
+)
 from hmt_crypto.persistence.schema_support import SCOPE
 from hmt_crypto.persistence.types import _decimal_text
 
-_PARENT_COLUMNS = {
-    "decision_id": "id",
-    "account_id": "account_id",
-    "region": "region",
-    "environment": "environment",
-    "mode": "mode",
-    "risk_state_id": "risk_state_id",
-    "command_id": "command_id",
-    "command_operation_kind": "command_operation_kind",
-    "order_id": "order_id",
-    "product_id": "product_id",
-    "decision_outcome": "outcome",
-    "risk_effect": "risk_effect",
-    "reservation_plan_sha256": "reservation_plan_sha256",
-    "decision_evaluated_at": "evaluated_at",
-    "decision_recorded_at": "recorded_at",
-    "approved_contracts": "approved_contracts",
-    "approved_side": "approved_side",
-    "reference_asset_id": "reference_asset_id",
-    "reference_asset_symbol": "reference_asset_symbol",
-    "collateral_asset_id": "collateral_asset_id",
-    "collateral_asset_symbol": "collateral_asset_symbol",
-    "planned_incremental_gross_exposure": "reserved_incremental_gross_exposure",
-    "planned_worst_case_loss": "reserved_worst_case_loss",
-    "planned_collateral": "reserved_collateral",
-    "planned_open_order_slots": "reserved_open_order_slots",
-    "planned_pending_rate_units": "reserved_pending_rate_units",
-    "rate_policy_version": "rate_policy_version",
-    "rate_policy_sha256": "rate_policy_sha256",
-    "rate_window_start_at": "rate_window_start_at",
-    "rate_window_end_at": "rate_window_end_at",
-}
 _UUID_FIELDS = (
     "id",
     "account_id",
@@ -157,7 +129,7 @@ def _parent_values(
     table = target.metadata.tables["hmt_crypto.risk_decisions"]
     row = (
         connection.execute(
-            select(*(table.c[parent] for parent in _PARENT_COLUMNS.values())).where(
+            select(*(table.c[parent] for parent in RESERVATION_DECISION_COLUMNS.values())).where(
                 table.c.id == values["decision_id"],
                 *(table.c[field] == values[field] for field in SCOPE),
             )
@@ -400,14 +372,6 @@ def _validate_lifecycle(values: dict[str, object], release_fields: tuple[str, ..
         raise PersistenceValueError()
 
 
-def _validate_parent(values: dict[str, object], parent: dict[str, object]) -> None:
-    if any(
-        not _same(values[child], parent[parent_field])
-        for child, parent_field in _PARENT_COLUMNS.items()
-    ):
-        raise PersistenceValueError()
-
-
 def _validate_reservation(
     target: Any,
     immutable_fields: tuple[str, ...],
@@ -419,7 +383,7 @@ def _validate_reservation(
     values = _load_values(target, connection, stored=stored)
     _validate_required_values(values)
     _validate_lifecycle(values, release_fields)
-    _validate_parent(values, _parent_values(target, values, connection))
+    validate_reservation_decision_agreement(values, _parent_values(target, values, connection))
     return values
 
 
@@ -453,7 +417,9 @@ def install_risk_reservation_validation(
             raise PersistenceValueError()
         _validate_required_values(proposed)
         _validate_lifecycle(proposed, release_fields)
-        _validate_parent(proposed, _parent_values(target, proposed, connection))
+        validate_reservation_decision_agreement(
+            proposed, _parent_values(target, proposed, connection)
+        )
 
     def on_load(target: Any, context: object) -> None:
         _validate_reservation(target, immutable_fields, release_fields, stored=True)
