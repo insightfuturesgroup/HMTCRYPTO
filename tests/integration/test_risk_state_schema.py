@@ -813,17 +813,18 @@ async def test_event_optional_parent_scope_is_exact(schema_db, channel, parent, 
     cycle = halt(owner, state, cause="RECONCILIATION")
     await save(schema_db, state)
     await save(schema_db, cycle)
+    references = {
+        "reconciliation_run_id": other_reconciliation.id,
+        "pnl_snapshot_id": other_calculation.id,
+        "drift_id": other_discrepancy.id,
+    }
+    references[
+        {"run": "reconciliation_run_id", "pnl": "pnl_snapshot_id", "drift": "drift_id"}[parent]
+    ] = {"run": reconciliation.id, "pnl": calculation.id, "drift": discrepancy.id}[parent]
     row = halt_event(
         owner,
         cycle,
-        reconciliation_run_id=other_reconciliation.id,
-        pnl_snapshot_id=other_calculation.id,
-        drift_id=other_discrepancy.id,
-    )
-    setattr(
-        row,
-        {"run": "reconciliation_run_id", "pnl": "pnl_snapshot_id", "drift": "drift_id"}[parent],
-        {"run": reconciliation.id, "pnl": calculation.id, "drift": discrepancy.id}[parent],
+        **references,
     )
     with pytest.raises(PersistenceError):
         await save(schema_db, row, channel)
@@ -916,6 +917,65 @@ async def test_halt_and_event_orm_mutation_is_denied(schema_db, model_name, oper
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [("halt_cause", "BROKEN"), ("generation", 0)])
+@pytest.mark.parametrize("operation", ["load", "deferred", "refresh", "partial", "expired"])
+async def test_corrupt_halt_header_fails_on_every_orm_load_path(schema_db, field, value, operation):
+    owner, _ = await graph(schema_db)
+    state = risk_state(owner, halt_set_state="INITIALIZED")
+    cycle = halt(owner, state)
+    await save(schema_db, state)
+    await save(schema_db, cycle)
+    with pytest.raises(PersistenceValueError):
+        async with schema_db.transaction() as session:
+            loaded = None
+            if operation in {"refresh", "partial", "expired"}:
+                loaded = await session.get(type(cycle), cycle.id)
+                session.expire(loaded, ["halt_cause", "generation"])
+            await session.execute(text("PRAGMA ignore_check_constraints=ON"))
+            await session.execute(
+                text(f"UPDATE risk_halts SET {field}=:value WHERE id=:id"),
+                {"value": value, "id": cycle.id.hex},
+            )
+            await session.execute(text("PRAGMA ignore_check_constraints=OFF"))
+            if operation == "load":
+                await session.get(type(cycle), cycle.id)
+            elif operation == "deferred":
+                (
+                    await session.scalars(select(type(cycle)).options(load_only(type(cycle).id)))
+                ).all()
+            elif operation == "expired":
+                await session.run_sync(lambda _: loaded.halt_cause)
+            else:
+                await session.refresh(
+                    loaded,
+                    attribute_names=["created_at"] if operation == "partial" else None,
+                )
+
+
+@pytest.mark.asyncio
+async def test_halt_partial_refresh_preserves_pending_risk_state_without_recursive_load(schema_db):
+    owner, _ = await graph(schema_db)
+    state = risk_state(owner, halt_set_state="INITIALIZED")
+    cycle = halt(owner, state)
+    await save(schema_db, state)
+    await save(schema_db, cycle)
+    async with schema_db.transaction() as session:
+        loaded_state = await session.get(type(state), state.id)
+        loaded_cycle = await session.get(type(cycle), cycle.id)
+        session.expire(loaded_cycle, ["halt_cause", "generation"])
+        loaded_state.halt_revision = 1
+        loaded_state.updated_at = NOW + timedelta(seconds=1)
+        with session.no_autoflush:
+            await session.refresh(loaded_cycle, attribute_names=["created_at"])
+        assert (loaded_state.halt_revision, loaded_state.version) == (1, 1)
+        assert "halt_cause" not in loaded_cycle.__dict__
+        assert "generation" not in loaded_cycle.__dict__
+    async with schema_db.transaction() as session:
+        stored = await session.get(type(state), state.id)
+        assert (stored.halt_revision, stored.version) == (1, 2)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["load", "deferred", "refresh", "partial", "expired"])
 async def test_corrupt_event_digest_fails_on_every_orm_load_path(schema_db, operation):
     owner, _ = await graph(schema_db)
@@ -945,6 +1005,44 @@ async def test_corrupt_event_digest_fails_on_every_orm_load_path(schema_db, oper
                 await session.refresh(
                     loaded,
                     attribute_names=["recorded_at"] if operation == "partial" else None,
+                )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["load", "deferred", "refresh", "partial", "expired"])
+async def test_corrupt_event_time_order_fails_on_every_orm_load_path(schema_db, operation):
+    owner, _ = await graph(schema_db)
+    state = risk_state(owner, halt_set_state="INITIALIZED")
+    cycle = halt(owner, state)
+    row = halt_event(owner, cycle)
+    await save(schema_db, state)
+    await save(schema_db, cycle)
+    await save(schema_db, row)
+    with pytest.raises(PersistenceValueError):
+        async with schema_db.transaction() as session:
+            loaded = None
+            if operation in {"refresh", "partial", "expired"}:
+                loaded = await session.get(type(row), row.id)
+                session.expire(loaded, ["occurred_at", "recorded_at"])
+            await session.execute(text("PRAGMA ignore_check_constraints=ON"))
+            await session.execute(
+                text("UPDATE risk_halt_events SET occurred_at=:value WHERE id=:id"),
+                {
+                    "value": (NOW + timedelta(seconds=6)).isoformat(timespec="microseconds"),
+                    "id": row.id.hex,
+                },
+            )
+            await session.execute(text("PRAGMA ignore_check_constraints=OFF"))
+            if operation == "load":
+                await session.get(type(row), row.id)
+            elif operation == "deferred":
+                (await session.scalars(select(type(row)).options(load_only(type(row).id)))).all()
+            elif operation == "expired":
+                await session.run_sync(lambda _: loaded.occurred_at)
+            else:
+                await session.refresh(
+                    loaded,
+                    attribute_names=["idempotency_key"] if operation == "partial" else None,
                 )
 
 

@@ -418,7 +418,7 @@ class RiskHaltEvent(ScopedRow, Base):
 
 
 def _load_values(
-    target: RiskState | RiskHaltEvent,
+    target: RiskState | RiskHalt | RiskHaltEvent,
     fields: tuple[str, ...],
     connection: Connection | None,
 ) -> dict[str, object]:
@@ -542,11 +542,25 @@ def _validate_risk_state(target: RiskState, connection: Connection | None = None
         raise PersistenceValueError()
 
 
+def _validate_risk_halt(target: RiskHalt, connection: Connection | None = None) -> None:
+    values = _load_values(target, ("halt_cause", "generation"), connection)
+    if values["halt_cause"] not in HALT_CAUSES or not _positive_bigint(values["generation"]):
+        raise PersistenceValueError()
+
+
 def _validate_halt_event(target: RiskHaltEvent, connection: Connection | None = None) -> None:
-    fields = (*EVIDENCE_FIELDS, *EVENT_ENVELOPE_FIELDS, *EVENT_PAYLOAD_FIELDS)
+    fields = (
+        *EVIDENCE_FIELDS,
+        *EVENT_ENVELOPE_FIELDS,
+        *EVENT_PAYLOAD_FIELDS,
+        "occurred_at",
+        "recorded_at",
+    )
     values = _load_values(target, fields, connection)
     payload = decode_halt_event_evidence(values["evidence_payload"])
-    if any(getattr(payload, field) != values[field] for field in EVENT_PAYLOAD_FIELDS):
+    if any(getattr(payload, field) != values[field] for field in EVENT_PAYLOAD_FIELDS) or not (
+        _ordered_datetimes(values["occurred_at"], values["recorded_at"])
+    ):
         raise PersistenceValueError()
     if encode_halt_event_evidence(
         values["evidence_schema_version"],
@@ -561,8 +575,14 @@ def _validate_halt_event(target: RiskHaltEvent, connection: Connection | None = 
         raise PersistenceValueError()
 
 
-def _install_validation(model: type[RiskState] | type[RiskHaltEvent]) -> None:
-    validate = _validate_risk_state if model is RiskState else _validate_halt_event
+def _install_validation(model: type[RiskState] | type[RiskHalt] | type[RiskHaltEvent]) -> None:
+    def validate(target: Any, connection: Connection | None = None) -> None:
+        if model is RiskState:
+            _validate_risk_state(cast(RiskState, target), connection)
+        elif model is RiskHalt:
+            _validate_risk_halt(cast(RiskHalt, target), connection)
+        else:
+            _validate_halt_event(cast(RiskHaltEvent, target), connection)
 
     def before_write(mapper: object, connection: Connection, target: Any) -> None:
         validate(target, connection)
@@ -583,4 +603,5 @@ guard_model(RiskState, protected=("created_at", "version"))
 guard_model(RiskHalt, immutable=True)
 guard_model(RiskHaltEvent, immutable=True)
 _install_validation(RiskState)
+_install_validation(RiskHalt)
 _install_validation(RiskHaltEvent)
