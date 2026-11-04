@@ -160,7 +160,7 @@ def test_exact_table_keys_fks_indexes_and_postgres_ddl():
     for index in table.indexes:
         assert index.name in str(CreateIndex(index).compile(dialect=postgresql.dialect()))
     for prior in api.metadata.tables.values():
-        if prior is not table:
+        if prior is not table and prior.name not in {"risk_state", "risk_halt_events"}:
             assert "pnl_snapshots" not in {
                 fk.referred_table.name for fk in prior.foreign_key_constraints
             }

@@ -271,7 +271,7 @@ def test_exact_two_tables_exports_columns_constraints_indexes_and_postgres_ddl()
             assert "reconciliation_acknowledgements" not in {
                 fk.referred_table.name for fk in table.foreign_key_constraints
             }
-            if table.name != "reconciliation_acknowledgements":
+            if table.name not in {"reconciliation_acknowledgements", "risk_halt_events"}:
                 assert "reconciliation_drifts" not in {
                     fk.referred_table.name for fk in table.foreign_key_constraints
                 }

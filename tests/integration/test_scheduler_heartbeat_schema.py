@@ -90,6 +90,9 @@ def test_exact_two_added_tables_exports_and_acyclic_stable_scoped_keys():
         "wallet_transactions",
         "funding_snapshots",
         "pnl_snapshots",
+        "risk_state",
+        "risk_halts",
+        "risk_halt_events",
     }
     expected = {
         "WorkerHeartbeat": {
