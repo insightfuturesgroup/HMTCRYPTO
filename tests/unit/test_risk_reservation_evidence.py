@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import tracemalloc
 from copy import deepcopy
 from datetime import timedelta
 from decimal import Decimal
@@ -371,6 +372,122 @@ def test_normal_attempt_set_binds_order_type_price_and_reduce_only_intent(
             observed_command_attempt_count=1,
             locked_attempt_count=1,
             locked_event_count=1,
+        )
+
+
+@pytest.mark.parametrize("with_attempt", [False, True])
+def test_modify_release_binds_dual_command_and_order_snapshots_with_new_limit_price(
+    with_attempt,
+):
+    module = evidence()
+    origin_command_id = UUID("60000000-0000-4000-8000-000000000006")
+    payload, digest = encode_evidence(
+        "intent",
+        "MODIFY_ORDER",
+        1,
+        {
+            "product_id": 1101,
+            "target_order_id": ORDER_ID,
+            "requested_contracts": 3,
+            "limit_price": Decimal("11"),
+        },
+    )
+    current = current_intent(
+        command_evidence_payload=payload,
+        command_evidence_sha256=digest,
+        decision_approved_contracts=3,
+        order_origin_command_id=origin_command_id,
+        order_requested_order_type="limit",
+        order_requested_limit_price=Decimal("10"),
+    )
+    rows = (
+        [
+            attempt(
+                operation_kind="MODIFY_ORDER",
+                evidence_payload=payload,
+                evidence_sha256=digest,
+            )
+        ]
+        if with_attempt
+        else []
+    )
+    complete = module.encode_attempt_evidence_set(
+        1,
+        attempt_set_values(command_operation_kind="MODIFY_ORDER"),
+        rows,
+        current_intent=current,
+        observed_command_attempt_count=len(rows),
+        locked_attempt_count=len(rows),
+        locked_event_count=len(rows),
+    )
+    key_values = reservation_key_values(command_operation_kind="MODIFY_ORDER")
+    proof = module.encode_risk_reservation_release_proof(
+        1,
+        release_values(
+            command_operation_kind="MODIFY_ORDER",
+            reservation_key=module.derive_reservation_key(1, key_values),
+            approved_contracts=3,
+            remaining_contracts=3,
+            planned_open_order_slots=0,
+            remaining_open_order_slots=0,
+        ),
+        complete,
+        current_intent=current,
+    )
+    assert proof.order_attempt_evidence_count == len(rows)
+
+
+@pytest.mark.parametrize(
+    "snapshot_changes",
+    [
+        {"current_order_origin_command_id": UUID(int=99)},
+        {"current_order_requested_contracts": 9},
+        {
+            "current_order_requested_order_type": "market",
+            "current_order_requested_limit_price": Decimal("10"),
+        },
+    ],
+)
+def test_attempt_set_rejects_current_order_that_disagrees_with_d9a_copy_or_shape(
+    snapshot_changes,
+):
+    with pytest.raises(PersistenceValueError):
+        evidence().encode_attempt_evidence_set(
+            1,
+            attempt_set_values(),
+            [],
+            current_intent=current_intent(**snapshot_changes),
+            observed_command_attempt_count=0,
+            locked_attempt_count=0,
+            locked_event_count=0,
+        )
+
+
+def test_attempt_set_rejects_individually_valid_d9a_and_current_command_triples_that_differ():
+    payload, digest = encode_evidence(
+        "intent",
+        "PLACE_ORDER",
+        1,
+        {
+            "product_id": 1101,
+            "requested_contracts": 9,
+            "side": "sell",
+            "order_type": "market",
+            "reduce_only": False,
+        },
+    )
+    with pytest.raises(PersistenceValueError):
+        evidence().encode_attempt_evidence_set(
+            1,
+            attempt_set_values(),
+            [],
+            current_intent=current_intent(
+                decision_command_evidence_payload=payload,
+                decision_command_evidence_sha256=digest,
+            ),
+            observed_command_attempt_count=0,
+            locked_attempt_count=0,
+            locked_event_count=0,
         )
 
 
@@ -831,6 +948,39 @@ def test_stored_release_proof_raw_byte_guard_has_exact_boundary():
         module.guard_release_proof_payload_bytes("x" * 16_384)
 
 
+def test_handoff_rejects_very_large_owned_canonical_before_allocating_ascii_copy():
+    module = evidence()
+    legitimate = attempt_set()
+    forged = module.AttemptEvidenceSetEncoding(
+        canonical="x" * 4_000_000,
+        sha256=legitimate.sha256,
+        observed_command_attempt_count=0,
+        attempt_count=0,
+        event_count=0,
+    )
+    object.__setattr__(forged, "_owned_token", legitimate.__dict__["_owned_token"])
+    tracemalloc.start()
+    try:
+        with pytest.raises(PersistenceValueError):
+            release_proof(attempts=forged)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1_000_000
+
+
+def test_release_decoder_rejects_very_large_text_before_allocating_ascii_copy():
+    huge = "x" * 4_000_000
+    tracemalloc.start()
+    try:
+        with pytest.raises(PersistenceValueError):
+            evidence().decode_risk_reservation_release_proof(huge)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1_000_000
+
+
 @pytest.mark.parametrize("boundary", ["bind", "result"])
 def test_release_payload_adapter_rejects_hostile_str_subclass_without_callback(boundary):
     from sqlalchemy.dialects import sqlite
@@ -867,6 +1017,46 @@ def test_release_payload_adapter_redacts_non_ascii_failures(boundary):
     with pytest.raises(PersistenceValueError) as error:
         method("private-marker-☃", sqlite.dialect())
     assert "private-marker" not in str(error.value) + repr(error.value)
+
+
+@pytest.mark.parametrize("boundary", ["bind", "result"])
+def test_release_payload_adapter_preserves_valid_proof_and_enforces_character_boundary(
+    boundary,
+):
+    from sqlalchemy.dialects import sqlite
+
+    from hmt_crypto.persistence.risk_reservation_release_codec import (
+        RiskReservationReleaseProofPayload,
+    )
+
+    adapter = RiskReservationReleaseProofPayload()
+    method = adapter.process_bind_param if boundary == "bind" else adapter.process_result_value
+    valid = release_proof().payload
+    assert method(valid, sqlite.dialect()) == valid
+    for size in (16_384, 16_385):
+        with pytest.raises(PersistenceValueError):
+            method("x" * size, sqlite.dialect())
+
+
+@pytest.mark.parametrize("boundary", ["bind", "result"])
+def test_release_payload_adapter_rejects_large_text_before_allocating_ascii_copy(boundary):
+    from sqlalchemy.dialects import sqlite
+
+    from hmt_crypto.persistence.risk_reservation_release_codec import (
+        RiskReservationReleaseProofPayload,
+    )
+
+    adapter = RiskReservationReleaseProofPayload()
+    method = adapter.process_bind_param if boundary == "bind" else adapter.process_result_value
+    huge = "x" * 4_000_000
+    tracemalloc.start()
+    try:
+        with pytest.raises(PersistenceValueError):
+            method(huge, sqlite.dialect())
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1_000_000
 
 
 def test_largest_valid_64_by_64_semantic_vector_stays_within_reviewed_byte_cap():

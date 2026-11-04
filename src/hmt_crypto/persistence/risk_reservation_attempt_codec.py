@@ -330,12 +330,8 @@ def encode_attempt_evidence_set(
             _fail()
         context = _attempt_set_context(values)
         current = validate_current_intent_snapshot(current_intent, context)
-        for field in (
-            "command_evidence_schema_version",
-            "command_evidence_payload",
-            "command_evidence_sha256",
-        ):
-            context[field] = current[field]
+        for field in ("schema_version", "payload", "sha256"):
+            context[f"command_evidence_{field}"] = current[f"current_command_evidence_{field}"]
         command_count = _integer(observed_command_attempt_count, positive=False)
         attempt_count = _integer(locked_attempt_count, positive=False)
         event_count = _integer(locked_event_count, positive=False)

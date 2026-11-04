@@ -135,24 +135,73 @@ def attempt_set_values(**changes: object) -> dict[str, object]:
 
 
 def current_intent(**changes: object) -> dict[str, object]:
-    """Return one explicit current command/decision/order semantic snapshot."""
+    """Return explicit immutable-decision and current locked intent snapshots."""
     values: dict[str, object] = {
-        "command_evidence_schema_version": 1,
-        "command_evidence_payload": COMMAND_PAYLOAD,
-        "command_evidence_sha256": COMMAND_SHA,
+        "decision_command_evidence_schema_version": 1,
+        "decision_command_evidence_payload": COMMAND_PAYLOAD,
+        "decision_command_evidence_sha256": COMMAND_SHA,
+        "current_command_evidence_schema_version": 1,
+        "current_command_evidence_payload": COMMAND_PAYLOAD,
+        "current_command_evidence_sha256": COMMAND_SHA,
         "decision_approved_contracts": 2,
         "decision_approved_side": "buy",
         "decision_risk_effect": "RISK_INCREASE",
-        "order_origin_command_id": COMMAND_ID,
-        "order_product_id": 1101,
-        "order_requested_contracts": 2,
-        "order_requested_side": "buy",
-        "order_requested_order_type": "market",
-        "order_requested_limit_price": None,
-        "order_requested_stop_price": None,
-        "order_requested_reduce_only": False,
+        "decision_order_id": ORDER_ID,
+        "decision_order_product_id": 1101,
+        "decision_order_origin_command_id": COMMAND_ID,
+        "decision_order_requested_contracts": 2,
+        "decision_order_requested_side": "buy",
+        "decision_order_requested_reduce_only": False,
+        "current_order_id": ORDER_ID,
+        "current_order_product_id": 1101,
+        "current_order_origin_command_id": COMMAND_ID,
+        "current_order_requested_contracts": 2,
+        "current_order_requested_side": "buy",
+        "current_order_requested_order_type": "market",
+        "current_order_requested_limit_price": None,
+        "current_order_requested_stop_price": None,
+        "current_order_requested_reduce_only": False,
     }
-    values.update(changes)
+    aliases = {
+        "command_evidence_schema_version": (
+            "decision_command_evidence_schema_version",
+            "current_command_evidence_schema_version",
+        ),
+        "command_evidence_payload": (
+            "decision_command_evidence_payload",
+            "current_command_evidence_payload",
+        ),
+        "command_evidence_sha256": (
+            "decision_command_evidence_sha256",
+            "current_command_evidence_sha256",
+        ),
+        "order_origin_command_id": (
+            "decision_order_origin_command_id",
+            "current_order_origin_command_id",
+        ),
+        "order_product_id": (
+            "decision_order_product_id",
+            "current_order_product_id",
+        ),
+        "order_requested_contracts": (
+            "decision_order_requested_contracts",
+            "current_order_requested_contracts",
+        ),
+        "order_requested_side": (
+            "decision_order_requested_side",
+            "current_order_requested_side",
+        ),
+        "order_requested_order_type": ("current_order_requested_order_type",),
+        "order_requested_limit_price": ("current_order_requested_limit_price",),
+        "order_requested_stop_price": ("current_order_requested_stop_price",),
+        "order_requested_reduce_only": (
+            "decision_order_requested_reduce_only",
+            "current_order_requested_reduce_only",
+        ),
+    }
+    for field, value in changes.items():
+        for target in aliases.get(field, (field,)):
+            values[target] = value
     return values
 
 

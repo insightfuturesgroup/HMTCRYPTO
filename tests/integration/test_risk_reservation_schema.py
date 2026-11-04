@@ -392,6 +392,30 @@ async def test_factory_rejects_non_utc_expired_or_pre_recorded_creation_time(sch
         schema_api().RiskReservation.from_decision(decision=approved, created_at=created_at)
 
 
+@pytest.mark.asyncio
+async def test_factory_rejects_hostile_decision_outcome_without_invoking_comparison_callback(
+    schema_db,
+):
+    graph = await decision_graph(schema_db)
+    approved = decision(*[graph[index] for index in (0, 2, 3, 4, 5, 6, 7)])
+    touched = False
+
+    class HostileOutcome(str):
+        def __ne__(self, other):
+            nonlocal touched
+            touched = True
+            raise RuntimeError("private-outcome-marker")
+
+    approved.outcome = HostileOutcome("APPROVED")
+    with pytest.raises(PersistenceValueError) as error:
+        schema_api().RiskReservation.from_decision(
+            decision=approved,
+            created_at=NOW + timedelta(seconds=12),
+        )
+    assert not touched
+    assert "private-outcome-marker" not in str(error.value) + repr(error.value)
+
+
 async def _released_graph(schema_db):
     graph = await reservation_graph(schema_db)
     owner, command, order, reservation = graph[0], graph[6], graph[7], graph[10]
@@ -414,7 +438,7 @@ async def _released_graph(schema_db):
     async with schema_db.transaction() as session:
         session.add_all([prepared, observed])
     proof = apply_test_only_non_authoritative_release(
-        reservation, command, order, [prepared], [observed]
+        reservation, graph[9], command, order, [prepared], [observed]
     )
     return graph, prepared, observed, proof
 

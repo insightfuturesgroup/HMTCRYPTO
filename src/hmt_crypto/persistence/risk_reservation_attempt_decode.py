@@ -126,9 +126,11 @@ def _strict_attempt_rows(
         "order_id": release_values["order_id"],
         "product_id": release_values["product_id"],
         "proof_observed_at": release_values["proof_observed_at"],
-        "command_evidence_schema_version": current_intent["command_evidence_schema_version"],
-        "command_evidence_payload": current_intent["command_evidence_payload"],
-        "command_evidence_sha256": current_intent["command_evidence_sha256"],
+        "command_evidence_schema_version": current_intent[
+            "current_command_evidence_schema_version"
+        ],
+        "command_evidence_payload": current_intent["current_command_evidence_payload"],
+        "command_evidence_sha256": current_intent["current_command_evidence_sha256"],
     }
     owned = tuple(
         _validate_attempt(
@@ -199,7 +201,7 @@ def validate_attempt_evidence_set_handoff(
     if not _is_owned_attempt_evidence_set_encoding(value):
         _fail()
     assert isinstance(value, AttemptEvidenceSetEncoding)
-    if type(value.canonical) is not str:
+    if type(value.canonical) is not str or len(value.canonical) > MAX_ATTEMPT_SET_CANONICAL_BYTES:
         _fail()
     canonical_bytes = value.canonical.encode("ascii")
     if len(canonical_bytes) > MAX_ATTEMPT_SET_CANONICAL_BYTES or hashlib.sha256(

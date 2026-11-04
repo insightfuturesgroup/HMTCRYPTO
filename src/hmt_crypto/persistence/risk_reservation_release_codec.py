@@ -291,7 +291,7 @@ _RELEASE_DECIMAL_FIELDS = {
 def decode_risk_reservation_release_proof(payload: object) -> RiskReservationReleaseEncoding:
     """Decode exact canonical payload and validate all internal derived values."""
     try:
-        if type(payload) is not str:
+        if type(payload) is not str or len(payload) > MAX_RELEASE_PROOF_PAYLOAD_BYTES:
             _fail()
         guard_release_proof_payload_bytes(payload.encode("ascii"))
         raw = json.loads(payload)
@@ -445,12 +445,13 @@ class RiskReservationReleaseProofPayload(NulFreeText):
     _maximum: ClassVar[int] = MAX_RELEASE_PROOF_PAYLOAD_BYTES
 
     def process_bind_param(self, value: object, dialect: Dialect) -> str | None:
-        if value is not None and type(value) is not str:
+        if value is not None and (
+            type(value) is not str or len(value) > MAX_RELEASE_PROOF_PAYLOAD_BYTES
+        ):
             raise PersistenceValueError()
         try:
             result = super().process_bind_param(value, dialect)
             if result is not None:
-                guard_release_proof_payload_bytes(result.encode("ascii"))
                 decode_risk_reservation_release_proof(result)
             return result
         except Exception:

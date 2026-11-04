@@ -52,71 +52,105 @@ def _compare_release_plan(values: dict[str, object], lineage: dict[str, object])
 def validate_current_intent_snapshot(
     value: object, lineage: dict[str, object]
 ) -> dict[str, object]:
-    """Own and cross-check one current command/decision/order semantic snapshot."""
+    """Own and cross-check immutable D9a copies against current locked rows."""
     values = _owned_mapping(value)
-    schema_version = _integer(values["command_evidence_schema_version"])
-    if schema_version != 1:
-        _fail()
-    values["command_evidence_schema_version"] = schema_version
-    values["command_evidence_payload"] = _text(values["command_evidence_payload"], maximum=2048)
-    values["command_evidence_sha256"] = _hash(values["command_evidence_sha256"])
+    for owner in ("decision", "current"):
+        version_field = f"{owner}_command_evidence_schema_version"
+        payload_field = f"{owner}_command_evidence_payload"
+        digest_field = f"{owner}_command_evidence_sha256"
+        version = _integer(values[version_field])
+        if version != 1:
+            _fail()
+        values[version_field] = version
+        values[payload_field] = _text(values[payload_field], maximum=2048)
+        values[digest_field] = _hash(values[digest_field])
     values["decision_approved_contracts"] = _integer(values["decision_approved_contracts"])
     values["decision_approved_side"] = _enum(values["decision_approved_side"], ("buy", "sell"))
     values["decision_risk_effect"] = _enum(
         values["decision_risk_effect"], ("RISK_INCREASE", "REDUCE_ONLY")
     )
-    values["order_origin_command_id"] = _uuid(values["order_origin_command_id"])
-    values["order_product_id"] = _integer(values["order_product_id"])
-    values["order_requested_contracts"] = _integer(values["order_requested_contracts"])
-    values["order_requested_side"] = _enum(values["order_requested_side"], ("buy", "sell"))
-    values["order_requested_order_type"] = _enum(
-        values["order_requested_order_type"], ("limit", "market")
+    for owner in ("decision", "current"):
+        values[f"{owner}_order_id"] = _uuid(values[f"{owner}_order_id"])
+        values[f"{owner}_order_product_id"] = _integer(values[f"{owner}_order_product_id"])
+        values[f"{owner}_order_origin_command_id"] = _uuid(
+            values[f"{owner}_order_origin_command_id"]
+        )
+        values[f"{owner}_order_requested_contracts"] = _integer(
+            values[f"{owner}_order_requested_contracts"]
+        )
+        values[f"{owner}_order_requested_side"] = _enum(
+            values[f"{owner}_order_requested_side"], ("buy", "sell")
+        )
+        if type(values[f"{owner}_order_requested_reduce_only"]) is not bool:
+            _fail()
+    values["current_order_requested_order_type"] = _enum(
+        values["current_order_requested_order_type"], ("limit", "market")
     )
-    values["order_requested_limit_price"] = _optional_positive_decimal(
-        values["order_requested_limit_price"]
+    values["current_order_requested_limit_price"] = _optional_positive_decimal(
+        values["current_order_requested_limit_price"]
     )
-    values["order_requested_stop_price"] = _optional_positive_decimal(
-        values["order_requested_stop_price"]
+    values["current_order_requested_stop_price"] = _optional_positive_decimal(
+        values["current_order_requested_stop_price"]
     )
-    if type(values["order_requested_reduce_only"]) is not bool:
-        _fail()
 
     operation = _enum(lineage["command_operation_kind"], ("PLACE_ORDER", "MODIFY_ORDER"))
     command_id = _uuid(lineage["command_id"])
     order_id = _uuid(lineage["order_id"])
     product_id = _integer(lineage["product_id"])
     assert command_id is not None and order_id is not None and product_id is not None
-    validate_stored_evidence(
-        "intent",
-        operation,
-        schema_version,
-        cast(str, values["command_evidence_payload"]),
-        cast(str, values["command_evidence_sha256"]),
+    for owner in ("decision", "current"):
+        validate_stored_evidence(
+            "intent",
+            operation,
+            cast(int, values[f"{owner}_command_evidence_schema_version"]),
+            cast(str, values[f"{owner}_command_evidence_payload"]),
+            cast(str, values[f"{owner}_command_evidence_sha256"]),
+        )
+    command_fields = (
+        "command_evidence_schema_version",
+        "command_evidence_payload",
+        "command_evidence_sha256",
     )
-    intent = json.loads(cast(str, values["command_evidence_payload"]))
+    if any(values[f"decision_{field}"] != values[f"current_{field}"] for field in command_fields):
+        _fail()
+    order_fields = (
+        "order_id",
+        "order_product_id",
+        "order_origin_command_id",
+        "order_requested_contracts",
+        "order_requested_side",
+        "order_requested_reduce_only",
+    )
+    if any(values[f"decision_{field}"] != values[f"current_{field}"] for field in order_fields):
+        _fail()
+    intent = json.loads(cast(str, values["current_command_evidence_payload"]))
+    order_type = values["current_order_requested_order_type"]
+    limit_price = values["current_order_requested_limit_price"]
     if (
         type(intent) is not dict
         or intent.get("product_id") != product_id
-        or values["order_product_id"] != product_id
-        or values["decision_approved_side"] != values["order_requested_side"]
-        or (values["order_requested_reduce_only"] is True)
+        or values["current_order_id"] != order_id
+        or values["current_order_product_id"] != product_id
+        or values["decision_approved_side"] != values["current_order_requested_side"]
+        or (values["current_order_requested_reduce_only"] is True)
         != (values["decision_risk_effect"] == "REDUCE_ONLY")
-        or values["order_requested_stop_price"] is not None
+        or values["current_order_requested_stop_price"] is not None
+        or (order_type == "market" and limit_price is not None)
+        or (order_type == "limit" and limit_price is None)
     ):
         _fail()
     _compare_release_plan(values, lineage)
 
     if operation == "PLACE_ORDER":
         if (
-            values["order_origin_command_id"] != command_id
-            or values["decision_approved_contracts"] != values["order_requested_contracts"]
+            values["current_order_origin_command_id"] != command_id
+            or values["decision_approved_contracts"] != values["current_order_requested_contracts"]
             or intent.get("requested_contracts") != values["decision_approved_contracts"]
             or intent.get("side") != values["decision_approved_side"]
-            or intent.get("order_type") != values["order_requested_order_type"]
-            or intent.get("reduce_only") is not values["order_requested_reduce_only"]
+            or intent.get("order_type") != order_type
+            or intent.get("reduce_only") is not values["current_order_requested_reduce_only"]
         ):
             _fail()
-        limit_price = values["order_requested_limit_price"]
         if limit_price is None:
             if "limit_price" in intent:
                 _fail()

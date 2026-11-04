@@ -352,9 +352,12 @@ class RiskReservation(ScopedRow, Base):
             if type(identifier) is not UUID or identifier.int == 0:
                 raise PersistenceValueError()
             timestamp = _utc(created_at)
-            if type(decision) is not RiskDecision or decision.outcome != "APPROVED":
+            if type(decision) is not RiskDecision:
                 raise PersistenceValueError()
             parent = decision
+            outcome = parent.outcome
+            if type(outcome) is not str or outcome != "APPROVED":
+                raise PersistenceValueError()
             window_start = _utc(parent.rate_window_start_at)
             evaluated_at = _utc(parent.evaluated_at)
             recorded_at = _utc(parent.recorded_at)
@@ -373,7 +376,7 @@ class RiskReservation(ScopedRow, Base):
                 "command_operation_kind": parent.command_operation_kind,
                 "order_id": parent.order_id,
                 "product_id": parent.product_id,
-                "decision_outcome": parent.outcome,
+                "decision_outcome": outcome,
                 "risk_effect": parent.risk_effect,
                 "reservation_plan_sha256": parent.reservation_plan_sha256,
                 "decision_evaluated_at": parent.evaluated_at,

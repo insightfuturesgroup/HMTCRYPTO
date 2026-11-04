@@ -45,26 +45,38 @@ def _source_attempt(prepared, source_events):
     return values
 
 
-def _current_intent(reservation, command, order):
+def _current_intent(decision, command, order):
     return {
-        "command_evidence_schema_version": command.evidence_schema_version,
-        "command_evidence_payload": command.evidence_payload,
-        "command_evidence_sha256": command.evidence_sha256,
-        "decision_approved_contracts": reservation.approved_contracts,
-        "decision_approved_side": reservation.approved_side,
-        "decision_risk_effect": reservation.risk_effect,
-        "order_origin_command_id": order.command_id,
-        "order_product_id": order.product_id,
-        "order_requested_contracts": order.requested_contracts,
-        "order_requested_side": order.requested_side,
-        "order_requested_order_type": order.requested_order_type,
-        "order_requested_limit_price": order.requested_limit_price,
-        "order_requested_stop_price": order.requested_stop_price,
-        "order_requested_reduce_only": order.requested_reduce_only,
+        "decision_command_evidence_schema_version": decision.command_evidence_schema_version,
+        "decision_command_evidence_payload": decision.command_evidence_payload,
+        "decision_command_evidence_sha256": decision.command_evidence_sha256,
+        "current_command_evidence_schema_version": command.evidence_schema_version,
+        "current_command_evidence_payload": command.evidence_payload,
+        "current_command_evidence_sha256": command.evidence_sha256,
+        "decision_approved_contracts": decision.approved_contracts,
+        "decision_approved_side": decision.approved_side,
+        "decision_risk_effect": decision.risk_effect,
+        "decision_order_id": decision.order_id,
+        "decision_order_product_id": decision.product_id,
+        "decision_order_origin_command_id": decision.order_origin_command_id,
+        "decision_order_requested_contracts": decision.order_requested_contracts,
+        "decision_order_requested_side": decision.order_requested_side,
+        "decision_order_requested_reduce_only": decision.order_requested_reduce_only,
+        "current_order_id": order.id,
+        "current_order_product_id": order.product_id,
+        "current_order_origin_command_id": order.command_id,
+        "current_order_requested_contracts": order.requested_contracts,
+        "current_order_requested_side": order.requested_side,
+        "current_order_requested_order_type": order.requested_order_type,
+        "current_order_requested_limit_price": order.requested_limit_price,
+        "current_order_requested_stop_price": order.requested_stop_price,
+        "current_order_requested_reduce_only": order.requested_reduce_only,
     }
 
 
-def _encode_test_only_attempt_set(reservation, command, order, attempts, events, proof_observed_at):
+def _encode_test_only_attempt_set(
+    reservation, decision, command, order, attempts, events, proof_observed_at
+):
     return encode_attempt_evidence_set(
         1,
         {
@@ -82,7 +94,7 @@ def _encode_test_only_attempt_set(reservation, command, order, attempts, events,
             "proof_observed_at": proof_observed_at,
         },
         [_source_attempt(item, events) for item in attempts],
-        current_intent=_current_intent(reservation, command, order),
+        current_intent=_current_intent(decision, command, order),
         observed_command_attempt_count=command.attempt_count,
         locked_attempt_count=len(attempts),
         locked_event_count=len(events),
@@ -91,6 +103,7 @@ def _encode_test_only_attempt_set(reservation, command, order, attempts, events,
 
 def apply_test_only_non_authoritative_release(
     reservation,
+    decision,
     command,
     order,
     attempts,
@@ -101,7 +114,7 @@ def apply_test_only_non_authoritative_release(
 ):
     """Mutate an ORM fixture only; this does not provide locking/CAS authority."""
     attempt_set = _encode_test_only_attempt_set(
-        reservation, command, order, attempts, events, proof_observed_at
+        reservation, decision, command, order, attempts, events, proof_observed_at
     )
     proof = encode_risk_reservation_release_proof(
         1,
@@ -153,7 +166,7 @@ def apply_test_only_non_authoritative_release(
             "proof_observed_at": proof_observed_at,
         },
         attempt_set,
-        current_intent=_current_intent(reservation, command, order),
+        current_intent=_current_intent(decision, command, order),
     )
     reservation.remaining_contracts = 0
     reservation.remaining_incremental_gross_exposure = Decimal("0")
@@ -253,9 +266,11 @@ async def run_test_only_non_authoritative_atomic_terminalize_and_release(
         raise PersistenceValueError()
     command = await session.get(api.CommandOperation, reservation.command_id)
     order = await session.get(api.Order, reservation.order_id)
+    decision = await session.get(api.RiskDecision, reservation.decision_id)
     if (
         command is None
         or order is None
+        or decision is None
         or reservation.status not in {"PENDING_DISPATCH", "RELEASED"}
         or (reservation.status == "PENDING_DISPATCH" and reservation.version != 1)
         or (reservation.status == "RELEASED" and reservation.version != 2)
@@ -306,6 +321,7 @@ async def run_test_only_non_authoritative_atomic_terminalize_and_release(
             raise PersistenceValueError()
         attempt_set = _encode_test_only_attempt_set(
             reservation,
+            decision,
             command,
             order,
             attempts,
@@ -323,6 +339,7 @@ async def run_test_only_non_authoritative_atomic_terminalize_and_release(
         return decode_risk_reservation_release_proof(reservation.release_proof_payload)
     proof = apply_test_only_non_authoritative_release(
         reservation,
+        decision,
         command,
         order,
         attempts,
