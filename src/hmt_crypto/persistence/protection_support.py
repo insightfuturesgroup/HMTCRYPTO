@@ -6,11 +6,15 @@ Raw-SQL append-only/numeric and concurrent-writer enforcement belongs to 2.1f.
 """
 
 import json
+from collections.abc import Iterable
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import Boolean, ForeignKeyConstraint, event
+from sqlalchemy import Boolean, ForeignKeyConstraint, event, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Dialect
+from sqlalchemy.orm import object_session
 from sqlalchemy.types import TypeDecorator
 
 from hmt_crypto.persistence.errors import PersistenceValueError
@@ -146,12 +150,53 @@ def validate_protection_model(model: type[Any], kind: str) -> None:
     def before_write(mapper: object, connection: object, target: Any) -> None:
         validate(target)
 
+    def validate_loaded(target: Any) -> None:
+        # A partial refresh may leave invariant dependencies expired/deferred.
+        # Read the instance dictionary without invoking instrumented getters;
+        # fetch missing dependencies as typed columns, with no recursive ORM
+        # loads, autoflush, instance mutation, or loss of pending local changes.
+        operation = "purpose" if kind == "exit_policy" else "decision"
+        fields = (
+            (operation, "evidence_schema_version", "evidence_payload", "evidence_sha256")
+            if kind in {"exit_policy", "protection_authorization"}
+            else (
+                "state",
+                "observed_position_contracts",
+                "required_contracts",
+                "verified_contracts",
+            )
+        )
+        state = sa_inspect(target)
+        values = {field: state.dict[field] for field in fields if field in state.dict}
+        missing = [field for field in fields if field not in values]
+        if missing:
+            session = object_session(target)
+            if session is None or state.identity is None:
+                raise PersistenceValueError()
+            table = model.__table__
+            row = (
+                session.connection()
+                .execute(
+                    select(*(table.c[field] for field in missing)).where(
+                        table.c.id == state.identity[0]
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            values.update(row)
+        validate(SimpleNamespace(**values))
+
     def on_load(target: Any, context: object) -> None:
-        validate(target)
+        validate_loaded(target)
+
+    def on_refresh(target: Any, context: object, attrs: Iterable[str] | None) -> None:
+        validate_loaded(target)
 
     event.listen(model, "before_insert", before_write)
     event.listen(model, "before_update", before_write)
-    event.listen(model, "load", on_load)
+    event.listen(model, "load", on_load, restore_load_context=True)
+    event.listen(model, "refresh", on_refresh, restore_load_context=True)
     if kind == "exit_policy":
 
         def reject_delete(mapper: object, connection: object, target: Any) -> None:

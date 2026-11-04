@@ -11,6 +11,7 @@ from schema_test_support import NOW, account, product, schema_api, scope, snapsh
 from schema_test_support import schema_db as schema_db
 from sqlalchemy import UniqueConstraint, delete, insert, select, text, update
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import load_only
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from hmt_crypto.persistence.errors import PersistenceError
@@ -978,3 +979,177 @@ async def test_unreferenced_authorization_delete_is_orm_immutable(execution_db):
     with pytest.raises(PersistenceError):
         async with db.transaction() as session:
             await session.delete(await session.get(type(auth), auth.id))
+
+
+async def refresh_subject(execution_db, kind):
+    db, owner, _, cmd, *_ = execution_db
+    requested = intent(owner, cmd)
+    await save(db, requested)
+    if kind.startswith("exit"):
+        return db, requested
+    auth = authorization(owner, requested)
+    await save(db, auth)
+    if kind.startswith("auth"):
+        return db, auth
+    projected = protection(
+        owner,
+        auth,
+        state="PROTECTED",
+        verified_contracts=2,
+        verified_at=NOW,
+        reconciliation_ref=uuid4(),
+        reconciliation_generation=1,
+    )
+    await save(db, projected)
+    return db, projected
+
+
+async def reload_subject(session, loaded, path, fields):
+    if path in {"fresh", "deferred_fresh"}:
+        model, identity = type(loaded), loaded.id
+        session.expunge(loaded)
+        if path == "deferred_fresh":
+            return (
+                await session.scalars(
+                    select(model)
+                    .where(model.id == identity)
+                    .options(load_only(*(getattr(model, field) for field in fields)))
+                )
+            ).one()
+        return await session.get(model, identity)
+    if path == "full_refresh":
+        await session.refresh(loaded)
+    elif path == "partial_refresh":
+        await session.refresh(loaded, attribute_names=fields)
+    elif path == "partial_refresh_after_expire":
+        session.expire(loaded)
+        await session.refresh(loaded, attribute_names=fields)
+    else:
+        session.expire(loaded, fields if path == "expire_partial" else None)
+        await session.run_sync(lambda sync: getattr(loaded, fields[0]))
+    return loaded
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("error::sqlalchemy.exc.SAWarning")
+@pytest.mark.parametrize(
+    "path",
+    [
+        "fresh",
+        "deferred_fresh",
+        "full_refresh",
+        "partial_refresh",
+        "partial_refresh_after_expire",
+        "expire_all",
+        "expire_partial",
+    ],
+)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "projection",
+        "exit_hash",
+        "exit_schema",
+        "exit_policy",
+        "auth_hash",
+        "auth_basis",
+    ],
+)
+async def test_protection_invariants_reject_corruption_on_every_orm_reload(
+    execution_db, path, kind
+):
+    db, target = await refresh_subject(execution_db, kind)
+    if kind == "projection":
+        changes = {"verified_contracts": 1}
+    elif kind == "exit_hash":
+        changes = {"evidence_payload": '{"trigger_basis":"LAST_PRICE"}'}
+    elif kind == "exit_schema":
+        changes = {"evidence_schema_version": 2}
+    elif kind == "auth_hash":
+        changes = {"evidence_payload": '{"basis":"DENIED"}'}
+    else:
+        from hmt_crypto.persistence.execution_evidence import encode_evidence
+
+        payload, digest = encode_evidence(
+            "exit_policy" if kind == "exit_policy" else "protection_authorization",
+            "STOP_LOSS" if kind == "exit_policy" else "PAPER_AUTHORIZED",
+            1,
+            {"trigger_basis": "NONE"} if kind == "exit_policy" else {"basis": "DENIED"},
+        )
+        changes = {"evidence_payload": payload, "evidence_sha256": digest}
+    with pytest.raises(PersistenceError):
+        async with db.transaction() as session:
+            loaded = await session.get(type(target), target.id)
+            connection = await session.connection()
+            # Simulate stored corruption, including the otherwise checked schema
+            # version. Core mutations intentionally bypass only ORM write guards.
+            await connection.exec_driver_sql("PRAGMA ignore_check_constraints=ON")
+            try:
+                await session.execute(
+                    update(target.__table__)
+                    .where(target.__table__.c.id == target.id)
+                    .values(**changes)
+                )
+            finally:
+                await connection.exec_driver_sql("PRAGMA ignore_check_constraints=OFF")
+            await reload_subject(session, loaded, path, list(changes))
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("error::sqlalchemy.exc.SAWarning")
+@pytest.mark.parametrize(
+    "path",
+    [
+        "fresh",
+        "deferred_fresh",
+        "full_refresh",
+        "partial_refresh",
+        "partial_refresh_after_expire",
+        "expire_all",
+        "expire_partial",
+    ],
+)
+@pytest.mark.parametrize("kind", ["projection", "exit", "auth"])
+async def test_valid_full_partial_and_expired_reload_remain_usable(execution_db, path, kind):
+    db, target = await refresh_subject(execution_db, kind)
+    fields = ["verified_contracts"] if kind == "projection" else ["evidence_payload"]
+    async with db.transaction() as session:
+        loaded = await reload_subject(
+            session, await session.get(type(target), target.id), path, fields
+        )
+        if kind == "projection":
+            assert await session.run_sync(lambda sync: loaded.verified_contracts) == 2
+            loaded.reason, loaded.version = "STALE", 2
+        elif kind == "exit":
+            assert (
+                await session.run_sync(lambda sync: loaded.evidence_payload)
+                == '{"trigger_basis":"MARK_PRICE"}'
+            )
+            loaded.state, loaded.version, loaded.terminal_at = "CANCELLED", 2, NOW
+        else:
+            assert (
+                await session.run_sync(lambda sync: loaded.evidence_payload)
+                == '{"basis":"SIMULATION"}'
+            )
+    async with db.transaction() as session:
+        loaded = await session.get(type(target), target.id)
+        if kind == "projection":
+            assert loaded.reason == "STALE" and loaded.version == 2
+        elif kind == "exit":
+            assert loaded.state == "CANCELLED" and loaded.version == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("error::sqlalchemy.exc.SAWarning")
+async def test_partial_refresh_preserves_unrelated_pending_projection_change(execution_db):
+    db, target = await refresh_subject(execution_db, "projection")
+    async with db.transaction() as session:
+        loaded = await session.get(type(target), target.id)
+        loaded.reason = "STALE"
+        session.expire(loaded, ["required_contracts", "state"])
+        with session.no_autoflush:
+            await session.refresh(loaded, attribute_names=["verified_contracts"])
+            assert loaded.reason == "STALE"
+            assert session.is_modified(loaded)
+    async with db.transaction() as session:
+        assert (await session.get(type(target), target.id)).reason == "STALE"
