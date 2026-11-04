@@ -5,7 +5,7 @@ from datetime import datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, String, Text, UniqueConstraint, Uuid, event
+from sqlalchemy import CheckConstraint, UniqueConstraint, Uuid, event
 from sqlalchemy.orm import Mapped, mapped_column
 
 from hmt_crypto.persistence.db import Base
@@ -13,6 +13,8 @@ from hmt_crypto.persistence.errors import PersistenceValueError
 from hmt_crypto.persistence.payloads import MAX_PAYLOAD, canonical_intent
 from hmt_crypto.persistence.schema_support import (
     SCOPE,
+    NulFreeString,
+    NulFreeText,
     StrictBigInteger,
     account_fk,
     bounded,
@@ -42,16 +44,16 @@ class Signal(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     account_id: Mapped[UUID] = mapped_column(Uuid)
-    region: Mapped[str] = mapped_column(String(16))
-    environment: Mapped[str] = mapped_column(String(16))
-    mode: Mapped[str] = mapped_column(String(16))
-    signal_key: Mapped[str] = mapped_column(String(128))
+    region: Mapped[str] = mapped_column(NulFreeString(16))
+    environment: Mapped[str] = mapped_column(NulFreeString(16))
+    mode: Mapped[str] = mapped_column(NulFreeString(16))
+    signal_key: Mapped[str] = mapped_column(NulFreeString(128))
     product_id: Mapped[int] = mapped_column(StrictBigInteger())
-    source: Mapped[str] = mapped_column(String(128))
+    source: Mapped[str] = mapped_column(NulFreeString(128))
     generated_at: Mapped[datetime] = mapped_column(UTCDateTime())
     recorded_at: Mapped[datetime] = mapped_column(UTCDateTime())
-    intent_payload: Mapped[str] = mapped_column(Text)
-    intent_sha256: Mapped[str] = mapped_column(String(64))
+    intent_payload: Mapped[str] = mapped_column(NulFreeText)
+    intent_sha256: Mapped[str] = mapped_column(NulFreeString(64))
 
     @classmethod
     def from_intent(

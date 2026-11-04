@@ -80,8 +80,8 @@ def credential(owner, **changes):
         id=uuid4(),
         **scope(owner),
         credential_version=1,
-        credential_slot="DELTA_INDIA_TESTNET",
-        fingerprint_sha256=HASH,
+        credential_slot=f"DELTA_{owner.region.upper()}_{owner.environment.upper()}",
+        fingerprint_hint=HASH[:12],
         recorded_at=NOW,
     )
     values.update(changes)

@@ -5,14 +5,13 @@ identity here is evidence, never write permission.
 """
 
 from datetime import datetime
+from typing import cast
 from uuid import UUID, uuid4
 
-from pydantic import SecretStr
 from sqlalchemy import (
     CheckConstraint,
     ForeignKeyConstraint,
     Index,
-    String,
     UniqueConstraint,
     Uuid,
     event,
@@ -21,41 +20,54 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import Mapped, mapped_column, validates
-from sqlalchemy.types import TypeDecorator
 
 from hmt_crypto.persistence.db import Base
 from hmt_crypto.persistence.errors import PersistenceValueError
 from hmt_crypto.persistence.schema_support import (
     SCOPE,
+    NulFreeString,
     StrictBigInteger,
     account_fk,
     bounded,
+    hex_check,
     mode_check,
-    sha_check,
     venue_checks,
 )
 from hmt_crypto.persistence.types import UTCDateTime
 
+_CREDENTIAL_SLOTS = frozenset(
+    f"DELTA_{region}_{environment}"
+    for region in ("INDIA", "GLOBAL")
+    for environment in ("TESTNET", "PROD")
+)
 
-def _fingerprint_raw(value: object) -> str:
-    raw = value.get_secret_value() if type(value) is SecretStr else value
-    if type(raw) is not str or len(raw) != 64 or any(c not in "0123456789abcdef" for c in raw):
+
+def _safe_hint(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        type(value) is not str
+        or len(value) != 12
+        or any(c not in "0123456789abcdef" for c in value)
+    ):
         raise PersistenceValueError()
-    return raw
+    return value
 
 
-class _Fingerprint(TypeDecorator[SecretStr]):
-    impl = String(64)
+class _FingerprintHint(NulFreeString):
     cache_ok = True
 
     def process_bind_param(self, value: object, dialect: Dialect) -> str | None:
-        if value is None:
-            return None
-        return _fingerprint_raw(value)
+        return _safe_hint(value)
 
-    def process_result_value(self, value: object, dialect: Dialect) -> SecretStr | None:
-        raw = self.process_bind_param(value, dialect)
-        return SecretStr(raw) if raw is not None else None
+
+class _CredentialSlot(NulFreeString):
+    cache_ok = True
+
+    def process_bind_param(self, value: object, dialect: Dialect) -> str | None:
+        if value is not None and (type(value) is not str or value not in _CREDENTIAL_SLOTS):
+            raise PersistenceValueError()
+        return super().process_bind_param(value, dialect)
 
 
 class Account(Base):
@@ -109,12 +121,12 @@ class Account(Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    region: Mapped[str] = mapped_column(String(16))
-    environment: Mapped[str] = mapped_column(String(16))
-    mode: Mapped[str] = mapped_column(String(16))
-    profile_name: Mapped[str] = mapped_column(String(128))
-    external_user_id: Mapped[str | None] = mapped_column(String(128))
-    external_account_id: Mapped[str | None] = mapped_column(String(128))
+    region: Mapped[str] = mapped_column(NulFreeString(16))
+    environment: Mapped[str] = mapped_column(NulFreeString(16))
+    mode: Mapped[str] = mapped_column(NulFreeString(16))
+    profile_name: Mapped[str] = mapped_column(NulFreeString(128))
+    external_user_id: Mapped[str | None] = mapped_column(NulFreeString(128))
+    external_account_id: Mapped[str | None] = mapped_column(NulFreeString(128))
     identity_verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     current_credential_version: Mapped[int | None] = mapped_column(StrictBigInteger())
     version: Mapped[int] = mapped_column(StrictBigInteger())
@@ -137,17 +149,17 @@ def _guard_account_scope(mapper: object, connection: object, target: Account) ->
     state = inspect(target)
     if any(
         state.attrs[name].history.has_changes()
-        for name in ("id", "region", "environment", "mode", "profile_name")
+        for name in ("id", "region", "environment", "mode", "profile_name", "version")
     ):
         raise PersistenceValueError()
 
 
 class CredentialVersion(Base):
-    """Immutable credential evidence; full fingerprint is deferred and secret-wrapped.
+    """Credential evidence with only the existing safe 12-hex diagnostic hint.
 
     Binding/probe/reconciliation UUIDs reference observations whose tables belong
     to later slices. They deliberately do not assert successful verification.
-    Ordinary query consumers must use the explicit safe view, never ORM vars().
+    Complete fingerprints have no storage field or accepted constructor input.
     """
 
     __tablename__ = "credential_versions"
@@ -158,7 +170,11 @@ class CredentialVersion(Base):
         bounded("credential_slot"),
         bounded("observed_external_user_id"),
         bounded("observed_external_account_id"),
-        sha_check("fingerprint_sha256"),
+        hex_check("fingerprint_hint", 12),
+        CheckConstraint(
+            "credential_slot = 'DELTA_' || upper(region) || '_' || upper(environment)",
+            name="credential_slot_scope",
+        ),
         CheckConstraint("credential_version >= 1", name="version_positive"),
         CheckConstraint(
             "observed_external_account_id IS NULL OR observed_external_user_id IS NOT NULL",
@@ -169,27 +185,50 @@ class CredentialVersion(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     account_id: Mapped[UUID] = mapped_column(Uuid)
-    region: Mapped[str] = mapped_column(String(16))
-    environment: Mapped[str] = mapped_column(String(16))
-    mode: Mapped[str] = mapped_column(String(16))
+    region: Mapped[str] = mapped_column(NulFreeString(16))
+    environment: Mapped[str] = mapped_column(NulFreeString(16))
+    mode: Mapped[str] = mapped_column(NulFreeString(16))
     credential_version: Mapped[int] = mapped_column(StrictBigInteger())
-    credential_slot: Mapped[str] = mapped_column(String(128))
-    fingerprint_sha256: Mapped[SecretStr] = mapped_column(_Fingerprint(), deferred=True)
-    observed_external_user_id: Mapped[str | None] = mapped_column(String(128))
-    observed_external_account_id: Mapped[str | None] = mapped_column(String(128))
+    credential_slot: Mapped[str] = mapped_column(_CredentialSlot(32))
+    fingerprint_hint: Mapped[str | None] = mapped_column(_FingerprintHint(12))
+    observed_external_user_id: Mapped[str | None] = mapped_column(NulFreeString(128))
+    observed_external_account_id: Mapped[str | None] = mapped_column(NulFreeString(128))
     binding_ref: Mapped[UUID | None] = mapped_column(Uuid)
     probe_ref: Mapped[UUID | None] = mapped_column(Uuid)
     reconciliation_ref: Mapped[UUID | None] = mapped_column(Uuid)
     recorded_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
-    @validates("fingerprint_sha256")
-    def _own_fingerprint(self, key: str, value: object) -> SecretStr:
-        return SecretStr(_fingerprint_raw(value))
+    @validates("fingerprint_hint")
+    def _own_hint(self, key: str, value: object) -> str | None:
+        return _safe_hint(value)
 
-    def to_safe_dict(self) -> dict[str, str | int]:
+    @validates("credential_slot")
+    def _allowlisted_slot(self, key: str, value: object) -> str:
+        if type(value) is not str or value not in _CREDENTIAL_SLOTS:
+            raise PersistenceValueError()
+        return value
+
+    def to_safe_dict(self) -> dict[str, str | int | None]:
         """Return whitelisted query metadata without fingerprint or opaque markers."""
         return {
             "id": str(self.id),
             "credential_version": self.credential_version,
+            "credential_slot": self.credential_slot,
+            "fingerprint_hint": self.fingerprint_hint,
             "recorded_at": self.recorded_at.isoformat(),
         }
+
+
+@event.listens_for(CredentialVersion, "before_insert")
+@event.listens_for(CredentialVersion, "before_update")
+def _bind_slot_to_scope(mapper: object, connection: object, target: CredentialVersion) -> None:
+    expected = f"DELTA_{target.region.upper()}_{target.environment.upper()}"
+    if expected not in _CREDENTIAL_SLOTS:
+        raise PersistenceValueError()
+    # The persisted column is required, but a newly constructed ORM row can
+    # omit it until this event derives the allowlisted scope value.
+    slot = cast(str | None, target.credential_slot)
+    if slot is None:
+        target.credential_slot = expected
+    elif slot != expected:
+        raise PersistenceValueError()

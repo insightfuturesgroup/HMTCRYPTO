@@ -6,8 +6,6 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     CheckConstraint,
     ForeignKeyConstraint,
-    String,
-    Text,
     UniqueConstraint,
     Uuid,
     event,
@@ -18,7 +16,14 @@ from hmt_crypto.domain import Product
 from hmt_crypto.persistence.db import Base
 from hmt_crypto.persistence.errors import PersistenceValueError
 from hmt_crypto.persistence.payloads import MAX_PAYLOAD, decode_product, encode_product
-from hmt_crypto.persistence.schema_support import StrictBigInteger, bounded, sha_check, venue_checks
+from hmt_crypto.persistence.schema_support import (
+    NulFreeString,
+    NulFreeText,
+    StrictBigInteger,
+    bounded,
+    sha_check,
+    venue_checks,
+)
 from hmt_crypto.persistence.types import UTCDateTime
 
 
@@ -41,11 +46,11 @@ class CatalogueSnapshot(Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    region: Mapped[str] = mapped_column(String(16))
-    environment: Mapped[str] = mapped_column(String(16))
+    region: Mapped[str] = mapped_column(NulFreeString(16))
+    environment: Mapped[str] = mapped_column(NulFreeString(16))
     revision: Mapped[int] = mapped_column(StrictBigInteger())
-    source: Mapped[str] = mapped_column(String(128))
-    content_sha256: Mapped[str] = mapped_column(String(64))
+    source: Mapped[str] = mapped_column(NulFreeString(128))
+    content_sha256: Mapped[str] = mapped_column(NulFreeString(64))
     fetched_at: Mapped[datetime] = mapped_column(UTCDateTime())
     validated_at: Mapped[datetime] = mapped_column(UTCDateTime())
     fresh_until: Mapped[datetime] = mapped_column(UTCDateTime())
@@ -76,8 +81,8 @@ class CatalogueProduct(Base):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     snapshot_id: Mapped[UUID] = mapped_column(Uuid)
     product_id: Mapped[int] = mapped_column(StrictBigInteger())
-    symbol: Mapped[str] = mapped_column(String(128))
-    product_payload: Mapped[str] = mapped_column(Text)
+    symbol: Mapped[str] = mapped_column(NulFreeString(128))
+    product_payload: Mapped[str] = mapped_column(NulFreeText)
 
     @classmethod
     def from_product(cls, *, snapshot_id: UUID, product: Product) -> "CatalogueProduct":

@@ -15,8 +15,8 @@ from typing import Any
 
 from pydantic import ValidationError
 from sqlalchemy import MetaData, event
-from sqlalchemy.engine import Connection
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.engine import Connection, ExceptionContext
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -59,6 +59,21 @@ def _sqlite_connect(dbapi_connection: Any, connection_record: Any) -> None:
 
 def _sqlite_begin(connection: Connection) -> None:
     connection.exec_driver_sql("BEGIN")
+
+
+def _safe_driver_error(context: ExceptionContext) -> DBAPIError | None:
+    # hide_parameters does not hide PostgreSQL DETAIL/failing-row diagnostics.
+    # Expose neither driver text nor literal SQL/parameters in a DBAPI wrapper.
+    error = context.sqlalchemy_exception
+    if isinstance(error, DBAPIError):
+        return type(error)(
+            None,
+            None,
+            PersistenceError(),
+            hide_parameters=True,
+            connection_invalidated=error.connection_invalidated,
+        )
+    return None
 
 
 async def _complete_cleanup(task: asyncio.Task[None]) -> None:
@@ -118,6 +133,7 @@ class Database:
             self._engine = create_async_engine(url, **options)
         except Exception:
             raise ConfigurationError() from None
+        event.listen(self._engine.sync_engine, "handle_error", _safe_driver_error, retval=True)
         if url.drivername == "sqlite+aiosqlite":
             event.listen(self._engine.sync_engine, "connect", _sqlite_connect)
             event.listen(self._engine.sync_engine, "begin", _sqlite_begin)

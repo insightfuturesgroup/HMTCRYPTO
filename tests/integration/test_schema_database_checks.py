@@ -6,8 +6,7 @@ from uuid import uuid4
 import pytest
 from schema_test_support import NOW, account, credential, product, schema_api, signal, snapshot
 from schema_test_support import schema_db as schema_db
-from sqlalchemy import insert, inspect, select, text
-from sqlalchemy.orm import undefer
+from sqlalchemy import insert, select, text
 
 from hmt_crypto.persistence.errors import PersistenceError
 
@@ -35,14 +34,14 @@ async def test_credential_metadata_checks_and_exact_boundaries(schema_db, change
 
 
 @pytest.mark.parametrize("fingerprint", ["SECRET-NOT-A-FINGERPRINT", "A" * 64, "g" * 64])
-def test_invalid_fingerprint_has_safe_validation_error(fingerprint):
+def test_invalid_fingerprint_hint_has_safe_validation_error(fingerprint):
     with pytest.raises(PersistenceError) as caught:
-        credential(account(), fingerprint_sha256=fingerprint)
+        credential(account(), fingerprint_hint=fingerprint)
     assert fingerprint not in str(caught.value) + repr(caught.value)
 
 
 @pytest.mark.asyncio
-async def test_fingerprint_read_is_deferred_and_raw_sql_sha_check_cannot_be_bypassed(schema_db):
+async def test_only_safe_hint_round_trips_and_raw_sql_hex_check_cannot_be_bypassed(schema_db):
     api = schema_api()
     owner = account()
     row = credential(owner)
@@ -52,24 +51,14 @@ async def test_fingerprint_read_is_deferred_and_raw_sql_sha_check_cannot_be_bypa
         session.add(row)
     async with schema_db.transaction() as session:
         loaded = await session.get(api.CredentialVersion, row.id)
-        assert "fingerprint_sha256" in inspect(loaded).unloaded
         assert loaded.to_safe_dict()["credential_version"] == 1
-        assert "fingerprint_sha256" in inspect(loaded).unloaded
-    async with schema_db.transaction() as session:
-        loaded = (
-            await session.scalars(
-                select(api.CredentialVersion).options(
-                    undefer(api.CredentialVersion.fingerprint_sha256)
-                )
-            )
-        ).one()
-        assert loaded.fingerprint_sha256.get_secret_value() == "a" * 64
+        assert loaded.fingerprint_hint == "a" * 12
         assert "a" * 64 not in repr(vars(loaded))
     with pytest.raises(PersistenceError):
         async with schema_db.transaction() as session:
             await session.execute(
-                text("UPDATE credential_versions SET fingerprint_sha256 = :invalid"),
-                {"invalid": "g" * 64},
+                text("UPDATE credential_versions SET fingerprint_hint = :invalid"),
+                {"invalid": "g" * 12},
             )
 
 
@@ -150,3 +139,38 @@ async def test_empty_schema_drop_recreate_keeps_constraints(schema_db):
     with pytest.raises(PersistenceError):
         async with schema_db.transaction() as session:
             session.add(account(mode="untrusted"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["bounded", "hash"])
+@pytest.mark.parametrize("channel", ["orm", "core", "raw"])
+@pytest.mark.parametrize("suffix", ["", "hidden-invalid-suffix" * 50])
+async def test_embedded_nul_cannot_hide_identifier_or_hash_suffix(schema_db, kind, channel, suffix):
+    api = schema_api()
+    model = api.Account if kind == "bounded" else api.CatalogueSnapshot
+    column = "profile_name" if kind == "bounded" else "content_sha256"
+    valid = "fixture" if kind == "bounded" else "a" * 64
+    invalid = valid + "\x00" + suffix
+    row = account() if kind == "bounded" else snapshot()
+    if channel == "raw":
+        async with schema_db.transaction() as session:
+            session.add(row)
+        with pytest.raises(PersistenceError):
+            async with schema_db.transaction() as session:
+                await session.execute(
+                    text(f"UPDATE {model.__tablename__} SET {column} = :invalid"),
+                    {"invalid": invalid},
+                )
+        async with schema_db.transaction() as session:
+            assert (await session.scalars(select(getattr(model, column)))).all() == [valid]
+        return
+    setattr(row, column, invalid)
+    with pytest.raises(PersistenceError):
+        async with schema_db.transaction() as session:
+            if channel == "orm":
+                session.add(row)
+            else:
+                values = {field.name: getattr(row, field.name) for field in model.__table__.columns}
+                await session.execute(insert(model.__table__).values(**values))
+    async with schema_db.transaction() as session:
+        assert (await session.scalars(select(model))).all() == []

@@ -139,16 +139,13 @@ def test_signal_rejects_inexact_or_unbounded_intent(payload):
 
 
 @pytest.mark.asyncio
-async def test_credential_fingerprint_and_markers_never_leak_in_safe_views_or_sqlalchemy_errors(
+async def test_credential_full_fingerprint_is_absent_in_rows_safe_views_and_sqlalchemy_errors(
     schema_db,
 ):
     owner = account()
     fingerprint = "0123456789abcdef" * 4
-    marker = "SECRET-CREDENTIAL-MARKER"
-    row = credential(owner, fingerprint_sha256=fingerprint, credential_slot=marker)
+    row = credential(owner, fingerprint_hint=fingerprint[:12])
     assert fingerprint not in repr(row)
-    assert marker not in repr(row)
-    assert marker not in json.dumps(row.to_safe_dict(), default=str)
     assert fingerprint not in json.dumps(row.to_safe_dict(), default=str)
     async with schema_db.transaction() as session:
         session.add(owner)
@@ -174,11 +171,10 @@ async def test_credential_fingerprint_and_markers_never_leak_in_safe_views_or_sq
                             "recorded_at",
                         )
                     },
-                    fingerprint_sha256=fingerprint,
+                    fingerprint_hint=fingerprint[:12],
                 )
             )
         assert fingerprint not in str(caught.value) + repr(caught.value)
-        assert marker not in str(caught.value) + repr(caught.value)
     async with schema_db.transaction() as session:
         loaded = await session.get(schema_api().CredentialVersion, row.id)
         assert fingerprint not in repr(loaded)
