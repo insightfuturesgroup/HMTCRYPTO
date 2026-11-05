@@ -39,7 +39,10 @@ dev = [
 packages = ["src/hmt_crypto"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["/tests", "/.superpowers"]
+exclude = [
+    "/tests/integration/support/task210_worker_clock_issuer.py",
+    "/.superpowers",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

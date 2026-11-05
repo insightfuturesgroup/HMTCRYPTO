@@ -1,4 +1,4 @@
-"""Built distributions exclude every Phase 3 tests-only support module."""
+"""Built distributions preserve tests but exclude tests-only authority."""
 
 from __future__ import annotations
 
@@ -11,7 +11,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_phase3_test_support_is_absent_from_wheel_and_sdist(tmp_path: Path) -> None:
+def _contains_path(names: set[str], relative: str) -> bool:
+    return any(name == relative or name.endswith(f"/{relative}") for name in names)
+
+
+def test_phase3_artifacts_keep_tests_non_executable_and_exclude_authority(
+    tmp_path: Path,
+) -> None:
     subprocess.run(
         [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(tmp_path)],
         cwd=ROOT,
@@ -25,6 +31,14 @@ def test_phase3_test_support_is_absent_from_wheel_and_sdist(tmp_path: Path) -> N
         wheel_names = set(archive.namelist())
     with tarfile.open(sdist, "r:gz") as archive:
         sdist_names = set(archive.getnames())
-    for names in (wheel_names, sdist_names):
-        assert not any("tests/" in name for name in names)
-        assert not any("fake_websocket" in name for name in names)
+    assert not any(name == "tests" or name.startswith("tests/") for name in wheel_names)
+    assert not any("fake_websocket" in name for name in wheel_names)
+    assert not any("/.superpowers/" in f"/{name}/" for name in wheel_names)
+
+    assert _contains_path(sdist_names, "tests/unit/test_package.py")
+    assert _contains_path(sdist_names, "tests/integration/support/fake_websocket.py")
+    assert not _contains_path(
+        sdist_names,
+        "tests/integration/support/task210_worker_clock_issuer.py",
+    )
+    assert not any("/.superpowers/" in f"/{name}/" for name in sdist_names)
