@@ -14,6 +14,19 @@ from hmt_crypto.errors import AmbiguousExchangeResult
 
 pytestmark = pytest.mark.unit
 
+WRITE_OPERATIONS = (
+    "create_order",
+    "modify_order",
+    "cancel_order",
+    "cancel_all",
+    "set_leverage",
+    "set_margin_mode",
+    "add_margin",
+    "create_bracket",
+    "edit_bracket",
+    "batch_write",
+)
+
 
 def retry_policy(**overrides: object) -> object:
     api = limiter_api()
@@ -172,10 +185,41 @@ def test_jitter_input_is_strict_and_bounded(jitter: object) -> None:
         decision(status_code=500, jitter_unit=jitter)
 
 
-@pytest.mark.parametrize(
-    "operation",
-    ["create_order", "modify_order", "cancel_order", "set_leverage", "add_margin", "batch_write"],
-)
+def test_private_route_retry_names_resolve_exact_operation_classes() -> None:
+    from hmt_crypto.exchange.delta.private_routes import PRIVATE_ROUTE_SPECS
+
+    api = limiter_api()
+    assert tuple((member.name, member.value) for member in api.OperationClass) == (
+        ("SAFE_READ", "safe_read"),
+        ("CREATE_ORDER", "create_order"),
+        ("MODIFY_ORDER", "modify_order"),
+        ("CANCEL_ORDER", "cancel_order"),
+        ("CANCEL_ALL", "cancel_all"),
+        ("SET_LEVERAGE", "set_leverage"),
+        ("SET_MARGIN_MODE", "set_margin_mode"),
+        ("ADD_MARGIN", "add_margin"),
+        ("CREATE_BRACKET", "create_bracket"),
+        ("EDIT_BRACKET", "edit_bracket"),
+        ("BATCH_WRITE", "batch_write"),
+    )
+    expected = {
+        "safe_read": api.OperationClass.SAFE_READ,
+        "create_order": api.OperationClass.CREATE_ORDER,
+        "modify_order": api.OperationClass.MODIFY_ORDER,
+        "cancel_order": api.OperationClass.CANCEL_ORDER,
+        "cancel_all": api.OperationClass.CANCEL_ALL,
+        "set_leverage": api.OperationClass.SET_LEVERAGE,
+        "set_margin_mode": api.OperationClass.SET_MARGIN_MODE,
+        "add_margin": api.OperationClass.ADD_MARGIN,
+        "create_bracket": api.OperationClass.CREATE_BRACKET,
+        "edit_bracket": api.OperationClass.EDIT_BRACKET,
+    }
+    for spec in PRIVATE_ROUTE_SPECS:
+        operation = api.OperationClass(spec.retry_operation_name)
+        assert operation is expected[spec.retry_operation_name]
+
+
+@pytest.mark.parametrize("operation", WRITE_OPERATIONS)
 def test_every_write_class_is_categorically_never_auto_retried(operation: str) -> None:
     assert decision(operation=operation, status_code=429).action is limiter_api().RetryAction.FAIL
     assert decision(operation=operation, status_code=503).action is limiter_api().RetryAction.FAIL
@@ -204,10 +248,7 @@ def test_write_failures_after_bytes_may_have_been_sent_are_ambiguous(
         result.raise_if_ambiguous()
 
 
-@pytest.mark.parametrize(
-    "operation",
-    ["create_order", "modify_order", "cancel_order", "set_leverage", "add_margin", "batch_write"],
-)
+@pytest.mark.parametrize("operation", WRITE_OPERATIONS)
 def test_post_send_write_cancellation_is_ambiguous_for_every_write_class(
     operation: str,
 ) -> None:

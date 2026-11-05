@@ -60,6 +60,24 @@ def test_private_write_fund_and_unknown_paths_are_denied(path: str) -> None:
     assert path not in repr(raised.value)
 
 
+def test_all_private_profiles_and_fund_admin_routes_stay_outside_public_authority() -> None:
+    from hmt_crypto.exchange.delta.private_routes import PRIVATE_ROUTE_SPECS
+
+    excluded = tuple((spec.method, spec.path_template) for spec in PRIVATE_ROUTE_SPECS) + (
+        ("POST", "/v2/wallets/sub_account_balance_transfer"),
+        ("GET", "/v2/wallets/sub_accounts_transfer_history"),
+        ("GET", "/v2/wallet/transactions/download"),
+        ("GET", "/v2/fills/history/download/csv"),
+        ("POST", "/v2/orders/batch"),
+        ("POST", "/v2/positions/close_all"),
+        ("GET", "/v2/rate_limits/quota"),
+    )
+    assert len(PRIVATE_ROUTE_SPECS) == 19
+    for method, path in excluded:
+        with pytest.raises(ConfigurationError):
+            public_api().routes.resolve_public_request(method, path)
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -178,6 +196,32 @@ async def test_private_transport_revalidates_denied_paths_before_dispatch(path: 
     try:
         with pytest.raises(ConfigurationError):
             await client._transport._get_json(spec, path=path)
+    finally:
+        await client.aclose()
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_public_transport_rejects_every_private_template_before_dispatch() -> None:
+    from hmt_crypto.exchange.delta.private_routes import PRIVATE_ROUTE_SPECS
+
+    called = False
+
+    def handler(_request: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("transport must not be reached")
+
+    api = public_api()
+    client = new_client(handler)
+    public_spec = api.routes.resolve_public_request("GET", "/v2/products")
+    try:
+        for private_spec in PRIVATE_ROUTE_SPECS:
+            with pytest.raises(ConfigurationError):
+                await client._transport._get_json(
+                    public_spec,
+                    path=private_spec.path_template,
+                )
     finally:
         await client.aclose()
     assert called is False

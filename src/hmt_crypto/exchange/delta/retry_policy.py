@@ -22,8 +22,12 @@ class OperationClass(StrEnum):
     CREATE_ORDER = "create_order"
     MODIFY_ORDER = "modify_order"
     CANCEL_ORDER = "cancel_order"
+    CANCEL_ALL = "cancel_all"
     SET_LEVERAGE = "set_leverage"
+    SET_MARGIN_MODE = "set_margin_mode"
     ADD_MARGIN = "add_margin"
+    CREATE_BRACKET = "create_bracket"
+    EDIT_BRACKET = "edit_bracket"
     BATCH_WRITE = "batch_write"
 
 

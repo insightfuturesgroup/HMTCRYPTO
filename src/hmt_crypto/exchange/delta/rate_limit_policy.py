@@ -11,7 +11,7 @@ from typing import Final
 
 from hmt_crypto.errors import ConfigurationError
 
-POLICY_VERSION: Final = "delta-docs-2026-11-03"
+POLICY_VERSION: Final = "delta-docs-2026-11-04-private-v1"
 MAX_RATE_LIMIT_RESET_MS: Final = 300_000
 _REGIONS: Final = frozenset({"india", "global"})
 _ENVIRONMENTS: Final = frozenset({"testnet", "prod"})
@@ -36,6 +36,28 @@ class RateLimitRoute(StrEnum):
     TRANSACTIONS = "transactions"
     BATCH_ORDERS = "batch_orders"
     RATE_LIMIT_QUOTA = "rate_limit_quota"
+    MARGINED_POSITIONS = "margined_positions"
+    LATEST_POSITION = "latest_position"
+    ORDER_BY_ID = "order_by_id"
+    ORDER_BY_CLIENT_ID = "order_by_client_id"
+    GET_LEVERAGE = "get_leverage"
+    CANCEL_ALL = "cancel_all"
+    SET_LEVERAGE = "set_leverage"
+    SET_MARGIN_MODE = "set_margin_mode"
+    CHANGE_POSITION_MARGIN = "change_position_margin"
+    CREATE_BRACKET = "create_bracket"
+    EDIT_BRACKET = "edit_bracket"
+
+
+_RATE_LIMIT_ROUTES: Final = tuple(RateLimitRoute)
+
+
+def _canonical_rate_route(value: object) -> RateLimitRoute | None:
+    if type(value) is RateLimitRoute:
+        for member in _RATE_LIMIT_ROUTES:
+            if value is member:
+                return member
+    return None
 
 
 _PRODUCT_OPERATION_ROUTES: Final = frozenset(
@@ -45,6 +67,7 @@ _PRODUCT_OPERATION_ROUTES: Final = frozenset(
         RateLimitRoute.BATCH_ORDERS,
     }
 )
+_CANCELLATION_ROUTES: Final = frozenset({RateLimitRoute.CANCEL_ORDER, RateLimitRoute.CANCEL_ALL})
 
 ROUTE_WEIGHTS: Mapping[RateLimitRoute, int] = MappingProxyType(
     {
@@ -64,6 +87,17 @@ ROUTE_WEIGHTS: Mapping[RateLimitRoute, int] = MappingProxyType(
         RateLimitRoute.TRANSACTIONS: 10,
         RateLimitRoute.BATCH_ORDERS: 25,
         RateLimitRoute.RATE_LIMIT_QUOTA: 1,
+        RateLimitRoute.MARGINED_POSITIONS: 3,
+        RateLimitRoute.LATEST_POSITION: 3,
+        RateLimitRoute.ORDER_BY_ID: 1,
+        RateLimitRoute.ORDER_BY_CLIENT_ID: 1,
+        RateLimitRoute.GET_LEVERAGE: 1,
+        RateLimitRoute.CANCEL_ALL: 1,
+        RateLimitRoute.SET_LEVERAGE: 1,
+        RateLimitRoute.SET_MARGIN_MODE: 1,
+        RateLimitRoute.CHANGE_POSITION_MARGIN: 5,
+        RateLimitRoute.CREATE_BRACKET: 1,
+        RateLimitRoute.EDIT_BRACKET: 1,
     }
 )
 
@@ -159,10 +193,17 @@ class RateLimitPolicy:
             raise ValueError("route_weights must be a mapping")
         copied: dict[RateLimitRoute, int] = {}
         for route, weight in self.route_weights.items():
-            if not isinstance(route, RateLimitRoute):
+            canonical_route = _canonical_rate_route(route)
+            if canonical_route is None:
                 raise ValueError("route_weights keys must be RateLimitRoute values")
-            copied[route] = strict_positive_int(weight, name="route weight")
-        if set(copied) != set(RateLimitRoute):
+            if type(weight) is not int or weight <= 0:
+                raise ValueError("route_weights values must be exact positive integers")
+            if canonical_route in copied:
+                raise ValueError("route_weights keys must be unique canonical routes")
+            copied[canonical_route] = weight
+        if len(copied) != len(_RATE_LIMIT_ROUTES) or any(
+            route not in copied for route in _RATE_LIMIT_ROUTES
+        ):
             raise ValueError("route_weights must cover the complete allowlisted route registry")
         object.__setattr__(self, "route_weights", MappingProxyType(copied))
 
@@ -174,9 +215,10 @@ class RateLimitPolicy:
 
     def weight_for(self, route: RateLimitRoute) -> int:
         """Return a route weight; arbitrary paths and strings fail closed."""
-        if not isinstance(route, RateLimitRoute):
+        canonical_route = _canonical_rate_route(route)
+        if canonical_route is None:
             raise ConfigurationError(context={"operation": "rate_limit_weight"})
-        return self.route_weights[route]
+        return self.route_weights[canonical_route]
 
 
 DELTA_RATE_LIMIT_POLICY = RateLimitPolicy(
@@ -197,7 +239,8 @@ class RateRequest:
     product_operations: Mapping[int, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.route, RateLimitRoute):
+        route = _canonical_rate_route(self.route)
+        if route is None:
             raise ValueError("route must be a RateLimitRoute")
         if not isinstance(self.product_operations, Mapping):
             raise ValueError("product_operations must be a mapping")
@@ -206,10 +249,11 @@ class RateRequest:
             copied[strict_positive_int(product_id, name="product_id")] = strict_positive_int(
                 count, name="product operation count"
             )
-        if self.route in _PRODUCT_OPERATION_ROUTES and not copied:
+        if route in _PRODUCT_OPERATION_ROUTES and not copied:
             raise ValueError("matching-engine write routes require product operations")
-        if self.route is RateLimitRoute.CANCEL_ORDER and copied:
+        if route in _CANCELLATION_ROUTES and copied:
             raise ValueError("cancel routes are exempt from product operations")
+        object.__setattr__(self, "route", route)
         object.__setattr__(self, "product_operations", MappingProxyType(copied))
 
 
