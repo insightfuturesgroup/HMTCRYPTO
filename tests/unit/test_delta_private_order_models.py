@@ -550,7 +550,25 @@ def test_a2_3_ast_has_no_serializer_export_registrar_or_unguarded_subscription()
                     )
                     type_only = path.name == "private_orders.py" and node.lineno <= 152
                     assert allowed_definition or type_only
-    for relative in ("src/hmt_crypto/__init__.py", "src/hmt_crypto/domain/__init__.py"):
-        source = (root / relative).read_text()
-        assert not any(token in source for token in forbidden_exports)
-        assert "private_orders" not in source
+    package_source = (root / "src/hmt_crypto/__init__.py").read_text()
+    assert not any(token in package_source for token in forbidden_exports)
+    assert "private_orders" not in package_source
+
+    domain_source = (root / "src/hmt_crypto/domain/__init__.py").read_text()
+    assert not any(token in domain_source for token in forbidden_exports)
+    domain_tree = ast.parse(domain_source)
+    assert not any(
+        isinstance(node, ast.ImportFrom) and node.module == "hmt_crypto.domain.private_orders"
+        for node in domain_tree.body
+    )
+    type_checking = next(
+        node
+        for node in domain_tree.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name)
+        and node.test.id == "TYPE_CHECKING"
+    )
+    assert any(
+        isinstance(node, ast.ImportFrom) and node.module == "hmt_crypto.domain.private_orders"
+        for node in type_checking.body
+    )

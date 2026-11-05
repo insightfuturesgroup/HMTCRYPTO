@@ -307,6 +307,7 @@ _PUBLIC_NAMES = (
 )
 
 
+# fmt: off
 def _fill_contract_snapshot(_source: object = None) -> tuple[object, ...] | None:
     """Return one callback-free construction snapshot or fail closed."""
     try:
@@ -445,6 +446,7 @@ def _fill_contract_snapshot(_source: object = None) -> tuple[object, ...] | None
         for name in (*_PRIMITIVE_NAMES, *_ACCOUNT_NAMES, *_PUBLIC_NAMES, "FillOrderRef")
     }
     return (*values, alias, narrow)
+# fmt: on
 
 
 def _owned_namespace(namespace: object, snapshot: object) -> dict[str, object]:

@@ -26,6 +26,7 @@ pytestmark = pytest.mark.unit
 
 _POSITIONS = "hmt_crypto.domain.private_positions"
 _POSITIONS_LEAF = "hmt_crypto.domain._private_positions_contracts"
+_ORDERS = "hmt_crypto.domain.private_orders"
 
 
 @contextmanager
@@ -36,7 +37,7 @@ def _future_positions_world() -> Iterator[SimpleNamespace]:
     api = account_api()
     saved = {
         name: (dict.__contains__(sys.modules, name), dict.get(sys.modules, name))
-        for name in (_POSITIONS_LEAF, _POSITIONS)
+        for name in (_POSITIONS_LEAF, _POSITIONS, _ORDERS)
     }
     leaf = ModuleType(_POSITIONS_LEAF)
     positions = ModuleType(_POSITIONS)
@@ -62,6 +63,7 @@ def _future_positions_world() -> Iterator[SimpleNamespace]:
     positions.Observed = api.Observed
 
     try:
+        sys.modules.pop(_ORDERS, None)
         sys.modules[_POSITIONS_LEAF] = leaf
         sys.modules[_POSITIONS] = positions
         observed_mode = api.module._declare_reviewed_model_candidate(

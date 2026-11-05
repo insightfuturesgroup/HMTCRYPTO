@@ -161,6 +161,7 @@ if not TYPE_CHECKING:
         import hmt_crypto.domain._private_order_contracts as _order_leaf
         import hmt_crypto.domain._private_result_contracts as _result_leaf
 
+        # fmt: off
         _order = _leaf_snapshot(
             _order_leaf, "hmt_crypto.domain._private_order_contracts",
             "_order_contract_snapshot", "_ORDER_SOURCE_CAPTURE", 13,
@@ -172,6 +173,7 @@ if not TYPE_CHECKING:
             _result_leaf, "hmt_crypto.domain._private_result_contracts",
             "_result_contract_snapshot", "_RESULT_SOURCE_CAPTURE", 14,
         )
+        # fmt: on
         if _order is None or _fill is None or _result is None:
             raise RuntimeError("private orders preflight failed")
 

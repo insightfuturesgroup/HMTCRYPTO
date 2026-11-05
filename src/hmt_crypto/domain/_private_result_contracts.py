@@ -22,6 +22,7 @@ from hmt_crypto.domain.private_primitives import (ExactStrEnum, ExternalUserText
 T = TypeVar("T")
 _ORDERS_MODULE = "hmt_crypto.domain.private_orders"
 
+# fmt: off
 
 class LeverageEncoding(ExactStrEnum):
     __module__ = _ORDERS_MODULE
