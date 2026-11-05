@@ -1,0 +1,87 @@
+"""Exact static vocabulary tests for Delta private generic specializations."""
+
+# ruff: noqa: E501 -- the one-row-per-line literal is the reviewed 51-row contract.
+
+from __future__ import annotations
+
+import importlib
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
+def test_reviewed_generic_vocabulary_is_the_exact_51_row_contract() -> None:
+    """Freeze every reviewed owner/family/payload/specialization name in order."""
+    manifest = importlib.import_module("hmt_crypto.domain._private_generic_manifest")
+    owners = manifest._reviewed_vocabulary_for_verification()
+    expected_text = """
+hmt_crypto.domain.account|_ACCOUNT_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ValueField|OpaqueCursor|OpaqueCursorValueField
+hmt_crypto.domain.account|_ACCOUNT_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.account|NullableField|OpaqueCursor|NullableOpaqueCursor
+hmt_crypto.domain.private_wallet|_WALLET_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|WalletTransactionType|ObservedWalletTransactionType
+hmt_crypto.domain.private_wallet|_WALLET_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ValueField|WalletTransactionMetadataValue|WalletTransactionMetadataValueField
+hmt_crypto.domain.private_wallet|_WALLET_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.account|FieldPresence|WalletTransactionMetadataValue|WalletTransactionMetadataPresence
+hmt_crypto.domain.private_wallet|_WALLET_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|Observed|BalanceSnapshot|ObservedBalanceSnapshot
+hmt_crypto.domain.private_positions|_POSITIONS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|MarginMode|ObservedMarginMode
+hmt_crypto.domain.private_positions|_POSITIONS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|Observed|MarginedPositionBatch|ObservedMarginedPositions
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|OrderSide|ObservedOrderSide
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|OrderType|ObservedOrderType
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|StopOrderType|ObservedStopOrderType
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|MmpLevel|ObservedMmpLevel
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|StopTriggerMethod|ObservedStopTriggerMethod
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|TimeInForce|ObservedTimeInForce
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|OrderState|ObservedOrderState
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|FillContractType|ObservedFillContractType
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|FillNotionalType|ObservedFillNotionalType
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|FillType|ObservedFillType
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ObservedEnum|FillRole|ObservedFillRole
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ValueField|ExactBool|ExactBoolValueField
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ValueField|PositivePrivateDecimal|PositivePrivateDecimalValueField
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ValueField|ObservedMmpLevel|ObservedMmpLevelValueField
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ValueField|ObservedStopTriggerMethod|ObservedStopTriggerMethodValueField
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ValueField|ObservedTimeInForce|ObservedTimeInForceValueField
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ValueField|PrivateDecimal|PrivateDecimalValueField
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ValueField|ObservedDeltaClientOrderId|ObservedDeltaClientOrderIdValueField
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|ValueField|FillMetadataValue|FillMetadataValueField
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.account|FieldPresence|ExactBool|ExactBoolPresence
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.account|FieldPresence|PositivePrivateDecimal|PositivePrivateDecimalPresence
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.account|FieldPresence|ObservedMmpLevel|ObservedMmpLevelPresence
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.account|FieldPresence|ObservedStopTriggerMethod|ObservedStopTriggerMethodPresence
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.account|FieldPresence|ObservedTimeInForce|ObservedTimeInForcePresence
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.account|FieldPresence|PrivateDecimal|PrivateDecimalPresence
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.account|FieldPresence|ObservedDeltaClientOrderId|ObservedDeltaClientOrderIdPresence
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.account|FieldPresence|FillMetadataValue|FillMetadataPresence
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|LookupFound|LatestPosition|LatestPositionLookupFound
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|LookupFound|Order|OrderLookupFound
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.private_orders|LookupResult|LatestPosition|LatestPositionLookupResult
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|alias|hmt_crypto.domain.private_orders|LookupResult|Order|OrderLookupResult
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|PrivateCursorPage|WalletTransaction|WalletTransactionCursorPage
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|PrivateCursorPage|Order|OrderCursorPage
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|PrivateCursorPage|Fill|FillCursorPage
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|StrictPrivatePaginationResult|WalletTransaction|StrictWalletTransactionPaginationResult
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|StrictPrivatePaginationResult|Order|StrictOrderPaginationResult
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|StrictPrivatePaginationResult|Fill|StrictFillPaginationResult
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|DiagnosticPrivatePaginationResult|WalletTransaction|DiagnosticWalletTransactionPaginationResult
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|DiagnosticPrivatePaginationResult|Order|DiagnosticOrderPaginationResult
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.private_orders|DiagnosticPrivatePaginationResult|Fill|DiagnosticFillPaginationResult
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|Observed|LatestPositionLookupResult|ObservedLatestPositionLookupResult
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|Observed|OrderLookupResult|ObservedOrderLookupResult
+hmt_crypto.domain.private_orders|_ORDERS_REVIEWED_GENERIC_SPECIALIZATIONS|model|hmt_crypto.domain.account|Observed|Leverage|ObservedLeverage
+"""
+    expected = tuple(tuple(line.split("|")) for line in expected_text.strip().splitlines())
+    actual = tuple(
+        (
+            owner.module_name,
+            owner.table_name,
+            row.candidate_kind,
+            row.family_module,
+            row.family_name,
+            row.payload_name,
+            row.specialization_name,
+        )
+        for owner in owners
+        for row in owner.rows
+    )
+    assert actual == expected
+    assert tuple(len(owner.rows) for owner in owners) == (2, 4, 2, 43)
+    assert sum(len(owner.rows) for owner in owners) == 51
