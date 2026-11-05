@@ -97,6 +97,7 @@ def test_exact_two_added_tables_exports_and_acyclic_stable_scoped_keys():
         "risk_reservations",
         "risk_rate_consumptions",
         "api_audit_events",
+        "api_audit_payloads",
     }
     expected = {
         "WorkerHeartbeat": {

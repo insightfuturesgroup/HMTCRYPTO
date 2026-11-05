@@ -1062,4 +1062,4 @@ async def test_populated_schema_can_drop_and_recreate_the_single_reservation_tab
             ).all()
         }
     assert "risk_reservations" in names
-    assert len(api.metadata.tables) == 36
+    assert len(api.metadata.tables) == 37
