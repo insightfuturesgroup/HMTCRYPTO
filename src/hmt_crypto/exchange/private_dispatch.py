@@ -64,6 +64,7 @@ _EXPIRY_SOURCES = (
     "TESTNET_ADMISSION",
 )
 _POLICY_VERSION = "delta-docs-2026-11-04-private-v1"
+_PRIVATE_DISPATCH_FIXTURE_MARKER = object()
 
 
 def _is_exact_text(value: object, expected: tuple[str, ...]) -> bool:
@@ -199,7 +200,7 @@ _DECLARATIONS_CLOSED = False
 class _OpaqueDispatchDeclaration:
     __slots__ = ()
 
-    def __new__(cls, *_args: object, **_kwargs: object) -> NoReturn:
+    def __new__(cls, *_args: object, **_kwargs: object) -> Self:
         raise TypeError("private dispatch declaration unavailable")
 
     def __init_subclass__(cls, **kwargs: object) -> None:
@@ -241,39 +242,124 @@ class _OpaqueDispatchDeclaration:
 
 
 class _VenueDispatchOutcomeSlot(_OpaqueDispatchDeclaration):
-    __slots__ = ()
+    __slots__ = ("_audit_identity", "_entry_latch")
 
 
 class _VenueDispatchEntryLatch(_OpaqueDispatchDeclaration):
-    __slots__ = ()
+    __slots__ = ("_owner",)
 
 
 class _EnteredVenueDispatch(_OpaqueDispatchDeclaration):
     __slots__ = ()
 
 
+def _disposition_value(owner: object, slot: str) -> object:
+    try:
+        return object.__getattribute__(owner, slot)
+    except AttributeError:
+        raise TypeError("private dispatch declaration unavailable") from None
+
+
 class _VenueNoEntryDisposition(_OpaqueDispatchDeclaration):
-    __slots__ = ()
+    __slots__ = (
+        "_audit_identity",
+        "_last_phase",
+        "_pre_dispatch_audit_receipt_id",
+        "_reason",
+        "_wire_request_evidence_sha256",
+    )
 
     @property
     def audit_identity(self) -> VenueDispatchAuditIdentity:
-        raise TypeError("private dispatch declaration unavailable")
+        return cast(VenueDispatchAuditIdentity, _disposition_value(self, "_audit_identity"))
 
     @property
     def last_phase(self) -> VenueDispatchPreEntryPhase:
-        raise TypeError("private dispatch declaration unavailable")
+        return cast(VenueDispatchPreEntryPhase, _disposition_value(self, "_last_phase"))
 
     @property
     def reason(self) -> VenueNoEntryReason:
-        raise TypeError("private dispatch declaration unavailable")
+        return cast(VenueNoEntryReason, _disposition_value(self, "_reason"))
 
     @property
     def wire_request_evidence_sha256(self) -> Sha256Hex | None:
-        raise TypeError("private dispatch declaration unavailable")
+        return cast(
+            Sha256Hex | None,
+            _disposition_value(self, "_wire_request_evidence_sha256"),
+        )
 
     @property
     def pre_dispatch_audit_receipt_id(self) -> UUID | None:
-        raise TypeError("private dispatch declaration unavailable")
+        return cast(UUID | None, _disposition_value(self, "_pre_dispatch_audit_receipt_id"))
 
 
 _DECLARATIONS_CLOSED = True
+
+
+def _private_dispatch_fixture_marker_for_tests() -> object:
+    return _PRIVATE_DISPATCH_FIXTURE_MARKER
+
+
+def _issue_venue_dispatch_outcome_slot_for_tests(
+    marker: object,
+    **audit_values: object,
+) -> _VenueDispatchOutcomeSlot:
+    if marker is not _PRIVATE_DISPATCH_FIXTURE_MARKER:
+        raise TypeError("private dispatch fixture authority unavailable")
+    audit = VenueDispatchAuditIdentity.model_validate(audit_values, strict=True)
+    slot = object.__new__(_VenueDispatchOutcomeSlot)
+    latch = object.__new__(_VenueDispatchEntryLatch)
+    object.__setattr__(slot, "_audit_identity", audit)
+    object.__setattr__(slot, "_entry_latch", latch)
+    object.__setattr__(latch, "_owner", slot)
+    return slot
+
+
+def _venue_dispatch_outcome_audit_identity(
+    slot: _VenueDispatchOutcomeSlot,
+) -> VenueDispatchAuditIdentity:
+    if type(slot) is not _VenueDispatchOutcomeSlot:
+        raise TypeError("private dispatch outcome slot unavailable")
+    try:
+        audit = object.__getattribute__(slot, "_audit_identity")
+    except AttributeError:
+        raise TypeError("private dispatch outcome slot unavailable") from None
+    if type(audit) is not VenueDispatchAuditIdentity:
+        raise TypeError("private dispatch outcome slot unavailable")
+    return audit
+
+
+def _venue_dispatch_outcome_entry_latch(
+    slot: _VenueDispatchOutcomeSlot,
+) -> _VenueDispatchEntryLatch:
+    if type(slot) is not _VenueDispatchOutcomeSlot:
+        raise TypeError("private dispatch outcome slot unavailable")
+    try:
+        latch = object.__getattribute__(slot, "_entry_latch")
+    except AttributeError:
+        raise TypeError("private dispatch outcome slot unavailable") from None
+    if type(latch) is not _VenueDispatchEntryLatch:
+        raise TypeError("private dispatch outcome slot unavailable")
+    if _venue_dispatch_entry_latch_owner(latch) is not slot:
+        raise TypeError("private dispatch outcome slot unavailable")
+    return latch
+
+
+def _venue_dispatch_entry_latch_owner(
+    latch: _VenueDispatchEntryLatch,
+) -> _VenueDispatchOutcomeSlot:
+    if type(latch) is not _VenueDispatchEntryLatch:
+        raise TypeError("private dispatch entry latch unavailable")
+    try:
+        owner = object.__getattribute__(latch, "_owner")
+    except AttributeError:
+        raise TypeError("private dispatch entry latch unavailable") from None
+    if type(owner) is not _VenueDispatchOutcomeSlot:
+        raise TypeError("private dispatch entry latch unavailable")
+    try:
+        linked = object.__getattribute__(owner, "_entry_latch")
+    except AttributeError:
+        raise TypeError("private dispatch entry latch unavailable") from None
+    if linked is not latch:
+        raise TypeError("private dispatch entry latch unavailable")
+    return owner

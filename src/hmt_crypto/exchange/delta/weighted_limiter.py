@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from hmt_crypto.errors import ConfigurationError, RateLimitError
+from hmt_crypto.exchange.delta import private_limiter_completion as _completion
 from hmt_crypto.exchange.delta.limiter_accounting import (
     _accounting_delay_seconds,
     _assert_event_index_integrity,
@@ -39,8 +40,20 @@ from hmt_crypto.exchange.delta.rate_limit_policy import (
     parse_rate_limit_reset_ms,
     strict_nonnegative_int,
 )
+from hmt_crypto.exchange.delta.registered_limiter_grant import (
+    _invalidate_all_registered_grants_locked,
+    _invalidate_expiring_registered_grants_locked,
+    _invalidate_registered_grant_locked,
+    _publish_registered_grant_locked,
+    _registered_event_ids,
+    _validate_charge_locked,
+    _validate_registered_grant_before_scheduler,
+)
 
 _NS_PER_SECOND = 1_000_000_000
+_Reason = _completion.LimiterReservationInvalidationReason
+_Registration = _completion._PrivateMutationGrantRegistration
+_RegisteredAcquisition = _completion._RegisteredPrivateMutationAcquisition
 
 
 @dataclass(slots=True, eq=False)
@@ -48,6 +61,7 @@ class _Waiter:
     plan: _LimiterChargePlan
     event_ids: _PreallocatedQuotaEventIds
     event: asyncio.Event
+    registration: _Registration | None = None
 
 
 class WeightedRateLimiter:
@@ -81,7 +95,6 @@ class WeightedRateLimiter:
         self._sleeper = sleeper or asyncio.sleep
         self._event_id_factory = event_id_factory or uuid4
         self._limiter_instance_id = self._new_event_id()
-
         self._lock = asyncio.Lock()
         self._rest_events: deque[_QuotaAccountingEvent] = deque()
         self._product_events: dict[int, deque[_QuotaAccountingEvent]] = {}
@@ -95,6 +108,8 @@ class WeightedRateLimiter:
         self._clock_poisoned = False
         self._accounting_poisoned = False
         self._closed = False
+        self._private_lifecycle_capability: object | None = None
+        self._private_lifecycle_store: object | None = None
 
     @property
     def scope(self) -> RateLimitScope:
@@ -236,6 +251,7 @@ class WeightedRateLimiter:
         if type(self._clock_poisoned) is not bool or self._clock_poisoned is False:
             next_epoch = epoch + 1 if type(epoch) is int and epoch > 0 else 2
             self._clock_poisoned, self._limiter_clock_epoch = True, next_epoch
+            _invalidate_all_registered_grants_locked(self, _Reason.LIMITER_CLOCK_INVALIDATED)
 
     def _poison_accounting_locked(self) -> None:
         self._accounting_gate.assert_held()
@@ -243,6 +259,7 @@ class WeightedRateLimiter:
         if type(self._accounting_poisoned) is not bool or self._accounting_poisoned is False:
             next_generation = generation + 1 if type(generation) is int and generation > 0 else 2
             self._accounting_poisoned, self._limiter_accounting_generation = True, next_generation
+            _invalidate_all_registered_grants_locked(self, _Reason.ACCOUNTING_EVENT_REPLACED)
 
     def _assert_accounting_integrity_locked(self) -> None:
         self._accounting_gate.assert_held()
@@ -281,6 +298,7 @@ class WeightedRateLimiter:
     def _prune_locked(self, now_ns: int) -> None:
         self._accounting_gate.assert_held()
         self._assert_accounting_integrity_locked()
+        _invalidate_expiring_registered_grants_locked(self, now_ns)
         _prune_accounting_events(
             rest_events=self._rest_events,
             product_events=self._product_events,
@@ -369,12 +387,39 @@ class WeightedRateLimiter:
 
     async def acquire(self, request: RateRequest) -> RatePermit:
         """Acquire route and product quota atomically in strict FIFO order."""
+        result = await self._acquire_owned(request, registration=None)
+        if type(result) is not RatePermit:
+            raise ConfigurationError(context={"operation": "rate_limit_accounting"})
+        return result
+
+    async def _acquire_registered_mutation(
+        self,
+        request: RateRequest,
+        *,
+        registration: _Registration,
+    ) -> _RegisteredAcquisition:
+        _validate_registered_grant_before_scheduler(self, registration)
+        result = await self._acquire_owned(request, registration=registration)
+        if type(result) is not _RegisteredAcquisition:
+            raise ConfigurationError(context={"operation": "registered_limiter_grant"})
+        return result
+
+    async def _acquire_owned(
+        self,
+        request: RateRequest,
+        *,
+        registration: _Registration | None,
+    ) -> RatePermit | _RegisteredAcquisition:
         self._bind_async_entry()
         self._preflight_integrity(allow_closed=False)
         plan = self._build_owned_charge_plan(request)
-        event_ids = self._preallocate_event_ids(plan)
+        event_ids = (
+            self._preallocate_event_ids(plan)
+            if registration is None
+            else _registered_event_ids(self, registration, plan)
+        )
         initial_sample = self._sample_monotonic()
-        waiter = _Waiter(plan=plan, event_ids=event_ids, event=asyncio.Event())
+        waiter = _Waiter(plan, event_ids, asyncio.Event(), registration)
         async with self._lock:
             with self._accounting_gate.hold():
                 self._accept_clock_sample_locked(*initial_sample)
@@ -410,11 +455,10 @@ class WeightedRateLimiter:
                     await self._sleep_or_notification(waiter, delay)
                     waiter.event.set()
                     continue
-
                 self._assert_context()
                 await self._before_grant_entry_barrier()
                 sample = self._sample_monotonic()
-                permit: RatePermit | None = None
+                grant: RatePermit | _RegisteredAcquisition | None = None
                 async with self._lock:
                     with self._accounting_gate.hold():
                         self._accept_clock_sample_locked(*sample)
@@ -427,28 +471,38 @@ class WeightedRateLimiter:
                             self._prune_locked(sample[1])
                             delay = self._delay_for_locked(plan, sample[1])
                             if delay <= 0:
+                                if registration is not None:
+                                    _validate_charge_locked(self, registration, plan, event_ids)
                                 permit = self._consume_locked(
                                     plan,
                                     acquired_at=sample[0],
                                     acquired_monotonic_ns=sample[1],
                                     event_ids=event_ids,
                                 )
+                                grant = (
+                                    permit
+                                    if registration is None
+                                    else _publish_registered_grant_locked(
+                                        self, registration, permit
+                                    )
+                                )
                                 self._waiters.popleft()
-                if permit is not None:
+                if grant is not None:
                     self._notify_head()
-                    self._assert_context()
                     await self._after_grant_release_before_delivery_barrier()
-                    return permit
+                    return grant
                 if delay > 0:
                     await self._sleep_or_notification(waiter, delay)
                     waiter.event.set()
-        except BaseException:
+        except BaseException as error:
             removed_head = False
             async with self._lock:
                 with self._accounting_gate.hold():
                     if waiter in self._waiters:
                         removed_head = self._waiters[0] is waiter
                         self._waiters.remove(waiter)
+                    if registration is not None:
+                        _invalidate_registered_grant_locked(self, registration, error)
             if removed_head:
                 self._notify_head()
             raise
@@ -466,6 +520,7 @@ class WeightedRateLimiter:
                 self._cooldown_epoch += 1
                 deadline = sample[1] + reset_ms * 1_000_000
                 self._blocked_until_monotonic_ns = max(self._blocked_until_monotonic_ns, deadline)
+                _invalidate_all_registered_grants_locked(self, _Reason.COOLDOWN_ADVANCED)
         self._notify_head()
 
     def observe_quota(self, payload: Mapping[str, object]) -> QuotaObservation:
@@ -535,65 +590,10 @@ class WeightedRateLimiter:
         async with self._lock:
             with self._accounting_gate.hold():
                 self._closed = True
+                _invalidate_all_registered_grants_locked(self, _Reason.LIMITER_REPLACED)
                 waiters = tuple(self._waiters)
         for waiter in waiters:
             waiter.event.set()
 
 
-class LimiterRegistry:
-    """In-process owner of exactly one limiter instance per external scope."""
-
-    def __init__(self) -> None:
-        self._limiters: dict[RateLimitScope, WeightedRateLimiter] = {}
-
-    @property
-    def coordination_mode(self) -> CoordinationMode:
-        """Return the registry's deliberately process-local coordination mode."""
-        return CoordinationMode.IN_PROCESS_ONLY
-
-    def get_or_create(
-        self, scope: RateLimitScope, factory: Callable[[], WeightedRateLimiter]
-    ) -> WeightedRateLimiter:
-        """Return the existing limiter for ``scope`` or register a factory result."""
-        if type(scope) is not RateLimitScope or not callable(factory):
-            raise ConfigurationError(context={"operation": "rate_limit_registry"})
-        existing = self._limiters.get(scope)
-        if existing is not None:
-            return existing
-        created = factory()
-        if not isinstance(created, WeightedRateLimiter) or created.scope != scope:
-            raise ConfigurationError(context={"operation": "rate_limit_registry"})
-        self._limiters[scope] = created
-        return created
-
-    def register_existing(
-        self, scope: RateLimitScope, limiter: WeightedRateLimiter
-    ) -> WeightedRateLimiter:
-        """Register one existing limiter while rejecting conflicting ownership."""
-        if type(scope) is not RateLimitScope or not isinstance(limiter, WeightedRateLimiter):
-            raise ConfigurationError(context={"operation": "rate_limit_registry"})
-        if limiter.scope != scope:
-            raise ConfigurationError(context={"operation": "rate_limit_registry"})
-        existing = self._limiters.get(scope)
-        if existing is not None and existing is not limiter:
-            raise ConfigurationError(
-                context={"operation": "rate_limit_registry", "state": "duplicate"}
-            )
-        self._limiters[scope] = limiter
-        return limiter
-
-    def assert_durable_live_coordination(self, scope: RateLimitScope) -> None:
-        """Fail closed because this registry cannot coordinate across processes."""
-        if type(scope) is not RateLimitScope:
-            raise ConfigurationError(context={"operation": "durable_rate_limit_coordination"})
-        raise ConfigurationError(
-            context={
-                "operation": "durable_rate_limit_coordination",
-                "scope": scope.kind.value,
-                "region": scope.region,
-                "environment": scope.environment,
-            }
-        )
-
-
-__all__ = ["LimiterRegistry", "WeightedRateLimiter"]
+__all__ = ["WeightedRateLimiter"]

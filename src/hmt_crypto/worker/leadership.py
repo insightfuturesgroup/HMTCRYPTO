@@ -151,6 +151,9 @@ class _WorkerState:
 
 
 _PROOF_STATES: dict[int, _WorkerState] = {}
+_PROOF_OBJECTS: dict[int, Task210SinglePrivateWorkerProof] = {}
+_PROOF_RECORDS: dict[int, _WorkerRecord] = {}
+_PROOF_PREDECESSORS: dict[int, Task210SinglePrivateWorkerProof | None] = {}
 _CURRENTNESS_STATES: dict[int, _WorkerState] = {}
 _CLASSES_CLOSED = False
 
@@ -198,9 +201,17 @@ def _proof_state(value: object) -> _WorkerState:
     if type(value) is not Task210SinglePrivateWorkerProof:
         _fail()
     state = _PROOF_STATES.get(id(value))
-    if state is None or state.proof is not value:
+    if state is None or _PROOF_OBJECTS.get(id(value)) is not value:
         _fail()
     return state
+
+
+def _proof_record(value: object) -> _WorkerRecord:
+    _proof_state(value)
+    record = _PROOF_RECORDS.get(id(value))
+    if type(record) is not _WorkerRecord:
+        _fail()
+    return record
 
 
 def _currentness_state(value: object) -> _WorkerState:
@@ -232,57 +243,57 @@ class Task210SinglePrivateWorkerProof(_OpaqueWorkerAuthority):
     @property
     def proof_id(self) -> UUID:
         """Return the proof UUID as a defensive copy."""
-        return _exact_uuid(_proof_state(self).record.proof_id)
+        return _exact_uuid(_proof_record(self).proof_id)
 
     @property
     def deployment_revision(self) -> str:
         """Return the bound deployment revision."""
-        return _proof_state(self).record.deployment_revision
+        return _proof_record(self).deployment_revision
 
     @property
     def external_user_id(self) -> str:
         """Return the bound external-user identifier."""
-        return _proof_state(self).record.external_user_id
+        return _proof_record(self).external_user_id
 
     @property
     def worker_incarnation_id(self) -> UUID:
         """Return the worker-incarnation UUID as a defensive copy."""
-        return _exact_uuid(_proof_state(self).record.worker_incarnation_id)
+        return _exact_uuid(_proof_record(self).worker_incarnation_id)
 
     @property
     def process_incarnation_id(self) -> UUID:
         """Return the process-incarnation UUID as a defensive copy."""
-        return _exact_uuid(_proof_state(self).record.process_incarnation_id)
+        return _exact_uuid(_proof_record(self).process_incarnation_id)
 
     @property
     def process_id(self) -> int:
         """Return the bound operating-system process ID."""
-        return _proof_state(self).record.process_id
+        return _proof_record(self).process_id
 
     @property
     def region(self) -> DeltaRegion:
         """Return the exact bound Delta region."""
-        return _proof_state(self).record.region
+        return _proof_record(self).region
 
     @property
     def environment(self) -> DeltaEnvironment:
         """Return the exact bound Delta environment."""
-        return _proof_state(self).record.environment
+        return _proof_record(self).environment
 
     @property
     def ownership_epoch(self) -> int:
         """Return the exact ownership epoch."""
-        return _proof_state(self).record.ownership_epoch
+        return _proof_record(self).ownership_epoch
 
     @property
     def issued_at(self) -> datetime:
         """Return the exact UTC issuance time."""
-        return _proof_state(self).record.issued_at
+        return _proof_record(self).issued_at
 
     @property
     def expires_at(self) -> datetime:
         """Return the exact UTC expiry time."""
-        return _proof_state(self).record.expires_at
+        return _proof_record(self).expires_at
 
     def __repr__(self) -> str:
         return "Task210SinglePrivateWorkerProof(<redacted>)"
@@ -330,6 +341,69 @@ class Task210PrivateWorkerCurrentnessPort(_OpaqueWorkerAuthority):
             _fail()
         _require_context(state)
         return proof
+
+    def revalidate_worker_replacement_pair_nonblocking(
+        self,
+        current: Task210SinglePrivateWorkerProof,
+        replacement: Task210SinglePrivateWorkerProof,
+        *,
+        expected_external_user_id: ExternalUserText,
+        expected_region: DeltaRegion,
+        expected_environment: DeltaEnvironment,
+        expected_process_id: StrictPositivePid,
+        expected_process_incarnation_id: ExactUuid,
+    ) -> tuple[Task210SinglePrivateWorkerProof, Task210SinglePrivateWorkerProof]:
+        """Revalidate one exact immutable predecessor/replacement lineage pair."""
+        state = _currentness_state(self)
+        if (
+            replacement is not state.proof
+            or _proof_state(current) is not state
+            or _proof_state(replacement) is not state
+            or _PROOF_PREDECESSORS.get(id(replacement)) is not current
+        ):
+            _fail()
+        current_record = _proof_record(current)
+        replacement_record = _proof_record(replacement)
+        if type(expected_external_user_id) is not str:
+            _fail()
+        process_id = _exact_int(expected_process_id, minimum=1, maximum=2**31 - 1)
+        incarnation = _exact_uuid(expected_process_incarnation_id)
+        expected_owner = (
+            expected_external_user_id,
+            expected_region,
+            expected_environment,
+            process_id,
+            incarnation,
+        )
+        current_owner = (
+            current_record.external_user_id,
+            current_record.region,
+            current_record.environment,
+            current_record.process_id,
+            current_record.process_incarnation_id,
+        )
+        replacement_owner = (
+            replacement_record.external_user_id,
+            replacement_record.region,
+            replacement_record.environment,
+            replacement_record.process_id,
+            replacement_record.process_incarnation_id,
+        )
+        if (
+            expected_region is not DeltaRegion.INDIA
+            or expected_environment not in (DeltaEnvironment.TESTNET, DeltaEnvironment.PROD)
+            or current_owner != expected_owner
+            or replacement_owner != expected_owner
+            or current_record.deployment_revision != replacement_record.deployment_revision
+            or current_record.worker_incarnation_id != replacement_record.worker_incarnation_id
+            or replacement_record.ownership_epoch <= current_record.ownership_epoch
+            or replacement_record.expires_at <= current_record.expires_at
+            or state.observed_at >= current_record.expires_at
+            or state.observed_at >= replacement_record.expires_at
+        ):
+            _fail()
+        _require_context(state)
+        return current, replacement
 
     def __repr__(self) -> str:
         return "Task210PrivateWorkerCurrentnessPort(<redacted>)"
@@ -420,6 +494,9 @@ def _issue_single_private_worker_for_tests(
         process_started_monotonic_ns=started,
     )
     _PROOF_STATES[id(proof)] = state
+    _PROOF_OBJECTS[id(proof)] = proof
+    _PROOF_RECORDS[id(proof)] = record
+    _PROOF_PREDECESSORS[id(proof)] = None
     _CURRENTNESS_STATES[id(currentness)] = state
     return proof, currentness
 
@@ -498,6 +575,9 @@ def _replace_single_private_worker_for_tests(
     state.record = record
     state.observed_at = observed
     _PROOF_STATES[id(replacement)] = state
+    _PROOF_OBJECTS[id(replacement)] = replacement
+    _PROOF_RECORDS[id(replacement)] = record
+    _PROOF_PREDECESSORS[id(replacement)] = current
     return replacement
 
 

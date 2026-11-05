@@ -1,8 +1,10 @@
-"""Inert B2 private limiter-completion declarations; no lifecycle yet."""
+"""Sealed private limiter-completion records and registry-owned lifecycle."""
 
 from __future__ import annotations
 
-from typing import Literal, NoReturn, Protocol, Self, SupportsIndex, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, NoReturn, Protocol, Self, SupportsIndex, cast
+from uuid import UUID
 
 from pydantic import field_validator, model_validator
 
@@ -20,14 +22,28 @@ from hmt_crypto.domain.private_primitives import (
 )
 from hmt_crypto.exchange.delta.private_routes import PrivateRouteId
 from hmt_crypto.exchange.private_dispatch import (
-    TrustedDispatchClock,
     TrustedDispatchDeadline,
     TrustedDispatchInstant,
+    VenueDispatchAuditIdentity,
+    VenueDispatchPreEntryPhase,
     VenueNoEntryReason,
     _EnteredVenueDispatch,
     _VenueDispatchEntryLatch,
+    _VenueDispatchOutcomeSlot,
     _VenueNoEntryDisposition,
 )
+
+if TYPE_CHECKING:
+    from hmt_crypto.exchange.delta.private_limiter_lifecycle_store import (
+        _PrivateLimiterLifecycleStore,
+    )
+    from hmt_crypto.exchange.delta.private_limiter_owner import (
+        _PrivateLimiterOwnerCapability,
+    )
+    from hmt_crypto.worker.clock import (
+        Task210TrustedClockCurrentnessPort,
+        Task210TrustedDispatchClock,
+    )
 
 _POLICY_VERSION = "delta-docs-2026-11-04-private-v1"
 
@@ -115,6 +131,54 @@ class LimiterWaitIntent(PrivateBoundaryModel):
         return self
 
 
+def _audit_matches_intent(audit: object, intent: object) -> bool:
+    if type(audit) is not VenueDispatchAuditIdentity or type(intent) is not LimiterWaitIntent:
+        return False
+    ids = (
+        audit.command_id,
+        audit.order_id,
+        audit.order_attempt_id,
+        audit.root_event_id,
+        audit.logical_call_id,
+        audit.correlation_id,
+        audit.dispatch_event_id,
+        audit.consumption_id,
+    )
+    if (
+        any(type(identity) is not UUID or identity.int == 0 for identity in ids)
+        or type(audit.account) is not AccountRef
+        or type(audit.order_attempt_number) is not int
+        or audit.order_attempt_number <= 0
+        or not _is_exact_text(audit.operation, ("PLACE_ORDER", "MODIFY_ORDER"))
+        or audit.route_id not in (PrivateRouteId.PLACE_ORDER, PrivateRouteId.MODIFY_ORDER)
+        or not _is_exact_text(audit.policy_version, (_POLICY_VERSION,))
+        or type(audit.semantic_request_sha256) is not str
+        or len(audit.semantic_request_sha256) != 64
+        or type(audit.command_evidence_sha256) is not str
+        or len(audit.command_evidence_sha256) != 64
+    ):
+        return False
+    matching = (
+        "account",
+        "command_id",
+        "order_id",
+        "order_attempt_id",
+        "root_event_id",
+        "logical_call_id",
+        "correlation_id",
+        "order_attempt_number",
+        "operation",
+        "route_id",
+        "policy_version",
+        "semantic_request_sha256",
+        "command_evidence_sha256",
+    )
+    return all(
+        object.__getattribute__(audit, name) == object.__getattribute__(intent, name)
+        for name in matching
+    )
+
+
 class LimiterWaitBinding(LimiterWaitIntent):
     """Limiter-owned immutable accounting identities for a completed wait."""
 
@@ -175,7 +239,7 @@ _DECLARATIONS_CLOSED = False
 class _OpaqueCompletionDeclaration:
     __slots__ = ()
 
-    def __new__(cls, *_args: object, **_kwargs: object) -> NoReturn:
+    def __new__(cls, *_args: object, **_kwargs: object) -> Self:
         raise TypeError("private dispatch declaration unavailable")
 
     def __init_subclass__(cls, **kwargs: object) -> None:
@@ -217,13 +281,13 @@ class _OpaqueCompletionDeclaration:
 
 
 class LimiterWaitCompleted(_OpaqueCompletionDeclaration):
-    """Opaque declaration for one future registry-issued wait token."""
+    """Opaque single-use token for one registered limiter wait."""
 
-    __slots__ = ()
+    __slots__ = ("_grant", "_token_id")
 
 
 class _HeldLimiterReservation(_OpaqueCompletionDeclaration):
-    __slots__ = ()
+    __slots__ = ("_grant", "_reservation_id")
 
 
 class _CompletedPrivateMutationAcquisition(_OpaqueCompletionDeclaration):
@@ -234,18 +298,47 @@ class _CompletedPrivateMutationAcquisition(_OpaqueCompletionDeclaration):
 
 
 class _RegisteredPrivateMutationAcquisition(_OpaqueCompletionDeclaration):
-    __slots__ = ()
+    __slots__ = ("_binding", "_token")
 
-    token: LimiterWaitCompleted
-    binding: LimiterWaitBinding
+    @property
+    def token(self) -> LimiterWaitCompleted:
+        return cast(LimiterWaitCompleted, object.__getattribute__(self, "_token"))
+
+    @property
+    def binding(self) -> LimiterWaitBinding:
+        return cast(LimiterWaitBinding, object.__getattribute__(self, "_binding"))
 
 
 class _ConsumedLimiterWaitEvidence(_OpaqueCompletionDeclaration):
-    __slots__ = ()
+    __slots__ = ("_binding", "_grant")
 
 
 class _VenueLimiterReservationHandle(_OpaqueCompletionDeclaration):
-    __slots__ = ()
+    __slots__ = ("_binding", "_grant")
+
+
+@dataclass(frozen=True, slots=True, eq=False, repr=False)
+class _PrivateMutationGrantRegistration(_OpaqueCompletionDeclaration):
+    registration_id: UUID
+    registry_owner_id: UUID
+    registry_open_epoch: int
+    ownership_proof_id: UUID
+    limiter_instance_id: UUID
+    limiter_clock_epoch: int
+    limiter_accounting_generation: int
+    cooldown_epoch: int
+    process_id: int
+    process_incarnation_id: UUID
+    intent: LimiterWaitIntent
+    outcome_slot: _VenueDispatchOutcomeSlot
+    held_reservation_id: UUID
+    token_id: UUID
+    rest_event_id: UUID
+    product_event_id: UUID
+    _limiter: object
+    _gate: object
+    _store: _PrivateLimiterLifecycleStore
+    _owner_capability: _PrivateLimiterOwnerCapability
 
 
 _DECLARATIONS_CLOSED = True
@@ -301,6 +394,16 @@ class _D10VenueHandoffTransferPort(Protocol):
 
 
 class _VenueLimiterEntryPort(Protocol):
+    def advance_pre_entry_once(
+        self,
+        handle: _VenueLimiterReservationHandle,
+        *,
+        entry_latch: _VenueDispatchEntryLatch,
+        phase: VenueDispatchPreEntryPhase,
+        wire_request_evidence_sha256: Sha256Hex | None = None,
+        pre_dispatch_audit_receipt_id: UUID | None = None,
+    ) -> None: ...
+
     def invalidate_before_entry_once(
         self,
         handle: _VenueLimiterReservationHandle,
@@ -315,7 +418,8 @@ class _VenueLimiterEntryPort(Protocol):
         *,
         expected: LimiterWaitBinding,
         entry_latch: _VenueDispatchEntryLatch,
-        clock: TrustedDispatchClock,
+        clock: Task210TrustedDispatchClock,
+        clock_currentness: Task210TrustedClockCurrentnessPort,
         signed_at: TrustedDispatchInstant,
         deadline: TrustedDispatchDeadline,
         signed_timestamp: StrictNonNegativeInt,

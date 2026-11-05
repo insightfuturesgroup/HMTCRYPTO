@@ -22,6 +22,8 @@ _ISSUERS = (
     "tests/integration/support/task210_worker_clock_issuer.py",
     "tests/integration/support/task27_private_credentials_issuer.py",
 )
+_B3_SUPPORT = "tests/unit/delta_private_limiter_test_support.py"
+_PRIVATE_SUPPORT_PATHS = (*_ISSUERS, _B3_SUPPORT)
 
 
 def _contains_path(names: Iterable[str], relative: str) -> bool:
@@ -59,9 +61,9 @@ def test_private_issuers_have_the_exact_cumulative_artifact_boundary(
     wheel_names, sdist_names = _built_artifact_names(tmp_path)
 
     assert not any(name == "tests" or name.startswith("tests/") for name in wheel_names)
-    for issuer in _ISSUERS:
-        assert not _contains_path(wheel_names, issuer)
-        assert not _contains_path(sdist_names, issuer)
+    for support_path in _PRIVATE_SUPPORT_PATHS:
+        assert not _contains_path(wheel_names, support_path)
+        assert not _contains_path(sdist_names, support_path)
     assert _contains_path(sdist_names, "tests/unit/test_package.py")
     assert _contains_path(sdist_names, "tests/unit/test_private_worker_ownership.py")
     assert not any("/.superpowers/" in f"/{name}/" for name in sdist_names)
@@ -73,6 +75,7 @@ def test_sdist_exclusions_name_only_the_current_exact_authority_paths() -> None:
 
     assert exclusions == [
         *(f"/{issuer}" for issuer in _ISSUERS),
+        f"/{_B3_SUPPORT}",
         "/.superpowers",
     ]
 
@@ -128,8 +131,10 @@ def test_source_tree_private_issuer_imports_are_inert() -> None:
         importlib.import_module(
             "tests.integration.support.task27_private_credentials_issuer"
         )
+        importlib.import_module("tests.unit.delta_private_limiter_test_support")
         clock = importlib.import_module("hmt_crypto.worker.clock")
         credentials = importlib.import_module("hmt_crypto.exchange.credentials")
+        dispatch = importlib.import_module("hmt_crypto.exchange.private_dispatch")
         leadership = importlib.import_module("hmt_crypto.worker.leadership")
         assert clock._CLOCK_STATES == {}
         assert clock._CURRENTNESS_STATES == {}
@@ -137,6 +142,7 @@ def test_source_tree_private_issuer_imports_are_inert() -> None:
         assert leadership._CURRENTNESS_STATES == {}
         assert credentials._SIGNER_STATES == {}
         assert credentials._PROOF_STATES == {}
+        assert not hasattr(dispatch, "_OUTCOME_SLOTS")
         print("ok")
         """
     )

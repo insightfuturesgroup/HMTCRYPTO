@@ -511,7 +511,7 @@ def test_opaque_declarations_are_sealed_and_nonconstructible(
     with pytest.raises(TypeError):
         _ = forged == forged
     assert not hasattr(forged, "__dict__")
-    allowed_evidence = {"wire_request_evidence_sha256"}
+    allowed_evidence = {"wire_request_evidence_sha256", "_wire_request_evidence_sha256"}
     assert not any(
         name not in allowed_evidence and fragment in name.casefold()
         for name in dir(forged)
@@ -537,7 +537,12 @@ def test_no_entry_disposition_declares_only_safe_read_only_evidence() -> None:
 
 def test_internal_record_annotations_do_not_create_factories_or_authority() -> None:
     completed = get_type_hints(completion._CompletedPrivateMutationAcquisition)
-    registered = get_type_hints(completion._RegisteredPrivateMutationAcquisition)
+    registered = {
+        name: get_type_hints(
+            inspect.getattr_static(completion._RegisteredPrivateMutationAcquisition, name).fget
+        )["return"]
+        for name in ("token", "binding")
+    }
     assert completed == {
         "binding": completion.LimiterWaitBinding,
         "held_reservation": completion._HeldLimiterReservation,
@@ -555,6 +560,15 @@ def test_internal_record_annotations_do_not_create_factories_or_authority() -> N
 
 
 def test_package_private_protocols_have_exact_synchronous_shapes() -> None:
+    from hmt_crypto.worker.clock import (
+        Task210TrustedClockCurrentnessPort,
+        Task210TrustedDispatchClock,
+    )
+
+    completion_globals = vars(completion) | {
+        "Task210TrustedDispatchClock": Task210TrustedDispatchClock,
+        "Task210TrustedClockCurrentnessPort": Task210TrustedClockCurrentnessPort,
+    }
     protocols = (
         completion._D10LimiterWaitConsumePort,
         completion._D10LimiterReservationDispositionPort,
@@ -574,6 +588,7 @@ def test_package_private_protocols_have_exact_synchronous_shapes() -> None:
         ),
         completion._D10VenueHandoffTransferPort: ("transfer_attached_once",),
         completion._VenueLimiterEntryPort: (
+            "advance_pre_entry_once",
             "invalidate_before_entry_once",
             "finalize_and_enter_once",
         ),
@@ -583,18 +598,24 @@ def test_package_private_protocols_have_exact_synchronous_shapes() -> None:
         for method_name in methods:
             method = getattr(protocol, method_name)
             assert not inspect.iscoroutinefunction(method)
-            hints = get_type_hints(method)
+            hints = get_type_hints(method, globalns=completion_globals)
             assert "return" in hints
             assert all(annotation is not object for annotation in hints.values())
 
-    transfer = get_type_hints(completion._D10VenueHandoffTransferPort.transfer_attached_once)[
-        "return"
-    ]
+    transfer = get_type_hints(
+        completion._D10VenueHandoffTransferPort.transfer_attached_once,
+        globalns=completion_globals,
+    )["return"]
     assert "TRANSFERRED" in str(transfer)
     assert "ALREADY_ENTERED" in str(transfer)
     assert "_VenueNoEntryDisposition" in str(transfer)
-    entry = get_type_hints(completion._VenueLimiterEntryPort.finalize_and_enter_once)
-    assert entry["clock"] is dispatch.TrustedDispatchClock
+    entry = get_type_hints(
+        completion._VenueLimiterEntryPort.finalize_and_enter_once,
+        globalns=completion_globals,
+    )
+
+    assert entry["clock"] is Task210TrustedDispatchClock
+    assert entry["clock_currentness"] is Task210TrustedClockCurrentnessPort
     assert entry["signed_at"] is dispatch.TrustedDispatchInstant
     assert entry["deadline"] is dispatch.TrustedDispatchDeadline
     assert "_EnteredVenueDispatch" in str(entry["return"])
@@ -640,7 +661,10 @@ def test_modules_are_inert_acyclic_and_absent_from_package_roots() -> None:
             for alias in node.names
         ]
         assert forbidden_roots.isdisjoint(name.split(".")[0] for name in imports)
-        assert not any(fragment in name for name in imports for fragment in forbidden_fragments)
+        checked_fragments = (
+            forbidden_fragments if tree is dispatch_tree else forbidden_fragments[1:]
+        )
+        assert not any(fragment in name for name in imports for fragment in checked_fragments)
         assert not any(
             isinstance(node, (ast.AsyncFunctionDef, ast.Await)) for node in ast.walk(tree)
         )

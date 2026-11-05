@@ -311,6 +311,12 @@ def test_worker_proof_replacement_preserves_owner_and_cold_start_epoch(
         observed_monotonic_ns=300_000_009_999,
     )
 
+    original_snapshot = (
+        original.proof_id,
+        original.ownership_epoch,
+        original.issued_at,
+        original.expires_at,
+    )
     replacement = _issuer_support().replace_single_private_worker(
         task210_worker_clock_marker,
         currentness,
@@ -324,6 +330,12 @@ def test_worker_proof_replacement_preserves_owner_and_cold_start_epoch(
 
     assert replacement is not original
     assert replacement.ownership_epoch == 8
+    assert (
+        original.proof_id,
+        original.ownership_epoch,
+        original.issued_at,
+        original.expires_at,
+    ) == original_snapshot
     assert leadership._authenticated_limiter_cold_start_allows_nonblocking(
         currentness,
         observed_monotonic_ns=300_000_010_000,
@@ -341,6 +353,91 @@ def test_worker_proof_replacement_preserves_owner_and_cold_start_epoch(
     assert (
         currentness.revalidate_single_private_worker_nonblocking(replacement, **kwargs)
         is replacement
+    )
+    assert currentness.revalidate_worker_replacement_pair_nonblocking(
+        original,
+        replacement,
+        **kwargs,
+    ) == (original, replacement)
+    _assert_safe_worker_error(
+        lambda: currentness.revalidate_worker_replacement_pair_nonblocking(
+            replacement,
+            original,
+            **kwargs,
+        )
+    )
+    foreign, _foreign_currentness = _issue(task210_worker_clock_marker)
+    _assert_safe_worker_error(
+        lambda: currentness.revalidate_worker_replacement_pair_nonblocking(
+            original,
+            foreign,
+            **kwargs,
+        )
+    )
+    successor = _issuer_support().replace_single_private_worker(
+        task210_worker_clock_marker,
+        currentness,
+        current=replacement,
+        proof_id=UUID(int=202),
+        ownership_epoch=9,
+        issued_at=_ISSUED + timedelta(seconds=4),
+        expires_at=_EXPIRES + timedelta(seconds=20),
+        observed_at=_ISSUED + timedelta(seconds=5),
+    )
+    assert currentness.revalidate_worker_replacement_pair_nonblocking(
+        replacement,
+        successor,
+        **kwargs,
+    ) == (replacement, successor)
+    _assert_safe_worker_error(
+        lambda: currentness.revalidate_worker_replacement_pair_nonblocking(
+            original,
+            successor,
+            **kwargs,
+        )
+    )
+    _issuer_support().advance_worker_observed_at(
+        task210_worker_clock_marker,
+        currentness,
+        replacement.expires_at,
+    )
+    _assert_safe_worker_error(
+        lambda: currentness.revalidate_worker_replacement_pair_nonblocking(
+            replacement,
+            successor,
+            **kwargs,
+        )
+    )
+
+
+def test_worker_replacement_pair_rejects_terminal_owner_loss(
+    task210_worker_clock_marker: object,
+) -> None:
+    original, currentness = _issue(task210_worker_clock_marker)
+    replacement = _issuer_support().replace_single_private_worker(
+        task210_worker_clock_marker,
+        currentness,
+        current=original,
+        proof_id=UUID(int=203),
+        ownership_epoch=8,
+        issued_at=_ISSUED + timedelta(seconds=2),
+        expires_at=_EXPIRES + timedelta(seconds=10),
+        observed_at=_ISSUED + timedelta(seconds=3),
+    )
+    kwargs = {
+        "expected_external_user_id": "12345",
+        "expected_region": DeltaRegion.INDIA,
+        "expected_environment": DeltaEnvironment.TESTNET,
+        "expected_process_id": os.getpid(),
+        "expected_process_incarnation_id": _PROCESS_INCARNATION,
+    }
+    _issuer_support().invalidate_worker_ownership(task210_worker_clock_marker, currentness)
+    _assert_safe_worker_error(
+        lambda: currentness.revalidate_worker_replacement_pair_nonblocking(
+            original,
+            replacement,
+            **kwargs,
+        )
     )
 
 
