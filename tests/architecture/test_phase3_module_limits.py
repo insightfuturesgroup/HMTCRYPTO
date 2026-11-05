@@ -1,4 +1,4 @@
-"""Executable line ceilings and manifest for all current Phase 3 foundation paths."""
+"""Executable line ceilings and manifest for every current Phase 3 path."""
 
 from __future__ import annotations
 
@@ -8,35 +8,87 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION = {
+    "src/hmt_crypto/exchange/base.py",
     "src/hmt_crypto/exchange/delta/endpoints.py",
-    "src/hmt_crypto/exchange/delta/websocket_contracts.py",
     "src/hmt_crypto/exchange/delta/websocket_codec.py",
+    "src/hmt_crypto/exchange/delta/websocket_contracts.py",
+    "src/hmt_crypto/exchange/delta/websocket_public_parser_support.py",
+    "src/hmt_crypto/exchange/delta/websocket_public_parsers.py",
     "src/hmt_crypto/exchange/delta/websocket_subscriptions.py",
     "src/hmt_crypto/exchange/delta/websocket_transport.py",
+    "src/hmt_crypto/market_data/contracts.py",
+    "src/hmt_crypto/market_data/orderbook.py",
+    "src/hmt_crypto/market_data/primitives.py",
+    "src/hmt_crypto/market_data/public_stream.py",
+    "src/hmt_crypto/market_data/public_stream_control.py",
+    "src/hmt_crypto/market_data/public_stream_models.py",
+    "src/hmt_crypto/market_data/public_stream_runner.py",
+    "src/hmt_crypto/market_data/public_stream_support.py",
+    "src/hmt_crypto/market_data/readiness.py",
+    "src/hmt_crypto/market_data/state.py",
+    "src/hmt_crypto/market_data/state_models.py",
 }
 TEST_SUPPORT = {
-    "tests/unit/test_websocket_endpoint_policy.py",
-    "tests/unit/test_websocket_contracts.py",
-    "tests/unit/test_websocket_codec.py",
-    "tests/unit/test_websocket_subscriptions.py",
-    "tests/unit/test_websocket_subscription_registry.py",
-    "tests/unit/test_websocket_transport.py",
-    "tests/integration/support/fake_websocket.py",
-    "tests/architecture/test_phase3_module_limits.py",
     "tests/architecture/test_phase3_artifact_exclusion.py",
+    "tests/architecture/test_phase3_module_limits.py",
+    "tests/contract/test_delta_public_ws_parsers.py",
+    "tests/fixtures/delta/websocket/control/heartbeat.json",
+    "tests/fixtures/delta/websocket/control/pong.json",
+    "tests/fixtures/delta/websocket/control/subscriptions.json",
+    "tests/fixtures/delta/websocket/public/F10_ob_updates_snapshot.json",
+    "tests/fixtures/delta/websocket/public/F12_mark_candle.json",
+    "tests/fixtures/delta/websocket/public/F13_system_status.json",
+    "tests/integration/support/fake_websocket.py",
+    "tests/integration/public_stream_failure_support.py",
+    "tests/integration/test_public_stream_actor.py",
+    "tests/integration/test_public_stream_transport_failures.py",
+    "tests/unit/test_delta_orderbook_engine.py",
+    "tests/unit/test_delta_orderbook_properties.py",
+    "tests/unit/test_market_data_contracts.py",
+    "tests/unit/test_market_readiness.py",
+    "tests/unit/test_market_state.py",
+    "tests/unit/test_websocket_codec.py",
+    "tests/unit/test_websocket_contracts.py",
+    "tests/unit/test_websocket_endpoint_policy.py",
+    "tests/unit/test_websocket_subscription_registry.py",
+    "tests/unit/test_websocket_subscriptions.py",
+    "tests/unit/test_websocket_transport.py",
 }
 
 
-def test_phase3_manifest_covers_every_current_foundation_path() -> None:
+def test_phase3_manifest_covers_every_current_path() -> None:
     discovered = {
         path.relative_to(ROOT).as_posix()
         for base in (ROOT / "src", ROOT / "tests")
         for path in base.rglob("*websocket*.py")
     }
-    discovered.add("src/hmt_crypto/exchange/delta/endpoints.py")
+    discovered.update(
+        {
+            "src/hmt_crypto/exchange/base.py",
+            "src/hmt_crypto/exchange/delta/endpoints.py",
+        }
+    )
+    discovered.update(
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "src/hmt_crypto/market_data").glob("*.py")
+    )
     discovered.update(
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "tests/architecture").glob("test_phase3_*.py")
+    )
+    for pattern in (
+        "contract/*public_ws*.py",
+        "integration/*public_stream*.py",
+        "unit/test_delta_orderbook*.py",
+        "unit/test_market*.py",
+    ):
+        discovered.update(
+            path.relative_to(ROOT).as_posix() for path in (ROOT / "tests").glob(pattern)
+        )
+    discovered.update(
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "tests/fixtures/delta/websocket").rglob("*")
+        if path.is_file()
     )
     assert discovered == PRODUCTION | TEST_SUPPORT
 
@@ -63,10 +115,24 @@ import threading
 
 sys.path.insert(0, "src")
 targets = (
+    "hmt_crypto.exchange.delta.endpoints",
     "hmt_crypto.exchange.delta.websocket_contracts",
     "hmt_crypto.exchange.delta.websocket_subscriptions",
     "hmt_crypto.exchange.delta.websocket_codec",
     "hmt_crypto.exchange.delta.websocket_transport",
+    "hmt_crypto.exchange.delta.websocket_public_parser_support",
+    "hmt_crypto.exchange.delta.websocket_public_parsers",
+    "hmt_crypto.market_data.contracts",
+    "hmt_crypto.market_data.orderbook",
+    "hmt_crypto.market_data.primitives",
+    "hmt_crypto.market_data.public_stream_models",
+    "hmt_crypto.market_data.public_stream_control",
+    "hmt_crypto.market_data.public_stream_support",
+    "hmt_crypto.market_data.public_stream_runner",
+    "hmt_crypto.market_data.readiness",
+    "hmt_crypto.market_data.state_models",
+    "hmt_crypto.market_data.state",
+    "hmt_crypto.market_data.public_stream",
 )
 for target in targets:
     importlib.import_module(target)

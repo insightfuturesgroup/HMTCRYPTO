@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import calendar
 import re
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Protocol, Self
@@ -15,6 +17,7 @@ from hmt_crypto.domain.money import PositiveDecimal, UtcDateTime
 
 if TYPE_CHECKING:
     from hmt_crypto.exchange.delta.paginator import PaginationResult
+    from hmt_crypto.market_data.contracts import MarketObservation
 
 _SYMBOL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}\Z")
 _FILTER_TOKEN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
@@ -33,6 +36,73 @@ class ProductRef(DomainModel):
         if type(value) is not str or _SYMBOL.fullmatch(value) is None:
             raise ValueError("symbol is not a safe exchange identifier")
         return value
+
+
+class MarketComponent(StrEnum):
+    """Exchange-neutral live market-data components."""
+
+    TICKER = "ticker"
+    L1 = "l1"
+    L2 = "l2"
+    FULL_BOOK = "full_book"
+    TRADES = "trades"
+    MARK = "mark"
+    CANDLE = "candle"
+    SPOT = "spot"
+    FUNDING = "funding"
+    PRODUCT_STATUS = "product_status"
+    SYSTEM_STATUS = "system_status"
+
+
+class MarketSubscriptionRequest(DomainModel):
+    """One bounded exchange-neutral live market-data claim."""
+
+    products: tuple[ProductRef, ...]
+    components: tuple[MarketComponent, ...]
+
+    @field_validator("products", mode="before")
+    @classmethod
+    def validate_products(cls, value: object) -> tuple[ProductRef, ...]:
+        if type(value) is not tuple or len(value) > 100:
+            raise ValueError("market subscription products must be a bounded tuple")
+        if any(type(product) is not ProductRef for product in value):
+            raise ValueError("market subscription product is invalid")
+        if len({product.symbol for product in value}) != len(value):
+            raise ValueError("market subscription products must be unique")
+        return value
+
+    @field_validator("components", mode="before")
+    @classmethod
+    def validate_components(cls, value: object) -> tuple[MarketComponent, ...]:
+        if type(value) is not tuple or not value:
+            raise ValueError("market subscription components must be a nonempty tuple")
+        if any(type(component) is not MarketComponent for component in value):
+            raise ValueError("market subscription component is invalid")
+        if len(set(value)) != len(value):
+            raise ValueError("market subscription components must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def validate_product_scope(self) -> Self:
+        symbol_less = {MarketComponent.PRODUCT_STATUS, MarketComponent.SYSTEM_STATUS}
+        if not self.products and any(component not in symbol_less for component in self.components):
+            raise ValueError("product-scoped market data requires products")
+        return self
+
+
+class MarketSubscription(Protocol):
+    """Read-only observation stream returned to one consumer."""
+
+    def __aiter__(self) -> AsyncIterator[MarketObservation]: ...
+
+
+class MarketDataSubscriptionService(Protocol):
+    """Exchange-neutral live market subscription interface."""
+
+    async def subscribe_market_data(
+        self,
+        request: MarketSubscriptionRequest,
+    ) -> AbstractAsyncContextManager[MarketSubscription]: ...
 
 
 class ProductQuery(DomainModel):
@@ -219,7 +289,11 @@ __all__ = [
     "CandleRequest",
     "CandleResolution",
     "CandleResult",
+    "MarketComponent",
     "MarketDataClient",
+    "MarketDataSubscriptionService",
+    "MarketSubscription",
+    "MarketSubscriptionRequest",
     "OrderBookLevel",
     "OrderBookRequest",
     "OrderBookSnapshot",
