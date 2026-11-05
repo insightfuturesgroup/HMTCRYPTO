@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import importlib
 import pickle
-import sys
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-from delta_private_model_test_support import account_api, valid_account
+from delta_private_model_test_support import account_api, isolated_python, valid_account
 from pydantic import TypeAdapter, ValidationError
 
 pytestmark = pytest.mark.unit
@@ -17,14 +15,24 @@ pytestmark = pytest.mark.unit
 
 def test_account_import_is_inert_and_owner_local() -> None:
     """Catch account import opening later owners or runtime exchange authority."""
-    account = importlib.import_module("hmt_crypto.domain.account")
+    result = isolated_python(
+        """
+import importlib
+import sys
 
-    assert "hmt_crypto.domain.private_wallet" not in sys.modules
-    assert "hmt_crypto.domain.private_positions" not in sys.modules
-    assert "hmt_crypto.domain.private_orders" not in sys.modules
-    assert account.ValueField[account.OpaqueCursor] is account.OpaqueCursorValueField
-    assert account.NullableField[account.OpaqueCursor] is account.NullableOpaqueCursor
-    assert len(account._ACCOUNT_REVIEWED_GENERIC_SPECIALIZATIONS) == 2
+account = importlib.import_module("hmt_crypto.domain.account")
+assert "hmt_crypto.domain.private_wallet" not in sys.modules
+assert "hmt_crypto.domain.private_positions" not in sys.modules
+assert "hmt_crypto.domain.private_orders" not in sys.modules
+assert account.ValueField[account.OpaqueCursor] is account.OpaqueCursorValueField
+assert account.NullableField[account.OpaqueCursor] is account.NullableOpaqueCursor
+assert len(account._ACCOUNT_REVIEWED_GENERIC_SPECIALIZATIONS) == 2
+print("ok")
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
 
 
 def test_account_identity_and_observation_context_are_exact_and_time_ordered() -> None:
@@ -264,8 +272,22 @@ def test_account_specializations_have_canonical_identity_and_frozen_policy() -> 
     assert table[1].family is api.NullableField
     assert table[1].payload is api.OpaqueCursor
     assert table[1].specialization is api.NullableOpaqueCursor
-    with pytest.raises(RuntimeError, match="private generic manifest unavailable"):
-        account._reviewed_generic_manifest_for_verification()
+    result = isolated_python(
+        """
+import importlib
+
+account = importlib.import_module("hmt_crypto.domain.account")
+try:
+    account._reviewed_generic_manifest_for_verification()
+except RuntimeError as error:
+    assert str(error) == "private generic manifest unavailable"
+else:
+    raise AssertionError("fresh account import exposed the private generic manifest")
+print("ok")
+"""
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
 
 
 def test_rejected_subscription_does_not_invoke_or_retain_hostile_payload() -> None:
