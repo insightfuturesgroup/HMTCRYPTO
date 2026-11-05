@@ -57,6 +57,7 @@ def test_exact_four_protection_tables_are_present():
         "risk_decisions",
         "risk_reservations",
         "risk_rate_consumptions",
+        "api_audit_events",
     }
     assert {t.name for t in schema_api().metadata.tables.values()} - baseline == NEW_TABLES
 

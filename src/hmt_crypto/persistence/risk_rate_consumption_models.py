@@ -162,6 +162,17 @@ class RiskRateConsumption(ScopedRow, Base):
             "dispatch_event_id",
             name="uq_risk_rate_consumptions_scope_dispatch_event",
         ),
+        UniqueConstraint(
+            "id",
+            *SCOPE,
+            "command_id",
+            "command_operation_kind",
+            "order_id",
+            "order_attempt_id",
+            "attempt_backend",
+            "dispatch_event_id",
+            name="uq_risk_rate_consumptions_api_audit_parent",
+        ),
         _fk(
             "fk_risk_rate_consumptions_reservation",
             RESERVATION_CHILD,

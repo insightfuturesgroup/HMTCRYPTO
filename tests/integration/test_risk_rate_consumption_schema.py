@@ -131,6 +131,16 @@ def test_exact_table_columns_scoped_uniqueness_fks_and_indexes():
         (*SCOPE, "reservation_id"): "uq_risk_rate_consumptions_scope_reservation",
         (*SCOPE, "order_attempt_id"): "uq_risk_rate_consumptions_scope_attempt",
         (*SCOPE, "dispatch_event_id"): "uq_risk_rate_consumptions_scope_dispatch_event",
+        (
+            "id",
+            *SCOPE,
+            "command_id",
+            "command_operation_kind",
+            "order_id",
+            "order_attempt_id",
+            "attempt_backend",
+            "dispatch_event_id",
+        ): "uq_risk_rate_consumptions_api_audit_parent",
     }
     assert {
         constraint.name: tuple(constraint.column_keys)

@@ -5,6 +5,7 @@ to later reviewed migration units. Import this module before inspecting metadata
 """
 
 from hmt_crypto.persistence.accounting_observation_models import FundingSnapshot, WalletTransaction
+from hmt_crypto.persistence.api_audit_models import ApiAuditEvent
 from hmt_crypto.persistence.attempt_models import OrderAttempt
 from hmt_crypto.persistence.catalogue_models import CatalogueProduct, CatalogueSnapshot
 from hmt_crypto.persistence.command_models import CommandOperation
@@ -43,6 +44,7 @@ metadata = Base.metadata
 
 __all__ = [
     "Account",
+    "ApiAuditEvent",
     "CredentialVersion",
     "CatalogueSnapshot",
     "CatalogueProduct",
