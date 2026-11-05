@@ -7,7 +7,6 @@ from typing import Any, Literal, Self, cast
 
 from pydantic import (
     BaseModel,
-    ConfigDict,
     ModelWrapValidatorHandler,
     ValidationError,
     model_validator,
@@ -15,12 +14,10 @@ from pydantic import (
 from pydantic.config import ExtraValues
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
-_INTEGRITY_GUARDED_ATTRIBUTES = (
-    "__copy__",
-    "__deepcopy__",
-    "model_copy",
-    "model_dump",
-    "model_dump_json",
+from hmt_crypto.domain._private_model_policy import (
+    INTEGRITY_GUARDED_ATTRIBUTES,
+    private_model_config,
+    require_private_model_config,
 )
 
 
@@ -29,17 +26,17 @@ class PrivateBoundaryModel(BaseModel):
 
     __module__ = "hmt_crypto.domain.private_primitives"
 
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=True,
-        hide_input_in_errors=True,
-        revalidate_instances="always",
-        strict=True,
-    )
+    model_config = private_model_config()
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        """Lock the effective fail-closed policy after Pydantic builds a subclass."""
+        super().__pydantic_init_subclass__(**kwargs)
+        require_private_model_config(cls, PrivateBoundaryModel)
 
     def __getattribute__(self, name: str) -> Any:
         """Check model state before instance lookup can compare hostile keys."""
-        if type(name) is str and name in _INTEGRITY_GUARDED_ATTRIBUTES:
+        if type(name) is str and name in INTEGRITY_GUARDED_ATTRIBUTES:
             instance_type = type(self)
             require_owned = type.__getattribute__(instance_type, "_require_owned_instance")
             require_owned(self)
@@ -51,6 +48,7 @@ class PrivateBoundaryModel(BaseModel):
         cls, values: Any, handler: ModelWrapValidatorHandler[Self]
     ) -> Self:
         """Remove raw caller or wire values from structured Pydantic errors."""
+        require_private_model_config(cls, PrivateBoundaryModel)
         if type(values) is dict:
             cls._require_exact_string_keys(values)
         elif type(values) is not cls:
@@ -100,6 +98,7 @@ class PrivateBoundaryModel(BaseModel):
         by_name: bool | None = None,
     ) -> Self:
         """Validate with invariant strict, extra-forbid owned controls."""
+        require_private_model_config(cls, PrivateBoundaryModel)
         cls._require_validation_controls(
             strict=strict,
             extra=extra,
@@ -133,6 +132,7 @@ class PrivateBoundaryModel(BaseModel):
         by_name: bool | None = None,
     ) -> Self:
         """Validate exact JSON buffers without retaining malformed raw input."""
+        require_private_model_config(cls, PrivateBoundaryModel)
         cls._require_validation_controls(
             strict=strict,
             extra=extra,
@@ -144,7 +144,7 @@ class PrivateBoundaryModel(BaseModel):
         if type(json_data) not in (str, bytes, bytearray):
             raise cls._safe_root_error() from None
         try:
-            return super().model_validate_json(
+            result = super().model_validate_json(
                 json_data,
                 strict=True,
                 extra="forbid",
@@ -153,7 +153,11 @@ class PrivateBoundaryModel(BaseModel):
                 by_name=None,
             )
         except ValidationError as error:
-            raise cls._without_inputs(error) from None
+            safe_error = cls._without_inputs(error)
+        else:
+            return result
+        del json_data
+        raise safe_error from None
 
     @classmethod
     def model_validate_strings(
@@ -167,6 +171,7 @@ class PrivateBoundaryModel(BaseModel):
         by_name: bool | None = None,
     ) -> Self:
         """Validate only an owned exact string-keyed dictionary."""
+        require_private_model_config(cls, PrivateBoundaryModel)
         cls._require_validation_controls(
             strict=strict,
             extra=extra,
@@ -198,6 +203,7 @@ class PrivateBoundaryModel(BaseModel):
 
     @classmethod
     def _require_owned_instance(cls, value: object) -> None:
+        require_private_model_config(cls, PrivateBoundaryModel)
         if type(value) is not cls:
             raise cls._safe_state_error() from None
         try:

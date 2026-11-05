@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import subprocess
 import sys
 import textwrap
+from importlib.metadata import requires
 from typing import Any
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.version import Version
+from pydantic import BaseModel
 
 pytestmark = pytest.mark.unit
 
@@ -82,6 +87,32 @@ _RUNTIME_LEAF_PREFIXES = (
     "hmt_crypto.exchange.delta.wire_json",
     "hmt_crypto.exchange.delta.wire_schemas",
 )
+
+
+def test_private_boundary_distribution_requires_its_supported_pydantic_api() -> None:
+    """Catch resolver ranges that admit an API the private boundary cannot call."""
+    requirements = [Requirement(raw) for raw in requires("hmt-crypto") or ()]
+    pydantic_requirement = next(
+        requirement for requirement in requirements if requirement.name == "pydantic"
+    )
+    assert Version("2.14.2") in pydantic_requirement.specifier
+    assert Version("2.14.1") not in pydantic_requirement.specifier
+    assert Version("2.15") not in pydantic_requirement.specifier
+
+    required_parameters = {
+        "model_validate": {"extra", "by_alias", "by_name"},
+        "model_validate_json": {"extra", "by_alias", "by_name"},
+        "model_validate_strings": {"extra", "by_alias", "by_name"},
+        "model_dump": {"exclude_computed_fields", "polymorphic_serialization"},
+        "model_dump_json": {
+            "ensure_ascii",
+            "exclude_computed_fields",
+            "polymorphic_serialization",
+        },
+    }
+    for method_name, expected in required_parameters.items():
+        actual = set(inspect.signature(getattr(BaseModel, method_name)).parameters)
+        assert expected <= actual
 
 
 def test_delta_runtime_leaf_blocklist_covers_actual_sibling_modules() -> None:

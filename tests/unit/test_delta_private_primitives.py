@@ -21,7 +21,7 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import TypeAdapter, ValidationError, create_model, field_validator
+from pydantic import ConfigDict, TypeAdapter, ValidationError, create_model, field_validator
 from pydantic_core import PydanticSerializationError
 
 pytestmark = pytest.mark.unit
@@ -917,6 +917,139 @@ def test_private_model_validation_controls_allow_only_explicit_safe_values() -> 
 
 
 @pytest.mark.parametrize(
+    "override",
+    [
+        {"extra": "ignore"},
+        {"extra": "allow"},
+        {"frozen": False},
+        {"hide_input_in_errors": False},
+        {"revalidate_instances": "never"},
+        {"revalidate_instances": "subclass-instances"},
+        {"strict": False},
+        {"validate_default": False},
+    ],
+)
+def test_private_model_subclasses_cannot_weaken_critical_config(
+    override: dict[str, object],
+) -> None:
+    """Catch derived DTOs disabling the strict owned boundary."""
+    api = private_api()
+    with pytest.raises(TypeError, match="^invalid private model configuration$") as captured:
+
+        class FixtureSecretWeakBoundary(api.PrivateBoundaryModel):
+            model_config = ConfigDict(**override)
+
+    assert "FixtureSecretWeakBoundary" not in str(captured.value)
+    assert "fixture-secret" not in str(captured.value)
+
+
+def test_private_model_subclass_config_lock_allows_only_benign_extensions() -> None:
+    """Catch a broad lock that prevents unrelated model presentation settings."""
+    api = private_api()
+
+    class BenignBoundary(api.PrivateBoundaryModel):
+        model_config = ConfigDict(title="benign-boundary")
+
+    assert BenignBoundary.model_config["title"] == "benign-boundary"
+    assert BenignBoundary.model_config["strict"] is True
+
+    with pytest.raises(TypeError, match="^invalid private model configuration$"):
+
+        class HookBypassBoundary(api.PrivateBoundaryModel):
+            @classmethod
+            def __pydantic_init_subclass__(cls, **kwargs: object) -> None:
+                del cls, kwargs
+
+
+def test_private_model_runtime_config_tampering_fails_closed() -> None:
+    """Catch post-definition config changes weakening validation or canonical output."""
+    api = private_api()
+    model = create_model(
+        "PrivateRuntimeConfigTamperProbe",
+        __base__=api.PrivateBoundaryModel,
+        identifier=(api.PrivateId, ...),
+    )
+    value = model(identifier=7)
+    model.model_config["strict"] = False
+
+    calls = (
+        lambda: model.model_validate({"identifier": 8}),
+        lambda: value.model_copy(),
+        lambda: value.model_dump(),
+        lambda: value.model_dump_json(),
+    )
+    for call in calls:
+        with pytest.raises(TypeError, match="^invalid private model configuration$") as captured:
+            call()
+        assert "fixture-secret" not in str(captured.value)
+
+    rebuilt_model = create_model(
+        "PrivateRebuiltConfigTamperProbe",
+        __base__=api.PrivateBoundaryModel,
+        identifier=(api.PrivateId, ...),
+    )
+    corrupted = rebuilt_model(identifier=9)
+    object.__setattr__(corrupted, "identifier", "fixture-secret-rebuilt-instance")
+    rebuilt_model.model_config["revalidate_instances"] = "never"
+    rebuilt_model.model_rebuild(force=True)
+    with pytest.raises(TypeError, match="^invalid private model configuration$") as captured:
+        rebuilt_model.model_validate(corrupted)
+    assert "fixture-secret-rebuilt-instance" not in str(captured.value)
+
+
+def _reachable_exceptions(root: BaseException) -> tuple[BaseException, ...]:
+    pending = [root]
+    seen: set[int] = set()
+    reachable: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        reachable.append(current)
+        for linked in (current.__context__, current.__cause__):
+            if linked is not None:
+                pending.append(linked)
+    return tuple(reachable)
+
+
+def _assert_exception_graph_excludes_canary(error: BaseException, canary: str) -> None:
+    for reachable in _reachable_exceptions(error):
+        rendered = f"{reachable!s} {reachable!r} {reachable.args!r}"
+        if isinstance(reachable, ValidationError):
+            rendered += f" {reachable.errors(include_url=False)!r}"
+        assert canary not in rendered
+
+
+def test_private_model_validates_defaults_under_the_owned_boundary() -> None:
+    """Catch invalid defaults entering DTO state without strict validation."""
+    api = private_api()
+    valid_model = create_model(
+        "PrivateValidDefaultProbe",
+        __base__=api.PrivateBoundaryModel,
+        identifier=(api.PrivateId, 7),
+    )
+    assert valid_model().identifier == 7
+
+    invalid_model = create_model(
+        "PrivateInvalidDefaultProbe",
+        __base__=api.PrivateBoundaryModel,
+        identifier=(api.PrivateId, "fixture-secret-invalid-default"),
+    )
+    with pytest.raises(ValidationError) as captured:
+        invalid_model()
+    assert captured.value.errors(include_url=False) == [
+        {
+            "type": "private_model_value",
+            "loc": (),
+            "msg": "invalid private model value",
+            "input": None,
+        }
+    ]
+    _assert_exception_graph_excludes_canary(captured.value, "fixture-secret-invalid-default")
+
+
+@pytest.mark.parametrize(
     "raw",
     [
         '{"identifier":"fixture-secret-malformed-json',
@@ -935,6 +1068,15 @@ def test_private_model_malformed_json_errors_discard_raw_buffers(raw: object) ->
         model.model_validate_json(raw)
     assert "fixture-secret-malformed-json" not in str(error.value)
     assert all(detail.get("input") is None for detail in error.value.errors())
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None
+    _assert_exception_graph_excludes_canary(error.value, "fixture-secret-malformed-json")
+    traceback = error.value.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_code.co_filename.endswith("/domain/_private_model.py"):
+            assert "fixture-secret-malformed-json" not in repr(frame.f_locals)
+        traceback = traceback.tb_next
 
 
 def test_private_model_copy_rejects_hostile_update_containers_before_callbacks() -> None:
