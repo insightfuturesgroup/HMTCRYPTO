@@ -199,7 +199,9 @@ class ObservedEnum(_ClosedPrivateGenericModel, Generic[E]):
         if (member is None and self.known is not None) or (
             member is not None and self.known is not member
         ):
-            raise ValueError("observed enum token/member mismatch")
+            raise type(self)._safe_error(
+                "private_observed_enum_value", "invalid observed enum"
+            ) from None
         return self
 
 

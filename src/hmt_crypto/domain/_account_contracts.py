@@ -206,7 +206,9 @@ class ObservationContext(PrivateBoundaryModel):
     @model_validator(mode="after")
     def require_ordered_times(self) -> Self:
         if self.received_at < self.requested_at:
-            raise ValueError("observation response precedes request")
+            raise type(self)._safe_error(
+                "private_model_value", "invalid private model value"
+            ) from None
         return self
 
 
@@ -236,9 +238,13 @@ class PrivatePaginationProvenance(PrivateBoundaryModel):
     @model_validator(mode="after")
     def require_consistent_evidence(self) -> Self:
         if self.last_received_at < self.first_requested_at:
-            raise ValueError("pagination response precedes request")
+            raise type(self)._safe_error(
+                "private_model_value", "invalid private model value"
+            ) from None
         if self.credential_version != self.account.credential_version:
-            raise ValueError("pagination credential version mismatch")
+            raise type(self)._safe_error(
+                "private_model_value", "invalid private model value"
+            ) from None
         return self
 
 

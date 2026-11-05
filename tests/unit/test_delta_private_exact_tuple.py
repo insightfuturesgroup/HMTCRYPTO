@@ -17,6 +17,7 @@ from uuid import UUID
 import pytest
 from delta_private_model_test_support import (
     account_api,
+    reachable_exceptions,
     valid_account,
 )
 from pydantic import ValidationError
@@ -88,7 +89,9 @@ def _future_positions_world() -> Iterator[SimpleNamespace]:
             api=api,
             positions=positions,
             batch=batch,
+            MarginMode=MarginMode,
             MarginedPosition=MarginedPosition,
+            ObservedMarginMode=observed_mode,
             ObservedMarginedPositions=observed_batch,
         )
     finally:
@@ -174,6 +177,39 @@ def test_reviewed_tuple_payload_accepts_an_exact_tuple() -> None:
         observed = _valid_observation(world)
         assert type(observed.value) is tuple
         assert observed.value[0].product_id == 7
+
+
+@pytest.mark.parametrize("entrypoint", ["constructor", "model_validate"])
+def test_future_observed_enum_mismatch_is_input_free(entrypoint: str) -> None:
+    """The A2.1 future seam sanitizes a known/unknown enum mismatch itself."""
+    raw = "future_margin_canary"
+    with _future_positions_world() as world:
+        payload = {"raw": raw, "known": world.MarginMode.CROSS}
+        with pytest.raises(ValidationError) as captured:
+            if entrypoint == "constructor":
+                world.ObservedMarginMode(**payload)
+            else:
+                world.ObservedMarginMode.model_validate(payload)
+        expected = (
+            ("private_observed_enum_value", "invalid observed enum")
+            if entrypoint == "constructor"
+            else ("private_model_value", "invalid private model value")
+        )
+        assert captured.value.errors(include_url=False) == [
+            {
+                "type": expected[0],
+                "loc": (),
+                "msg": expected[1],
+                "input": None,
+            }
+        ]
+        for reachable in reachable_exceptions(captured.value):
+            rendered = f"{reachable!s} {reachable!r} {reachable.args!r}"
+            if isinstance(reachable, ValidationError):
+                details = reachable.errors(include_url=False)
+                rendered += repr(details)
+                assert all(detail.get("input") is None for detail in details)
+            assert raw not in rendered
 
 
 def test_hostile_tuple_subclass_rejects_before_every_callback() -> None:
