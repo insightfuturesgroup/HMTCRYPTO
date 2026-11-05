@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
+import hmac
 import io
 import json
 import pickle
@@ -104,6 +106,63 @@ def test_query_order_and_percent_encoding_are_not_normalized() -> None:
 
     signatures = {item.as_headers()["signature"] for item in (first, second, third)}
     assert len(signatures) == 3
+
+
+def test_canonical_private_read_bytes_have_one_literal_signature_vector() -> None:
+    """Catch signer normalization of A5's exact path/query/body boundary."""
+    from hmt_crypto.config import DeltaEnvironment, DeltaRegion
+    from hmt_crypto.exchange.delta.private_read_wire import (
+        _attest_frozen_private_read,
+        _freeze_private_read,
+    )
+    from hmt_crypto.exchange.private_requests import OpenOrderQuery, OpenOrderStateFilter
+
+    request = _attest_frozen_private_read(
+        _freeze_private_read(
+            OpenOrderQuery(
+                product_ids=(27, 99),
+                states=(OpenOrderStateFilter.OPEN, OpenOrderStateFilter.PENDING),
+                after="A&B=C",
+            ),
+            region=DeltaRegion.INDIA,
+            environment=DeltaEnvironment.PROD,
+        )
+    )
+    result = _signer().sign_at(
+        request.method,
+        1_700_000_001,
+        request.path,
+        query_string=request.query_string,
+        payload=request.payload,
+    )
+    prehash = (
+        request.method.encode("ascii")
+        + b"1700000001"
+        + request.path.encode("ascii")
+        + request.query_string
+        + request.payload
+    )
+    independently_computed = hmac.new(
+        AUTH_SECRET.encode("ascii"), prehash, hashlib.sha256
+    ).hexdigest()
+    later_timestamp = _signer().sign_at(
+        request.method,
+        1_700_000_002,
+        request.path,
+        query_string=request.query_string,
+        payload=request.payload,
+    )
+
+    assert request.request_evidence_sha256 == (
+        "03e53a40b07c1f1ab9e115c7ab7caab05e0603326c43f379052bbef8d5911ac7"
+    )
+    expected_signature = "e66597bc9d4c19495ca04d4790388d7eea97323d386e653b52ef822590f9b5d4"
+    assert independently_computed == expected_signature
+    assert result.as_headers()["signature"] == expected_signature
+    assert later_timestamp.as_headers()["signature"] != expected_signature
+    assert request.request_evidence_sha256 == (
+        "03e53a40b07c1f1ab9e115c7ab7caab05e0603326c43f379052bbef8d5911ac7"
+    )
 
 
 @pytest.mark.parametrize(
