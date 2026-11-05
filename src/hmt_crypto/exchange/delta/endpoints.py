@@ -67,8 +67,8 @@ class DeltaEndpointSet:
         return f"{self.rest_base_url}{path}"
 
 
-# Official docs verified 2026-11-03. Global public hosts are India-named in the
-# Global reference; retain those exact values but keep Global streaming disabled.
+# India WebSocket hosts were reverified from official source manifest F01 on
+# 2026-11-05. Global values remain inert metadata under the F22 disabled gate.
 _CANONICAL_ENDPOINTS: dict[tuple[str, str], DeltaEndpointSet] = {
     ("india", "prod"): DeltaEndpointSet(
         region="india",
