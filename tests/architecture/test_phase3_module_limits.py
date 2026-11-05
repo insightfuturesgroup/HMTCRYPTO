@@ -25,8 +25,10 @@ PRODUCTION = {
     "src/hmt_crypto/market_data/public_stream_runner.py",
     "src/hmt_crypto/market_data/public_stream_support.py",
     "src/hmt_crypto/market_data/readiness.py",
+    "src/hmt_crypto/market_data/reconnect_policy.py",
     "src/hmt_crypto/market_data/state.py",
     "src/hmt_crypto/market_data/state_models.py",
+    "src/hmt_crypto/market_data/stream_liveness.py",
 }
 TEST_SUPPORT = {
     "tests/architecture/test_phase3_artifact_exclusion.py",
@@ -46,7 +48,9 @@ TEST_SUPPORT = {
     "tests/unit/test_delta_orderbook_properties.py",
     "tests/unit/test_market_data_contracts.py",
     "tests/unit/test_market_readiness.py",
+    "tests/unit/test_market_reconnect_policy.py",
     "tests/unit/test_market_state.py",
+    "tests/unit/test_market_stream_liveness.py",
     "tests/unit/test_websocket_codec.py",
     "tests/unit/test_websocket_contracts.py",
     "tests/unit/test_websocket_endpoint_policy.py",
@@ -130,8 +134,10 @@ targets = (
     "hmt_crypto.market_data.public_stream_support",
     "hmt_crypto.market_data.public_stream_runner",
     "hmt_crypto.market_data.readiness",
+    "hmt_crypto.market_data.reconnect_policy",
     "hmt_crypto.market_data.state_models",
     "hmt_crypto.market_data.state",
+    "hmt_crypto.market_data.stream_liveness",
     "hmt_crypto.market_data.public_stream",
 )
 for target in targets:
