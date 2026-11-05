@@ -5,6 +5,10 @@ from __future__ import annotations
 import ast
 import copy
 import importlib
+import pickle
+import subprocess
+import sys
+import textwrap
 import warnings
 from collections.abc import Iterator, Mapping
 from dataclasses import FrozenInstanceError
@@ -83,6 +87,12 @@ def exact_enum_api() -> SimpleNamespace:
         return SimpleNamespace(**{name: getattr(primitives, name) for name in names})
     except AttributeError:
         pytest.fail("A1 canonical exact-enum supplier is incomplete")
+
+
+def capture_foreign_exact_enum(enum_type: object, manifest: tuple[tuple[str, str], ...]) -> None:
+    """Capture one ordinary test enum through the package-private source API."""
+    enum_module = importlib.import_module("hmt_crypto._private_enums")
+    enum_module._capture_foreign_exact_enum(enum_type, manifest)
 
 
 def validate(alias: object, value: object) -> object:
@@ -1470,6 +1480,8 @@ def test_foreign_exact_enum_rejects_before_hostile_class_or_repr_callbacks() -> 
     class Foreign(StrEnum):
         SAFE = "safe"
 
+    capture_foreign_exact_enum(Foreign, (("SAFE", "safe"),))
+
     callbacks: list[str] = []
 
     class HostileIncoming:
@@ -1540,18 +1552,21 @@ def test_private_model_exact_enum_rejects_before_hostile_class_or_repr_callbacks
 def test_exact_enum_registration_rejects_aliases_and_duplicate_literals() -> None:
     api = exact_enum_api()
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as native_error:
 
         class AliasedExact(api.ExactStrEnum):
             FIRST = "same"
             SECOND = "same"
 
+    assert native_error.value.args == ("exact enum aliases are forbidden",)
+
     class AliasedForeign(StrEnum):
         FIRST = "same"
         SECOND = "same"
 
-    with pytest.raises(ValueError):
-        api.ExactEnumField(AliasedForeign)
+    with pytest.raises(ValueError) as foreign_error:
+        capture_foreign_exact_enum(AliasedForeign, (("FIRST", "same"), ("SECOND", "same")))
+    assert foreign_error.value.args == ("exact enum aliases are forbidden",)
 
 
 def test_exact_enum_field_is_frozen_and_hardens_registered_foreign_enum() -> None:
@@ -1561,6 +1576,7 @@ def test_exact_enum_field_is_frozen_and_hardens_registered_foreign_enum() -> Non
         FIRST = "first"
         SECOND = "second"
 
+    capture_foreign_exact_enum(Foreign, (("FIRST", "first"), ("SECOND", "second")))
     field = api.ExactEnumField(Foreign)
     with pytest.raises(FrozenInstanceError):
         field.enum_type = Foreign
@@ -1674,7 +1690,7 @@ def test_exact_enum_helpers_use_exact_strings_and_registered_type_identity() -> 
         api.exact_enum_literal(HostileClass, Synthetic.FIRST)
     with pytest.raises(ValueError, match="registered"):
         api.exact_enum_member_for_literal(HostileClass, "first")
-    with pytest.raises(TypeError, match="enum class"):
+    with pytest.raises(TypeError, match="source is not captured"):
         api.ExactEnumField(HostileClass)
     assert callbacks == []
 
@@ -1689,6 +1705,565 @@ def test_exact_enum_supplier_exposes_no_public_mutable_registry() -> None:
         "exact_enum_member_for_literal",
     } <= public_names
     assert all("registry" not in name.lower() for name in public_names)
+
+
+def test_exact_enum_field_rejects_uncaptured_foreign_enum_without_callbacks() -> None:
+    """Foreign source admission is explicit and lookup-only."""
+    api = exact_enum_api()
+
+    class Uncaptured(StrEnum):
+        SAFE = "safe"
+
+    with pytest.raises(TypeError, match="^exact enum source is not captured$"):
+        api.ExactEnumField(Uncaptured)
+
+    callbacks: list[str] = []
+
+    class HostileMeta(type):
+        def __getattribute__(cls, name: str) -> object:
+            callbacks.append(name)
+            raise AssertionError("fixture-secret-uncaptured-callback")
+
+        def __repr__(cls) -> str:
+            callbacks.append("repr")
+            raise AssertionError("fixture-secret-uncaptured-callback")
+
+    class Hostile(metaclass=HostileMeta):
+        pass
+
+    with pytest.raises(TypeError, match="^exact enum source is not captured$") as captured:
+        api.ExactEnumField(Hostile)
+    assert callbacks == []
+    assert "fixture-secret" not in str(captured.value)
+
+
+def test_foreign_exact_enum_capture_is_exact_idempotent_and_callback_free() -> None:
+    """Source capture validates shape first and never replaces a frozen entry."""
+    callbacks: list[str] = []
+
+    class HostileTuple(tuple):
+        def __iter__(self) -> Iterator[object]:
+            callbacks.append("iter")
+            raise AssertionError("fixture-secret-manifest")
+
+        def __len__(self) -> int:
+            callbacks.append("len")
+            raise AssertionError("fixture-secret-manifest")
+
+        def __getitem__(self, index: object) -> object:
+            callbacks.append("getitem")
+            raise AssertionError("fixture-secret-manifest")
+
+        def __repr__(self) -> str:
+            callbacks.append("repr")
+            raise AssertionError("fixture-secret-manifest")
+
+    class HostileText(str):
+        def __eq__(self, other: object) -> bool:
+            callbacks.append("eq")
+            raise AssertionError("fixture-secret-manifest")
+
+        def __hash__(self) -> int:
+            callbacks.append("hash")
+            raise AssertionError("fixture-secret-manifest")
+
+        def __repr__(self) -> str:
+            callbacks.append("repr")
+            raise AssertionError("fixture-secret-manifest")
+
+    class HostileMeta(type):
+        def __getattribute__(cls, name: str) -> object:
+            callbacks.append(f"get:{name}")
+            raise AssertionError("fixture-secret-source")
+
+        def __repr__(cls) -> str:
+            callbacks.append("repr")
+            raise AssertionError("fixture-secret-source")
+
+    class HostileSource(metaclass=HostileMeta):
+        pass
+
+    class Foreign(StrEnum):
+        SAFE = "safe"
+
+    malformed: tuple[object, ...] = (
+        [],
+        (("SAFE",),),
+        (("SAFE", "safe", "extra"),),
+        (["SAFE", "safe"],),
+        (HostileTuple(("SAFE", "safe")),),
+        ((HostileText("SAFE"), "safe"),),
+        HostileTuple((("SAFE", "safe"),)),
+        object(),
+    )
+    for manifest in malformed:
+        with pytest.raises(TypeError) as captured:
+            capture_foreign_exact_enum(Foreign, manifest)  # type: ignore[arg-type]
+        assert captured.value.args == ("invalid exact enum source class",)
+
+    with pytest.raises(TypeError) as captured:
+        capture_foreign_exact_enum(HostileSource, (("SAFE", "safe"),))
+    assert captured.value.args == ("invalid exact enum source class",)
+    assert callbacks == []
+
+    for manifest in ((("WRONG", "safe"),), (("SAFE", "wrong"),)):
+        with pytest.raises(TypeError) as captured:
+            capture_foreign_exact_enum(Foreign, manifest)
+        assert captured.value.args == ("invalid exact enum source class",)
+
+    manifest = (("SAFE", "safe"),)
+    capture_foreign_exact_enum(Foreign, manifest)
+    capture_foreign_exact_enum(Foreign, manifest)
+    with pytest.raises(TypeError) as captured:
+        capture_foreign_exact_enum(Foreign, (("SAFE", "changed"),))
+    assert captured.value.args == ("invalid exact enum source class",)
+
+    api = exact_enum_api()
+    field = api.ExactEnumField(Foreign)
+    assert api.exact_enum_literal(Foreign, Foreign.SAFE) == "safe"
+    assert TypeAdapter(Annotated[Foreign, field]).validate_python(Foreign.SAFE) is Foreign.SAFE
+
+
+def test_config_enum_snapshot_survives_consistent_live_replacement() -> None:
+    """Late coherent enum-map replacement cannot poison a source snapshot."""
+    from hmt_crypto.config import ExecutionMode
+
+    api = exact_enum_api()
+    original = ExecutionMode.PAPER
+    member_map = type.__getattribute__(ExecutionMode, "_member_map_")
+    value_map = type.__getattribute__(ExecutionMode, "_value2member_map_")
+    forged = str.__new__(ExecutionMode, "PAPER")
+    object.__setattr__(forged, "_name_", "PAPER")
+    object.__setattr__(forged, "_value_", "PAPER")
+    object.__setattr__(forged, "__objclass__", ExecutionMode)
+    object.__setattr__(forged, "_sort_order_", 1)
+    type.__setattr__(ExecutionMode, "PAPER", forged)
+    member_map["PAPER"] = forged
+    value_map["PAPER"] = forged
+    try:
+        adapter = TypeAdapter(Annotated[ExecutionMode, api.ExactEnumField(ExecutionMode)])
+        assert adapter.validate_python(original) is original
+        assert adapter.dump_json(original) == b'"PAPER"'
+        with pytest.raises(ValidationError):
+            adapter.validate_python(forged)
+        with pytest.raises(PydanticSerializationError):
+            adapter.dump_json(forged)
+    finally:
+        type.__setattr__(ExecutionMode, "PAPER", original)
+        member_map["PAPER"] = original
+        value_map["PAPER"] = original
+
+
+def test_config_enum_capture_does_not_change_strenum_or_settings_behavior() -> None:
+    """Source capture is observational and config parsing remains unchanged."""
+    from hmt_crypto.config import DeltaEnvironment, DeltaRegion, ExecutionMode, Settings
+
+    assert type(ExecutionMode) is type(StrEnum)
+    assert tuple((member.name, member.value) for member in ExecutionMode) == (
+        ("BACKTEST", "BACKTEST"),
+        ("PAPER", "PAPER"),
+        ("LIVE", "LIVE"),
+    )
+    assert tuple((member.name, member.value) for member in DeltaRegion) == (
+        ("INDIA", "india"),
+        ("GLOBAL", "global"),
+    )
+    assert tuple((member.name, member.value) for member in DeltaEnvironment) == (
+        ("TESTNET", "testnet"),
+        ("PROD", "prod"),
+    )
+    configured = Settings(
+        _env_file=None,
+        execution_mode="BACKTEST",
+        delta_region="global",
+        delta_env="prod",
+    )
+    assert configured.execution_mode is ExecutionMode.BACKTEST
+    assert configured.delta_region is DeltaRegion.GLOBAL
+    assert configured.delta_env is DeltaEnvironment.PROD
+    dumped = configured.model_dump(mode="json")
+    assert dumped["execution_mode"] == "BACKTEST"
+    assert dumped["delta_region"] == "global"
+    assert dumped["delta_env"] == "prod"
+
+
+def test_private_primitive_facade_preserves_exact_public_surface_and_identity() -> None:
+    """The split is invisible at the supported public facade."""
+    facade = importlib.import_module("hmt_crypto.domain.private_primitives")
+    enum_leaf = importlib.import_module("hmt_crypto._private_enums")
+    model_leaf = importlib.import_module("hmt_crypto.domain._private_model")
+    expected = [
+        "AssetSymbol",
+        "BoundedDiagnosticText",
+        "Contracts",
+        "CredentialVersion",
+        "ExactAwareUtcDatetime",
+        "ExactEnumField",
+        "ExactStrEnum",
+        "ExactUuid",
+        "ExternalUserText",
+        "NonNegativePrivateDecimal",
+        "NonZeroPrivateDecimal",
+        "ObservedDeltaClientOrderId",
+        "OmsClientOrderId",
+        "OpaqueCursor",
+        "PositivePrivateDecimal",
+        "PrivateBoundaryModel",
+        "PrivateDecimal",
+        "PrivateId",
+        "ProductSymbol",
+        "Sha256Hex",
+        "SignedContracts",
+        "StrictEpoch",
+        "StrictNonNegativeInt",
+        "StrictPositiveInt",
+        "StrictPositivePid",
+        "UnfilledContracts",
+        "UnknownEnumToken",
+        "exact_enum_literal",
+        "exact_enum_member_for_literal",
+        "parse_epoch_microseconds",
+        "parse_position_iso_datetime",
+        "parse_private_decimal_text",
+    ]
+    assert facade.__all__ == expected
+    for name in (
+        "ExactStrEnum",
+        "ExactEnumField",
+        "exact_enum_literal",
+        "exact_enum_member_for_literal",
+    ):
+        assert getattr(facade, name) is getattr(enum_leaf, name)
+    assert facade.PrivateBoundaryModel is model_leaf.PrivateBoundaryModel
+    for name in (
+        "ExactStrEnum",
+        "ExactEnumField",
+        "PrivateBoundaryModel",
+        "exact_enum_literal",
+        "exact_enum_member_for_literal",
+    ):
+        value = getattr(facade, name)
+        assert value.__module__ == "hmt_crypto.domain.private_primitives"
+        assert value.__name__ == name
+        assert value.__qualname__ == name
+
+
+def test_private_primitive_public_identity_is_bound_during_construction() -> None:
+    """Class construction and schema refs never see leaf paths."""
+    from hmt_crypto.config import ExecutionMode
+
+    facade = importlib.import_module("hmt_crypto.domain.private_primitives")
+    project_root = Path(__file__).resolve().parents[2]
+    leaves = (
+        project_root / "src/hmt_crypto/_private_enums.py",
+        project_root / "src/hmt_crypto/domain/_private_model.py",
+    )
+    public_classes = {"ExactStrEnum", "ExactEnumField", "PrivateBoundaryModel"}
+    found: set[str] = set()
+    for path in leaves:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for statement in tree.body:
+            if isinstance(statement, ast.ClassDef) and statement.name in public_classes:
+                found.add(statement.name)
+                assert any(
+                    isinstance(item, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "__module__"
+                        for target in item.targets
+                    )
+                    and isinstance(item.value, ast.Constant)
+                    and item.value.value == "hmt_crypto.domain.private_primitives"
+                    for item in statement.body
+                )
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                assert not any(
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "__module__"
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id in public_classes
+                    for node in ast.walk(statement)
+                )
+    assert found == public_classes
+    model = facade.PrivateBoundaryModel
+    assert model.__pydantic_core_schema__["ref"] == (
+        f"hmt_crypto.domain.private_primitives.PrivateBoundaryModel:{id(model)}"
+    )
+    assert "hmt_crypto.domain._private_model" not in repr(model.__pydantic_core_schema__)
+
+    class Native(facade.ExactStrEnum):
+        SAFE = "safe"
+
+    metadata = facade.ExactEnumField(ExecutionMode)
+    foreign_alias = Annotated[ExecutionMode, metadata]
+    native_adapter = TypeAdapter(Native)
+    foreign_adapter = TypeAdapter(foreign_alias)
+    native_core = native_adapter.core_schema
+    foreign_core = foreign_adapter.core_schema
+    assert native_core["schema"]["cls"] is Native
+    assert native_core["metadata"]["pydantic_js_functions"][0].__self__ is Native
+    assert foreign_core["schema"]["cls"] is ExecutionMode
+    assert foreign_core["metadata"]["pydantic_js_annotation_functions"][0].__self__ is metadata
+    assert native_adapter.json_schema(mode="validation") == {"not": {}}
+    assert native_adapter.json_schema(mode="serialization") == {
+        "enum": ["safe"],
+        "type": "string",
+    }
+    assert foreign_adapter.json_schema(mode="validation") == {"not": {}}
+    assert foreign_adapter.json_schema(mode="serialization") == {
+        "enum": ["BACKTEST", "PAPER", "LIVE"],
+        "type": "string",
+    }
+
+    derived = create_model(
+        "PrivateConstructionIdentityProbe",
+        __base__=model,
+        native=(Native, ...),
+        foreign=(foreign_alias, ...),
+    )
+    assert derived.__pydantic_core_schema__["ref"] == (
+        f"{derived.__module__}.{derived.__qualname__}:{id(derived)}"
+    )
+    validation_schema = derived.model_json_schema(mode="validation")
+    serialization_schema = derived.model_json_schema(mode="serialization")
+    assert validation_schema == {
+        "additionalProperties": False,
+        "properties": {
+            "native": {"not": {}, "title": "Native"},
+            "foreign": {"not": {}, "title": "Foreign"},
+        },
+        "required": ["native", "foreign"],
+        "title": "PrivateConstructionIdentityProbe",
+        "type": "object",
+    }
+    assert serialization_schema == {
+        "additionalProperties": False,
+        "properties": {
+            "native": {"enum": ["safe"], "title": "Native", "type": "string"},
+            "foreign": {
+                "enum": ["BACKTEST", "PAPER", "LIVE"],
+                "title": "Foreign",
+                "type": "string",
+            },
+        },
+        "required": ["native", "foreign"],
+        "title": "PrivateConstructionIdentityProbe",
+        "type": "object",
+    }
+    for schema in (
+        model.__pydantic_core_schema__,
+        derived.__pydantic_core_schema__,
+        native_adapter.json_schema(mode="validation"),
+        native_adapter.json_schema(mode="serialization"),
+        foreign_adapter.json_schema(mode="validation"),
+        foreign_adapter.json_schema(mode="serialization"),
+        validation_schema,
+        serialization_schema,
+    ):
+        rendered = repr(schema)
+        assert "hmt_crypto._private_enums" not in rendered
+        assert "hmt_crypto.domain._private_model" not in rendered
+
+
+def test_private_primitive_public_pickle_roundtrips_resolve_the_facade() -> None:
+    """Moved objects remain pickle-compatible through their public identities."""
+    from hmt_crypto.config import ExecutionMode
+    from hmt_crypto.exchange.delta.private_routes import PrivateRouteId
+
+    facade = importlib.import_module("hmt_crypto.domain.private_primitives")
+    for value in (
+        facade.ExactStrEnum,
+        facade.ExactEnumField,
+        facade.PrivateBoundaryModel,
+        facade.exact_enum_literal,
+        facade.exact_enum_member_for_literal,
+        PrivateRouteId.BALANCES,
+    ):
+        assert pickle.loads(pickle.dumps(value)) is value
+
+    metadata = pickle.loads(pickle.dumps(facade.ExactEnumField(ExecutionMode)))
+    assert type(metadata) is facade.ExactEnumField
+    assert metadata.enum_type is ExecutionMode
+    adapter = TypeAdapter(Annotated[ExecutionMode, metadata])
+    assert adapter.validate_python(ExecutionMode.PAPER) is ExecutionMode.PAPER
+    assert adapter.dump_python(ExecutionMode.PAPER) is ExecutionMode.PAPER
+    assert adapter.dump_json(ExecutionMode.PAPER) == b'"PAPER"'
+    assert adapter.json_schema(mode="validation") == {"not": {}}
+    assert adapter.json_schema(mode="serialization") == {
+        "enum": ["BACKTEST", "PAPER", "LIVE"],
+        "type": "string",
+    }
+    model = pickle.loads(pickle.dumps(facade.PrivateBoundaryModel()))
+    assert type(model) is facade.PrivateBoundaryModel
+    assert model.model_dump() == {}
+    assert model.model_dump_json() == "{}"
+    assert type(model).model_validate({}).model_dump() == {}
+    assert type(model).model_json_schema(mode="validation") == {
+        "additionalProperties": False,
+        "description": "Immutable strict model that owns inputs and hides them from failures.",
+        "properties": {},
+        "title": "PrivateBoundaryModel",
+        "type": "object",
+    }
+
+
+def test_private_primitive_split_has_one_responsibility_per_module() -> None:
+    """Each supplier leaf owns only its frozen responsibility."""
+    project_root = Path(__file__).resolve().parents[2]
+    enum_tree = ast.parse(
+        (project_root / "src/hmt_crypto/_private_enums.py").read_text(encoding="utf-8")
+    )
+    model_tree = ast.parse(
+        (project_root / "src/hmt_crypto/domain/_private_model.py").read_text(encoding="utf-8")
+    )
+    facade_tree = ast.parse(
+        (project_root / "src/hmt_crypto/domain/private_primitives.py").read_text(encoding="utf-8")
+    )
+    enum_names = {node.name for node in enum_tree.body if isinstance(node, ast.ClassDef)}
+    model_names = {node.name for node in model_tree.body if isinstance(node, ast.ClassDef)}
+    facade_classes = {node.name for node in facade_tree.body if isinstance(node, ast.ClassDef)}
+    facade_assignments = {
+        target.id
+        for node in facade_tree.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        for target in (node.targets if isinstance(node, ast.Assign) else (node.target,))
+        if isinstance(target, ast.Name)
+    }
+    assert enum_names == {"ExactStrEnum", "ExactEnumField"}
+    assert model_names == {"PrivateBoundaryModel"}
+    assert facade_classes == set()
+    assert "_EXACT_ENUM_REGISTRY" not in facade_assignments
+    assert "_EXACT_ENUM_FIELD_REGISTRY" not in facade_assignments
+
+
+def _fresh_python(script: str) -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(script)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_private_primitive_fresh_import_graph_remains_inert() -> None:
+    """The split adds neither cycles nor runtime-authority imports."""
+    _fresh_python(
+        """
+        import sys
+        import hmt_crypto.config
+        assert "hmt_crypto._private_enums" in sys.modules
+        assert "hmt_crypto.domain.private_primitives" not in sys.modules
+        """
+    )
+    _fresh_python(
+        """
+        import sys
+        import hmt_crypto.domain.private_primitives
+        blocked = ("hmt_crypto.config", "hmt_crypto.exchange", "hmt_crypto.persistence")
+        assert not any(
+            name == prefix or name.startswith(prefix + ".")
+            for name in sys.modules
+            for prefix in blocked
+        )
+        assert "httpx" not in sys.modules
+        assert "sqlalchemy" not in sys.modules
+        """
+    )
+
+
+def test_private_enum_capture_import_order_matrix() -> None:
+    """All supported import orders share one captured identity authority."""
+    for imports in (
+        "import hmt_crypto.domain.private_primitives\nimport hmt_crypto.config",
+        "import hmt_crypto.config\nimport hmt_crypto.domain.private_primitives",
+        "import hmt_crypto.exchange.delta.private_routes\n"
+        "import hmt_crypto.config\n"
+        "import hmt_crypto.domain.private_primitives",
+    ):
+        _fresh_python(
+            imports
+            + "\n"
+            + textwrap.dedent(
+                """
+                import importlib
+                import sys
+                from typing import Annotated
+                from pydantic import TypeAdapter
+                from hmt_crypto import config
+                from hmt_crypto.domain.private_primitives import (
+                    ExactEnumField,
+                    exact_enum_literal,
+                    exact_enum_member_for_literal,
+                )
+
+                enum_leaf = importlib.import_module("hmt_crypto._private_enums")
+                assert sys.modules["hmt_crypto._private_enums"] is enum_leaf
+                assert ExactEnumField.__post_init__.__globals__ is enum_leaf.__dict__
+                assert exact_enum_literal.__globals__ is enum_leaf.__dict__
+                assert exact_enum_member_for_literal.__globals__ is enum_leaf.__dict__
+                specs = (
+                    (
+                        config.ExecutionMode,
+                        (("BACKTEST", "BACKTEST"), ("PAPER", "PAPER"), ("LIVE", "LIVE")),
+                    ),
+                    (config.DeltaRegion, (("INDIA", "india"), ("GLOBAL", "global"))),
+                    (
+                        config.DeltaEnvironment,
+                        (("TESTNET", "testnet"), ("PROD", "prod")),
+                    ),
+                )
+                for enum_type, manifest in specs:
+                    registrations = [
+                        registration
+                        for registration in enum_leaf._EXACT_ENUM_REGISTRY
+                        if registration[0] is enum_type
+                    ]
+                    assert len(registrations) == 1
+                    entries = registrations[0][1]
+                    assert registrations[0][2] == manifest
+                    assert len(entries) == len(manifest)
+                    field = ExactEnumField(enum_type)
+                    adapter = TypeAdapter(Annotated[enum_type, field])
+                    for (name, literal), (registered_member, registered_literal) in zip(
+                        manifest, entries, strict=True
+                    ):
+                        member = getattr(enum_type, name)
+                        assert registered_member is member
+                        assert registered_literal == literal
+                        assert exact_enum_literal(enum_type, member) == literal
+                        assert exact_enum_member_for_literal(enum_type, literal) is member
+                        assert adapter.validate_python(member) is member
+                settings = config.Settings(
+                    _env_file=None, delta_region="global", delta_env="prod"
+                )
+                assert settings.delta_region is config.DeltaRegion.GLOBAL
+                assert settings.model_dump(mode="json")["delta_env"] == "prod"
+                """
+            )
+        )
+
+
+def test_private_primitive_public_identity_survives_pickle_lookup() -> None:
+    """Facade lookup also resolves native route subclasses and members."""
+    from hmt_crypto.exchange.delta.private_routes import PrivateRouteId
+
+    facade = importlib.import_module("hmt_crypto.domain.private_primitives")
+    assert pickle.loads(pickle.dumps(facade.ExactStrEnum)) is facade.ExactStrEnum
+    assert pickle.loads(pickle.dumps(PrivateRouteId)) is PrivateRouteId
+    assert pickle.loads(pickle.dumps(PrivateRouteId.OPEN_ORDERS)) is PrivateRouteId.OPEN_ORDERS
+
+
+def test_private_primitive_support_modules_remain_reviewable() -> None:
+    """The split leaves three physically reviewable implementation units."""
+    project_root = Path(__file__).resolve().parents[2]
+    ceilings = {
+        project_root / "src/hmt_crypto/_private_enums.py": 500,
+        project_root / "src/hmt_crypto/domain/_private_model.py": 500,
+        project_root / "src/hmt_crypto/domain/private_primitives.py": 400,
+    }
+    for path, ceiling in ceilings.items():
+        assert len(path.read_text(encoding="utf-8").splitlines()) <= ceiling
 
 
 def test_private_route_identity_is_closed_and_requires_the_enum_at_model_boundary() -> None:
@@ -1903,6 +2478,7 @@ def test_foreign_exact_enum_default_serialization_uses_snapshot_without_monkeypa
     class Foreign(StrEnum):
         SAFE = "safe"
 
+    capture_foreign_exact_enum(Foreign, (("SAFE", "safe"),))
     original_class_value_descriptor = vars(Enum)["value"]
     adapter = TypeAdapter(Annotated[Foreign, api.ExactEnumField(Foreign)])
     assert vars(Enum)["value"] is original_class_value_descriptor
@@ -1960,6 +2536,43 @@ def _serialization_bypass_violations(
                         core_function_names.add(local_name)
                         violations.append(f"{filename}:{node.lineno}:pydantic core serializer")
 
+    def is_unbound_base_dump(node: ast.Call) -> bool:
+        return (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"model_dump", "model_dump_json"}
+            and (
+                isinstance(node.func.value, ast.Name)
+                and node.func.value.id in base_model_names
+                or isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "BaseModel"
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id in pydantic_modules
+            )
+        )
+
+    reviewed_hardened_calls: set[int] = set()
+    if hardened:
+        expected = {
+            ("model_copy", "model_dump"),
+            ("model_dump", "model_dump"),
+            ("model_dump_json", "model_dump_json"),
+        }
+        observed: list[tuple[str, str]] = []
+        for statement in tree.body:
+            if not isinstance(statement, ast.ClassDef) or statement.name != "PrivateBoundaryModel":
+                continue
+            for method in statement.body:
+                if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for candidate in ast.walk(method):
+                    if isinstance(candidate, ast.Call) and is_unbound_base_dump(candidate):
+                        pair = (method.name, candidate.func.attr)
+                        observed.append(pair)
+                        if pair in expected:
+                            reviewed_hardened_calls.add(id(candidate))
+        if len(observed) != len(expected) or set(observed) != expected:
+            violations.append(f"{filename}:0:unreviewed hardened BaseModel dump")
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "__pydantic_serializer__":
             violations.append(f"{filename}:{node.lineno}:private serializer")
@@ -1985,21 +2598,10 @@ def _serialization_bypass_violations(
             violations.append(f"{filename}:{node.lineno}:pydantic core serializer")
         if is_private_serializer_call:
             violations.append(f"{filename}:{node.lineno}:private serializer")
-        is_unbound_base_dump = (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"model_dump", "model_dump_json"}
-            and (
-                isinstance(node.func.value, ast.Name)
-                and node.func.value.id in base_model_names
-                or isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr == "BaseModel"
-                and isinstance(node.func.value.value, ast.Name)
-                and node.func.value.value.id in pydantic_modules
-            )
-        )
+        unbound_base_dump = is_unbound_base_dump(node)
         is_hardened_clean_dump = (
-            hardened
-            and is_unbound_base_dump
+            id(node) in reviewed_hardened_calls
+            and unbound_base_dump
             and bool(node.args)
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id == "clean"
@@ -2009,7 +2611,7 @@ def _serialization_bypass_violations(
             "dump_json",
         }:
             violations.append(f"{filename}:{node.lineno}:direct adapter dump")
-        if is_unbound_base_dump and not is_hardened_clean_dump:
+        if unbound_base_dump and not is_hardened_clean_dump:
             violations.append(f"{filename}:{node.lineno}:unbound BaseModel dump")
         if is_hardened_clean_dump and not any(
             keyword.arg == "serialize_as_any"
@@ -2059,10 +2661,34 @@ def test_serialization_bypass_scanner_resolves_normal_aliases(source: str, marke
     assert any(marker in violation for violation in violations)
 
 
+def test_serialization_bypass_scanner_allows_only_reviewed_model_leaf_calls() -> None:
+    """A clean variable and literal duck flag do not create a broad exemption."""
+    source = """
+from pydantic import BaseModel
+
+class PrivateBoundaryModel:
+    def model_copy(self, clean):
+        BaseModel.model_dump(clean, serialize_as_any=False)
+
+    def model_dump(self, clean):
+        BaseModel.model_dump(clean, serialize_as_any=False)
+
+    def model_dump_json(self, clean):
+        BaseModel.model_dump_json(clean, serialize_as_any=False)
+
+def unreviewed(clean):
+    return BaseModel.model_dump(clean, serialize_as_any=False)
+"""
+    violations = _serialization_bypass_violations(
+        source, filename="_private_model.py", hardened=True
+    )
+    assert any("unbound BaseModel dump" in violation for violation in violations)
+
+
 def test_project_sources_forbid_unsupported_pydantic_serialization_bypasses() -> None:
     """Keep duck/direct DTO/core serializer bypasses out of operational code."""
     project_root = Path(__file__).resolve().parents[2]
-    hardened_implementation = project_root / "src/hmt_crypto/domain/private_primitives.py"
+    hardened_implementation = project_root / "src/hmt_crypto/domain/_private_model.py"
     violations: list[str] = []
     for path in sorted((project_root / "src").rglob("*.py")):
         violations.extend(
@@ -2279,6 +2905,7 @@ def test_exact_enum_field_schema_uses_identity_snapshot_after_metadata_poisoning
         def __repr__(self) -> str:
             raise AssertionError("fixture-secret-metadata-repr")
 
+    capture_foreign_exact_enum(Foreign, (("SAFE", "safe"),))
     field = api.ExactEnumField(Foreign)
     object.__setattr__(field, "enum_type", Other)
     object.__setattr__(field, "_entries", HostileEntries())
@@ -2310,7 +2937,6 @@ def test_foreign_enum_registration_rejects_inconsistent_standard_internals(
     corruption: str,
 ) -> None:
     """Catch accepting a source class whose standard Enum maps disagree."""
-    api = exact_enum_api()
 
     class Foreign(StrEnum):
         SAFE = "safe"
@@ -2339,7 +2965,7 @@ def test_foreign_enum_registration_rejects_inconsistent_standard_internals(
         object.__setattr__(Foreign.SAFE, "_value_", "fixture-secret-member-value")
 
     with pytest.raises((TypeError, ValueError), match="exact enum") as error:
-        api.ExactEnumField(Foreign)
+        capture_foreign_exact_enum(Foreign, (("SAFE", "safe"),))
     assert "fixture-secret" not in str(error.value)
 
 
@@ -2348,7 +2974,6 @@ def test_foreign_enum_registration_reads_raw_class_state_without_descriptors(
     internal_name: str,
 ) -> None:
     """Catch registration invoking descriptors installed on Enum internals."""
-    api = exact_enum_api()
     callbacks: list[str] = []
 
     class Foreign(StrEnum):
@@ -2365,7 +2990,7 @@ def test_foreign_enum_registration_reads_raw_class_state_without_descriptors(
 
     type.__setattr__(Foreign, internal_name, HostileDescriptor())
     with pytest.raises(TypeError, match="exact enum") as error:
-        api.ExactEnumField(Foreign)
+        capture_foreign_exact_enum(Foreign, (("SAFE", "safe"),))
     assert callbacks == []
     assert "fixture-secret" not in str(error.value)
 
@@ -2375,7 +3000,6 @@ def test_foreign_enum_registration_rejects_member_descriptors_without_callbacks(
     internal_name: str,
 ) -> None:
     """Catch member internal reads dispatching attacker data descriptors."""
-    api = exact_enum_api()
     callbacks: list[str] = []
 
     class Foreign(StrEnum):
@@ -2392,14 +3016,13 @@ def test_foreign_enum_registration_rejects_member_descriptors_without_callbacks(
 
     type.__setattr__(Foreign, internal_name, HostileDescriptor())
     with pytest.raises(TypeError, match="exact enum") as error:
-        api.ExactEnumField(Foreign)
+        capture_foreign_exact_enum(Foreign, (("SAFE", "safe"),))
     assert callbacks == []
     assert "fixture-secret" not in str(error.value)
 
 
 def test_foreign_enum_registration_rejects_custom_mro_before_member_callbacks() -> None:
     """Catch inherited member descriptors firing during snapshot admission."""
-    api = exact_enum_api()
     callbacks: list[str] = []
     armed = False
 
@@ -2424,7 +3047,7 @@ def test_foreign_enum_registration_rejects_custom_mro_before_member_callbacks() 
     callbacks.clear()
     armed = True
     with pytest.raises(TypeError, match="exact enum") as error:
-        api.ExactEnumField(Foreign)
+        capture_foreign_exact_enum(Foreign, (("SAFE", "safe"),))
     assert callbacks == []
     assert "fixture-secret" not in str(error.value)
 
@@ -2442,6 +3065,7 @@ def test_exact_enum_json_schemas_are_truthful_for_adapters_and_models(
             ALPHA = "alpha"
             BETA = "beta"
 
+        capture_foreign_exact_enum(Synthetic, (("ALPHA", "alpha"), ("BETA", "beta")))
         enum_alias = Annotated[Synthetic, api.ExactEnumField(Synthetic)]
     else:
 
@@ -2481,6 +3105,7 @@ def test_empty_exact_enum_json_schemas_admit_no_input_or_output(foreign: bool) -
         class Empty(StrEnum):
             pass
 
+        capture_foreign_exact_enum(Empty, ())
         enum_alias = Annotated[Empty, api.ExactEnumField(Empty)]
     else:
 

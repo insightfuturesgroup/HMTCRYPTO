@@ -1,6 +1,8 @@
 """Configuration boundaries must fail closed and keep credentials private."""
 
+import ast
 import hashlib
+import importlib
 import os
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,36 @@ def arm(monkeypatch: pytest.MonkeyPatch, slot: str = "DELTA_INDIA_TESTNET") -> N
     monkeypatch.setenv("DELTA_LIVE_CONFIRMATION", CONFIRMATION)
     monkeypatch.setenv(f"{slot}_API_KEY", "example-api-key")
     monkeypatch.setenv(f"{slot}_API_SECRET", "example-api-secret")
+
+
+def test_config_exact_enum_sources_are_captured_before_settings_definition() -> None:
+    """Each ordinary config enum is captured immediately at its source."""
+    config_module = importlib.import_module("hmt_crypto.config")
+    enum_module = importlib.import_module("hmt_crypto._private_enums")
+    source = Path(config_module.__file__).read_text(encoding="utf-8")
+    statements = ast.parse(source).body
+    expected = {
+        "ExecutionMode": (("BACKTEST", "BACKTEST"), ("PAPER", "PAPER"), ("LIVE", "LIVE")),
+        "DeltaRegion": (("INDIA", "india"), ("GLOBAL", "global")),
+        "DeltaEnvironment": (("TESTNET", "testnet"), ("PROD", "prod")),
+    }
+
+    for class_name, manifest in expected.items():
+        class_index = next(
+            index
+            for index, statement in enumerate(statements)
+            if isinstance(statement, ast.ClassDef) and statement.name == class_name
+        )
+        capture = statements[class_index + 1]
+        assert isinstance(capture, ast.Expr)
+        assert isinstance(capture.value, ast.Call)
+        assert isinstance(capture.value.func, ast.Name)
+        assert capture.value.func.id == "_capture_foreign_exact_enum"
+        assert ast.literal_eval(capture.value.args[1]) == manifest
+
+        enum_type = getattr(config_module, class_name)
+        field = enum_module.ExactEnumField(enum_type)
+        assert field.enum_type is enum_type
 
 
 def test_defaults_are_paper_india_testnet_without_write_capability() -> None:

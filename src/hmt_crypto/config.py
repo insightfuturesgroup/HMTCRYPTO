@@ -22,6 +22,7 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from hmt_crypto._private_enums import _capture_foreign_exact_enum
 from hmt_crypto.errors import ConfigurationError
 from hmt_crypto.exchange.delta.endpoints import get_delta_endpoints
 from hmt_crypto.persistence.configuration import database_url
@@ -51,14 +52,26 @@ class ExecutionMode(StrEnum):
     LIVE = "LIVE"
 
 
+_capture_foreign_exact_enum(
+    ExecutionMode,
+    (("BACKTEST", "BACKTEST"), ("PAPER", "PAPER"), ("LIVE", "LIVE")),
+)
+
+
 class DeltaRegion(StrEnum):
     INDIA = "india"
     GLOBAL = "global"
 
 
+_capture_foreign_exact_enum(DeltaRegion, (("INDIA", "india"), ("GLOBAL", "global")))
+
+
 class DeltaEnvironment(StrEnum):
     TESTNET = "testnet"
     PROD = "prod"
+
+
+_capture_foreign_exact_enum(DeltaEnvironment, (("TESTNET", "testnet"), ("PROD", "prod")))
 
 
 class _DeltaEnvSource(EnvSettingsSource):
