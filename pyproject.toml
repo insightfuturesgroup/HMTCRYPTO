@@ -41,6 +41,7 @@ packages = ["src/hmt_crypto"]
 [tool.hatch.build.targets.sdist]
 exclude = [
     "/tests/integration/support/task210_worker_clock_issuer.py",
+    "/tests/integration/support/task27_private_credentials_issuer.py",
     "/.superpowers",
 ]
 

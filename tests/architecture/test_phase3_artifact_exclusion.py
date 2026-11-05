@@ -41,4 +41,8 @@ def test_phase3_artifacts_keep_tests_non_executable_and_exclude_authority(
         sdist_names,
         "tests/integration/support/task210_worker_clock_issuer.py",
     )
+    assert not _contains_path(
+        sdist_names,
+        "tests/integration/support/task27_private_credentials_issuer.py",
+    )
     assert not any("/.superpowers/" in f"/{name}/" for name in sdist_names)
