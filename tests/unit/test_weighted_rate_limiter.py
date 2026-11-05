@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from types import MappingProxyType
+from uuid import UUID
 
 import pytest
 from rate_limit_test_support import (
@@ -108,6 +111,18 @@ async def test_granted_permit_is_never_refunded_by_later_task_cancellation() -> 
     blocked.cancel()
     with pytest.raises(asyncio.CancelledError):
         await blocked
+
+
+@pytest.mark.asyncio
+async def test_public_grant_carries_identity_evidence_without_a_held_token() -> None:
+    limiter = new_limiter(FakeTime(), capacity=5)
+    permit = await limiter.acquire(request())
+
+    assert permit.accounting is not None
+    assert permit.accounting.rest_event_id.int > 0
+    assert permit.accounting.rest_window_end_monotonic_ns == 300_000_000_000
+    assert not hasattr(permit.accounting, "release")
+    assert not hasattr(permit.accounting, "refund")
 
 
 @pytest.mark.asyncio
@@ -268,6 +283,360 @@ async def test_quota_endpoint_is_validated_telemetry_only() -> None:
     assert before.blocked_until == after.blocked_until
 
 
+def test_quota_observation_rejects_integer_subclasses_without_callbacks() -> None:
+    calls: list[str] = []
+
+    class HostileInt(int):
+        def __lt__(self, other: object) -> bool:
+            calls.append("lt")
+            raise AssertionError("fixture-secret")
+
+    limiter = new_limiter(FakeTime())
+    with pytest.raises(ConfigurationError):
+        limiter.observe_quota(
+            {
+                "current_quota": HostileInt(1),
+                "remaining_time_in_milliseconds": HostileInt(1),
+            }
+        )
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_mapping_provenance_and_route_semantics_fail_before_callbacks() -> None:
+    api = limiter_api()
+    calls: list[str] = []
+
+    class HostileDict(dict[object, object]):
+        def items(self) -> object:
+            calls.append("items")
+            raise AssertionError("fixture-secret")
+
+        def __iter__(self) -> Iterator[object]:
+            calls.append("iter")
+            raise AssertionError("fixture-secret")
+
+    def clock() -> float:
+        calls.append("clock")
+        return 0.0
+
+    def identity() -> UUID:
+        calls.append("uuid")
+        return UUID(int=len(calls))
+
+    limiter = api.WeightedRateLimiter(
+        scope(), policy=tiny_policy(), monotonic=clock, event_id_factory=identity
+    )
+    calls.clear()
+    replacements = (
+        MappingProxyType({}),
+        MappingProxyType(HostileDict()),
+    )
+    for replacement in replacements:
+        corrupted = api.RateRequest(route=api.RateLimitRoute.RATE_LIMIT_QUOTA)
+        object.__setattr__(corrupted, "product_operations", replacement)
+        with pytest.raises(ConfigurationError):
+            await limiter.acquire(corrupted)
+    for route in (
+        api.RateLimitRoute.PLACE_ORDER,
+        api.RateLimitRoute.MODIFY_ORDER,
+        api.RateLimitRoute.BATCH_ORDERS,
+    ):
+        mismatched = api.RateRequest(route=api.RateLimitRoute.CANCEL_ORDER)
+        object.__setattr__(mismatched, "route", route)
+        object.__setattr__(mismatched, "_route_owner", route)
+        with pytest.raises(ConfigurationError):
+            await limiter.acquire(mismatched)
+    for route in (api.RateLimitRoute.CANCEL_ORDER, api.RateLimitRoute.CANCEL_ALL):
+        mismatched = api.RateRequest(
+            route=api.RateLimitRoute.PLACE_ORDER, product_operations={7: 1}
+        )
+        object.__setattr__(mismatched, "route", route)
+        object.__setattr__(mismatched, "_route_owner", route)
+        with pytest.raises(ConfigurationError):
+            await limiter.acquire(mismatched)
+    assert calls == []
+
+
+def test_policy_mapping_provenance_fails_before_uuid_or_hostile_callbacks() -> None:
+    api = limiter_api()
+    calls: list[str] = []
+
+    class HostileDict(dict[object, object]):
+        def items(self) -> object:
+            calls.append("items")
+            raise AssertionError("fixture-secret")
+
+    for replacement in (
+        MappingProxyType(dict(tiny_policy().route_weights)),
+        MappingProxyType(HostileDict(tiny_policy().route_weights)),
+    ):
+        policy = tiny_policy()
+        object.__setattr__(policy, "route_weights", replacement)
+        with pytest.raises(ValueError):
+            api.WeightedRateLimiter(
+                scope(), policy=policy, event_id_factory=lambda: calls.append("uuid")
+            )
+    policy = tiny_policy()
+    object.__setattr__(policy, "route_weights", MappingProxyType(HostileDict()))
+    with pytest.raises(ConfigurationError):
+        policy.weight_for(api.RateLimitRoute.PRODUCTS)
+    assert calls == []
+
+
+@pytest.mark.parametrize("attribute", ["scope", "policy", "coordination_mode"])
+def test_bound_limiter_properties_reject_a_second_loop_without_callbacks(
+    attribute: str,
+) -> None:
+    api = limiter_api()
+    calls: list[str] = []
+
+    def clock() -> float:
+        calls.append("clock")
+        return 0.0
+
+    limiter = api.WeightedRateLimiter(scope(), policy=tiny_policy(), monotonic=clock)
+    asyncio.run(limiter.snapshot())
+    calls.clear()
+
+    async def read_property() -> object:
+        return getattr(limiter, attribute)
+
+    with pytest.raises(ConfigurationError):
+        asyncio.run(read_property())
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_hostile_poison_flags_transition_once_without_truth_callbacks() -> None:
+    calls: list[str] = []
+
+    class HostileFlag:
+        def __bool__(self) -> bool:
+            calls.append("bool")
+            raise AssertionError("fixture-secret")
+
+    limiter = new_limiter(FakeTime())
+    object.__setattr__(limiter, "_accounting_poisoned", HostileFlag())
+
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert calls == []
+    assert limiter._accounting_poisoned is True
+    assert limiter._limiter_accounting_generation == 2
+    assert limiter._limiter_clock_epoch == 1
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert limiter._limiter_accounting_generation == 2
+
+
+@pytest.mark.asyncio
+async def test_clock_poison_handles_callback_corrupted_flag_without_truth_callback() -> None:
+    calls: list[str] = []
+    holder: list[object] = []
+
+    class HostileFlag:
+        def __bool__(self) -> bool:
+            calls.append("bool")
+            raise AssertionError("fixture-secret")
+
+    def clock() -> float:
+        calls.append("clock")
+        object.__setattr__(holder[0], "_clock_poisoned", HostileFlag())
+        raise RuntimeError("fixture-secret")
+
+    limiter = limiter_api().WeightedRateLimiter(scope(), policy=tiny_policy(), monotonic=clock)
+    holder.append(limiter)
+
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert calls == ["clock"]
+    assert limiter._clock_poisoned is True
+    assert limiter._limiter_clock_epoch == 2
+    assert limiter._limiter_accounting_generation == 1
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert calls == ["clock"]
+    assert limiter._limiter_clock_epoch == 2
+
+
+@pytest.mark.asyncio
+async def test_accounting_poison_never_adds_a_corrupted_generation() -> None:
+    calls: list[str] = []
+
+    class HostileInt(int):
+        def __add__(self, other: object) -> int:
+            calls.append("add")
+            raise AssertionError("fixture-secret")
+
+    limiter = new_limiter(FakeTime())
+    object.__setattr__(limiter, "_limiter_accounting_generation", HostileInt(1))
+
+    with pytest.raises(ConfigurationError) as captured:
+        await limiter.snapshot()
+    assert calls == []
+    assert "fixture-secret" not in str(captured.value)
+    assert limiter._accounting_poisoned is True
+    assert type(limiter._limiter_accounting_generation) is int
+    assert limiter._limiter_accounting_generation == 2
+    assert limiter._limiter_clock_epoch == 1
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert calls == []
+    assert limiter._limiter_accounting_generation == 2
+
+
+@pytest.mark.asyncio
+async def test_clock_poison_never_adds_callback_corrupted_epoch() -> None:
+    canary: list[str] = []
+    clock_calls = 0
+    holder: list[object] = []
+
+    class HostileInt(int):
+        def __add__(self, other: object) -> int:
+            canary.append("add")
+            raise AssertionError("fixture-secret")
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        object.__setattr__(holder[0], "_limiter_clock_epoch", HostileInt(1))
+        raise RuntimeError("fixture-secret")
+
+    limiter = limiter_api().WeightedRateLimiter(scope(), policy=tiny_policy(), monotonic=clock)
+    holder.append(limiter)
+
+    with pytest.raises(ConfigurationError) as captured:
+        await limiter.snapshot()
+    assert canary == []
+    assert clock_calls == 1
+    assert "fixture-secret" not in str(captured.value)
+    assert limiter._clock_poisoned is True
+    assert type(limiter._limiter_clock_epoch) is int
+    assert limiter._limiter_clock_epoch == 2
+    assert limiter._limiter_accounting_generation == 1
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert canary == []
+    assert clock_calls == 1
+    assert limiter._limiter_clock_epoch == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("generation", [0, -1])
+async def test_accounting_poison_canonicalizes_nonpositive_generation(generation: int) -> None:
+    limiter = new_limiter(FakeTime())
+    object.__setattr__(limiter, "_limiter_accounting_generation", generation)
+
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert limiter._accounting_poisoned is True
+    assert type(limiter._limiter_accounting_generation) is int
+    assert limiter._limiter_accounting_generation == 2
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert limiter._limiter_accounting_generation == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("epoch", [0, -1])
+async def test_clock_poison_canonicalizes_callback_nonpositive_epoch(epoch: int) -> None:
+    clock_calls = 0
+    holder: list[object] = []
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        object.__setattr__(holder[0], "_limiter_clock_epoch", epoch)
+        raise RuntimeError("fixture-secret")
+
+    limiter = limiter_api().WeightedRateLimiter(scope(), policy=tiny_policy(), monotonic=clock)
+    holder.append(limiter)
+
+    with pytest.raises(ConfigurationError) as captured:
+        await limiter.snapshot()
+    assert "fixture-secret" not in str(captured.value)
+    assert limiter._clock_poisoned is True
+    assert type(limiter._limiter_clock_epoch) is int
+    assert limiter._limiter_clock_epoch == 2
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert clock_calls == 1
+    assert limiter._limiter_clock_epoch == 2
+
+
+@pytest.mark.asyncio
+async def test_clock_callback_corrupting_last_sample_poisoned_before_comparison() -> None:
+    calls: list[str] = []
+    holder: list[object] = []
+
+    class HostileFloat(float):
+        def __gt__(self, other: object) -> bool:
+            calls.append("compare")
+            raise AssertionError("fixture-secret")
+
+    def clock() -> float:
+        calls.append("clock")
+        object.__setattr__(holder[0], "_last_now", HostileFloat(0.0))
+        return 1.0
+
+    limiter = limiter_api().WeightedRateLimiter(scope(), policy=tiny_policy(), monotonic=clock)
+    holder.append(limiter)
+
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert calls == ["clock"]
+    assert limiter._accounting_poisoned is True
+    assert limiter._limiter_accounting_generation == 2
+    assert limiter._limiter_clock_epoch == 1
+    with pytest.raises(ConfigurationError):
+        await limiter.snapshot()
+    assert calls == ["clock"]
+    assert limiter._limiter_accounting_generation == 2
+
+
+@pytest.mark.asyncio
+async def test_live_leaf_subclasses_poison_accounting_once_without_callbacks() -> None:
+    calls: list[str] = []
+
+    class HostileFloat(float):
+        def __lt__(self, other: object) -> bool:
+            calls.append("float-lt")
+            raise AssertionError("fixture-secret")
+
+        def __gt__(self, other: object) -> bool:
+            calls.append("float-gt")
+            raise AssertionError("fixture-secret")
+
+    class HostileInt(int):
+        def __le__(self, other: object) -> bool:
+            calls.append("int-le")
+            raise AssertionError("fixture-secret")
+
+        def __ne__(self, other: object) -> bool:
+            calls.append("int-ne")
+            raise AssertionError("fixture-secret")
+
+    first = new_limiter(FakeTime())
+    await first.acquire(request())
+    object.__setattr__(first, "_last_now", HostileFloat(0.0))
+    second = new_limiter(FakeTime(), capacity=5)
+    await second.acquire(request("place_order", {7: 1}))
+    indexed = next(row for row in second._event_index.values() if row.product_id == 7)
+    object.__setattr__(indexed, "product_id", HostileInt(7))
+
+    for limiter in (first, second):
+        with pytest.raises(ConfigurationError):
+            await limiter.snapshot()
+        assert limiter._accounting_poisoned is True
+        assert limiter._limiter_accounting_generation == 2
+        assert limiter._limiter_clock_epoch == 1
+        with pytest.raises(ConfigurationError):
+            await limiter.snapshot()
+        assert limiter._limiter_accounting_generation == 2
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -320,6 +689,19 @@ def test_registry_rejects_second_independent_limiter_for_same_scope() -> None:
         registry.register_existing(selected_scope, second)
     assert "fixture-api-key-must-not-appear" not in str(caught.value)
     assert "fixture-api-key-must-not-appear" not in repr(caught.value.to_dict())
+
+
+def test_registry_preserves_existing_weighted_limiter_subclass_compatibility() -> None:
+    api = limiter_api()
+
+    class InstrumentedLimiter(api.WeightedRateLimiter):
+        pass
+
+    selected_scope = scope(external_id="subclass-compatible")
+    limiter = InstrumentedLimiter(selected_scope, policy=tiny_policy())
+    registry = api.LimiterRegistry()
+
+    assert registry.register_existing(selected_scope, limiter) is limiter
 
 
 def test_phase_one_durable_coordination_always_fails_closed() -> None:

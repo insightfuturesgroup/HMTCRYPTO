@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
+from uuid import UUID
 
 from hmt_crypto.errors import ConfigurationError
 
@@ -117,14 +118,14 @@ class CoordinationMode(StrEnum):
 
 def strict_positive_int(value: object, *, name: str) -> int:
     """Parse an actual positive integer, rejecting booleans and coercion."""
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if type(value) is not int or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
 
 
 def strict_nonnegative_int(value: object, *, name: str) -> int:
     """Parse an actual nonnegative integer, rejecting booleans and coercion."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise ValueError(f"{name} must be a nonnegative integer")
     return value
 
@@ -178,6 +179,12 @@ class RateLimitPolicy:
     rest_window_seconds: int
     product_operations_per_second: int
     route_weights: Mapping[RateLimitRoute, int]
+    _route_weight_items: tuple[tuple[RateLimitRoute, int], ...] = field(
+        init=False, repr=False, compare=False
+    )
+    _route_weights_owner: Mapping[RateLimitRoute, int] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if type(self.version) is not str or not self.version.strip():
@@ -205,7 +212,25 @@ class RateLimitPolicy:
             route not in copied for route in _RATE_LIMIT_ROUTES
         ):
             raise ValueError("route_weights must cover the complete allowlisted route registry")
-        object.__setattr__(self, "route_weights", MappingProxyType(copied))
+        items = tuple((route, copied[route]) for route in _RATE_LIMIT_ROUTES)
+        owner = MappingProxyType(dict(items))
+        object.__setattr__(self, "route_weights", owner)
+        object.__setattr__(self, "_route_weight_items", items)
+        object.__setattr__(self, "_route_weights_owner", owner)
+
+    def _attested_route_weights(self) -> tuple[tuple[RateLimitRoute, int], ...]:
+        items = self._route_weight_items
+        if self.route_weights is not self._route_weights_owner or type(items) is not tuple:
+            raise ValueError("route weight provenance is invalid")
+        if len(items) != len(_RATE_LIMIT_ROUTES):
+            raise ValueError("route weight provenance is incomplete")
+        for expected, item in zip(_RATE_LIMIT_ROUTES, items, strict=True):
+            if type(item) is not tuple or len(item) != 2:
+                raise ValueError("route weight provenance is invalid")
+            route, weight = item
+            if route is not expected or type(weight) is not int or weight <= 0:
+                raise ValueError("route weight provenance is invalid")
+        return items
 
     def capacity_for(self, region: str) -> int:
         """Return the documented weighted quota for one region."""
@@ -218,7 +243,12 @@ class RateLimitPolicy:
         canonical_route = _canonical_rate_route(route)
         if canonical_route is None:
             raise ConfigurationError(context={"operation": "rate_limit_weight"})
-        return self.route_weights[canonical_route]
+        try:
+            return next(
+                weight for member, weight in self._attested_route_weights() if member is route
+            )
+        except (StopIteration, ValueError):
+            raise ConfigurationError(context={"operation": "rate_limit_weight"}) from None
 
 
 DELTA_RATE_LIMIT_POLICY = RateLimitPolicy(
@@ -237,6 +267,11 @@ class RateRequest:
 
     route: RateLimitRoute
     product_operations: Mapping[int, int] = field(default_factory=dict)
+    _route_owner: RateLimitRoute = field(init=False, repr=False, compare=False)
+    _product_operation_items: tuple[tuple[int, int], ...] = field(
+        init=False, repr=False, compare=False
+    )
+    _product_operations_owner: Mapping[int, int] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         route = _canonical_rate_route(self.route)
@@ -253,8 +288,172 @@ class RateRequest:
             raise ValueError("matching-engine write routes require product operations")
         if route in _CANCELLATION_ROUTES and copied:
             raise ValueError("cancel routes are exempt from product operations")
+        items = tuple(sorted(copied.items()))
+        owner = MappingProxyType(dict(items))
         object.__setattr__(self, "route", route)
-        object.__setattr__(self, "product_operations", MappingProxyType(copied))
+        object.__setattr__(self, "product_operations", owner)
+        object.__setattr__(self, "_route_owner", route)
+        object.__setattr__(self, "_product_operation_items", items)
+        object.__setattr__(self, "_product_operations_owner", owner)
+
+
+@dataclass(frozen=True, slots=True)
+class RatePermitAccounting:
+    """Immutable identity-bearing evidence for one limiter grant."""
+
+    limiter_instance_id: UUID
+    limiter_clock_epoch: int
+    limiter_accounting_generation: int
+    acquired_monotonic_ns: int
+    rest_event_id: UUID
+    rest_window_end_monotonic_ns: int
+    product_event_ids: Mapping[int, UUID]
+    product_window_end_monotonic_ns: Mapping[int, int]
+    cooldown_epoch: int
+    _attestation: tuple[
+        UUID,
+        int,
+        int,
+        int,
+        UUID,
+        int,
+        int,
+        tuple[tuple[int, UUID], ...],
+        tuple[tuple[int, int], ...],
+    ] = field(init=False, repr=False, compare=False)
+    _map_owners: tuple[Mapping[int, UUID], Mapping[int, int]] = field(
+        init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        if type(self.limiter_instance_id) is not UUID or self.limiter_instance_id.int == 0:
+            raise ValueError("limiter_instance_id must be an exact nonzero UUID")
+        if type(self.rest_event_id) is not UUID or self.rest_event_id.int == 0:
+            raise ValueError("rest_event_id must be an exact nonzero UUID")
+        for name, value in (
+            ("limiter_clock_epoch", self.limiter_clock_epoch),
+            ("limiter_accounting_generation", self.limiter_accounting_generation),
+        ):
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} must be an exact positive integer")
+        for name, value in (
+            ("acquired_monotonic_ns", self.acquired_monotonic_ns),
+            ("cooldown_epoch", self.cooldown_epoch),
+        ):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be an exact nonnegative integer")
+        if (
+            type(self.rest_window_end_monotonic_ns) is not int
+            or self.rest_window_end_monotonic_ns <= self.acquired_monotonic_ns
+        ):
+            raise ValueError("REST window deadline must follow acquisition")
+        if type(self.product_event_ids) is not dict:
+            raise ValueError("product_event_ids must be an exact dictionary")
+        if type(self.product_window_end_monotonic_ns) is not dict:
+            raise ValueError("product deadlines must be an exact dictionary")
+
+        event_ids: dict[int, UUID] = {}
+        for product_id, event_id in self.product_event_ids.items():
+            if type(product_id) is not int or product_id <= 0:
+                raise ValueError("product IDs must be exact positive integers")
+            if type(event_id) is not UUID or event_id.int == 0:
+                raise ValueError("product event IDs must be exact nonzero UUIDs")
+            event_ids[product_id] = event_id
+        deadlines: dict[int, int] = {}
+        for product_id, deadline in self.product_window_end_monotonic_ns.items():
+            if type(product_id) is not int or product_id <= 0:
+                raise ValueError("product IDs must be exact positive integers")
+            if type(deadline) is not int or deadline <= self.acquired_monotonic_ns:
+                raise ValueError("product deadlines must follow acquisition")
+            deadlines[product_id] = deadline
+        if set(event_ids) != set(deadlines):
+            raise ValueError("product event and deadline keys must match")
+        all_event_ids = [self.rest_event_id, *event_ids.values()]
+        if len(set(all_event_ids)) != len(all_event_ids):
+            raise ValueError("quota event IDs must be unique")
+        event_items = tuple(sorted(event_ids.items()))
+        deadline_items = tuple(sorted(deadlines.items()))
+        event_owner = MappingProxyType(dict(event_items))
+        deadline_owner = MappingProxyType(dict(deadline_items))
+        attestation = (
+            self.limiter_instance_id,
+            self.limiter_clock_epoch,
+            self.limiter_accounting_generation,
+            self.acquired_monotonic_ns,
+            self.rest_event_id,
+            self.rest_window_end_monotonic_ns,
+            self.cooldown_epoch,
+            event_items,
+            deadline_items,
+        )
+        object.__setattr__(self, "product_event_ids", event_owner)
+        object.__setattr__(self, "product_window_end_monotonic_ns", deadline_owner)
+        object.__setattr__(self, "_attestation", attestation)
+        object.__setattr__(self, "_map_owners", (event_owner, deadline_owner))
+
+    def _defensive_copy(self) -> RatePermitAccounting:
+        attestation = self._attestation
+        owners = self._map_owners
+        if type(attestation) is not tuple or len(attestation) != 9:
+            raise ValueError("accounting attestation is invalid")
+        if type(owners) is not tuple or len(owners) != 2:
+            raise ValueError("accounting map provenance is invalid")
+        if (
+            self.product_event_ids is not owners[0]
+            or self.product_window_end_monotonic_ns is not owners[1]
+        ):
+            raise ValueError("accounting map provenance is invalid")
+        event_items, deadline_items = attestation[7], attestation[8]
+        for index, items in enumerate((event_items, deadline_items)):
+            if type(items) is not tuple:
+                raise ValueError("accounting map attestation is invalid")
+            previous = 0
+            for item in items:
+                if type(item) is not tuple or len(item) != 2:
+                    raise ValueError("accounting map attestation is invalid")
+                product_id, value = item
+                if type(product_id) is not int or product_id <= previous:
+                    raise ValueError("accounting map attestation is invalid")
+                if index == 0:
+                    if type(value) is not UUID or value.int == 0:
+                        raise ValueError("accounting map attestation is invalid")
+                elif type(value) is not int:
+                    raise ValueError("accounting map attestation is invalid")
+                previous = product_id
+        values = (
+            self.limiter_instance_id,
+            self.limiter_clock_epoch,
+            self.limiter_accounting_generation,
+            self.acquired_monotonic_ns,
+            self.rest_event_id,
+            self.rest_window_end_monotonic_ns,
+            self.cooldown_epoch,
+        )
+        RatePermitAccounting(
+            limiter_instance_id=attestation[0],
+            limiter_clock_epoch=attestation[1],
+            limiter_accounting_generation=attestation[2],
+            acquired_monotonic_ns=attestation[3],
+            rest_event_id=attestation[4],
+            rest_window_end_monotonic_ns=attestation[5],
+            product_event_ids=dict(event_items),
+            product_window_end_monotonic_ns=dict(deadline_items),
+            cooldown_epoch=attestation[6],
+        )
+        copied = RatePermitAccounting(
+            limiter_instance_id=values[0],
+            limiter_clock_epoch=values[1],
+            limiter_accounting_generation=values[2],
+            acquired_monotonic_ns=values[3],
+            rest_event_id=values[4],
+            rest_window_end_monotonic_ns=values[5],
+            product_event_ids=dict(event_items),
+            product_window_end_monotonic_ns=dict(deadline_items),
+            cooldown_epoch=values[6],
+        )
+        if values != attestation[:7]:
+            raise ValueError("accounting scalar provenance is invalid")
+        return copied
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +463,7 @@ class RatePermit:
     acquired_at: float
     rest_weight: int
     product_operations: Mapping[int, int]
+    accounting: RatePermitAccounting | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -283,6 +483,10 @@ class RatePermit:
             for product_id, count in self.product_operations.items()
         }
         object.__setattr__(self, "product_operations", MappingProxyType(copied))
+        if self.accounting is not None:
+            if type(self.accounting) is not RatePermitAccounting:
+                raise ValueError("accounting must be exact RatePermitAccounting evidence")
+            object.__setattr__(self, "accounting", self.accounting._defensive_copy())
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +584,7 @@ __all__ = [
     "RateLimitScope",
     "RateLimitSnapshot",
     "RatePermit",
+    "RatePermitAccounting",
     "RateRequest",
     "ScopeKind",
     "parse_rate_limit_reset_ms",

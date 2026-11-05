@@ -7,6 +7,9 @@ from dataclasses import fields
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
+from importlib import import_module
+from types import MappingProxyType
+from uuid import UUID
 
 import pytest
 from rate_limit_test_support import limiter_api, request, scope
@@ -397,6 +400,41 @@ def test_rate_request_snapshots_caller_mapping_and_is_immutable() -> None:
         rate_request.product_operations[7] = 3
 
 
+def test_rate_request_rejects_integer_subclasses_without_callbacks() -> None:
+    calls: list[str] = []
+
+    class HostileInt(int):
+        def __le__(self, other: object) -> bool:
+            calls.append("le")
+            raise AssertionError("fixture-secret")
+
+        def __hash__(self) -> int:
+            calls.append("hash")
+            raise AssertionError("fixture-secret")
+
+    class EmittedMapping(Mapping[object, object]):
+        def __getitem__(self, key: object) -> object:
+            raise KeyError(key)
+
+        def __iter__(self) -> Iterator[object]:
+            return iter(())
+
+        def __len__(self) -> int:
+            return 1
+
+        def items(self) -> object:
+            return ((HostileInt(7), 1),)
+
+    with pytest.raises(ValueError):
+        limiter_api().RateRequest(
+            route=limiter_api().RateLimitRoute.RATE_LIMIT_QUOTA,
+            product_operations=EmittedMapping(),
+        )
+    with pytest.raises(ValueError):
+        request(products={7: HostileInt(1)})
+    assert calls == []
+
+
 @pytest.mark.parametrize("route", ["place_order", "modify_order", "batch_orders"])
 def test_matching_engine_writes_cannot_bypass_product_operation_budget(route: str) -> None:
     api = limiter_api()
@@ -487,3 +525,96 @@ def test_compatibility_facade_exports_retry_and_limiter_contracts() -> None:
     assert api.RetryPolicy.__module__.endswith("retry_policy")
     assert api.RateLimitPolicy.__module__.endswith("rate_limit_policy")
     assert Decimal(api.DEFAULT_RETRY_POLICY.base_delay_seconds) > 0
+
+
+def test_rate_permit_keeps_legacy_field_order_and_facade_surface() -> None:
+    api = limiter_api()
+    assert tuple(field.name for field in fields(api.RatePermit)) == (
+        "acquired_at",
+        "rest_weight",
+        "product_operations",
+        "accounting",
+    )
+    assert api.RatePermit(0.0, 1, {}).accounting is None
+    assert not hasattr(api, "RatePermitAccounting")
+
+
+def _accounting_receipt() -> object:
+    policy = import_module("hmt_crypto.exchange.delta.rate_limit_policy")
+    return policy.RatePermitAccounting(
+        limiter_instance_id=UUID(int=1),
+        limiter_clock_epoch=1,
+        limiter_accounting_generation=1,
+        acquired_monotonic_ns=10,
+        rest_event_id=UUID(int=2),
+        rest_window_end_monotonic_ns=20,
+        product_event_ids={7: UUID(int=3)},
+        product_window_end_monotonic_ns={7: 15},
+        cooldown_epoch=0,
+    )
+
+
+def test_rate_permit_reattests_every_accounting_slot_without_map_callbacks() -> None:
+    policy = import_module("hmt_crypto.exchange.delta.rate_limit_policy")
+    for field_name in (
+        "limiter_instance_id",
+        "limiter_clock_epoch",
+        "limiter_accounting_generation",
+        "acquired_monotonic_ns",
+        "rest_event_id",
+        "rest_window_end_monotonic_ns",
+        "cooldown_epoch",
+    ):
+        receipt = _accounting_receipt()
+        object.__setattr__(receipt, field_name, object())
+        with pytest.raises(ValueError):
+            policy.RatePermit(0.0, 1, {}, receipt)
+
+    calls: list[str] = []
+
+    class HostileDict(dict[object, object]):
+        def keys(self) -> object:
+            calls.append("keys")
+            raise AssertionError("fixture-secret")
+
+        def items(self) -> object:
+            calls.append("items")
+            raise AssertionError("fixture-secret")
+
+        def __iter__(self) -> Iterator[object]:
+            calls.append("iter")
+            raise AssertionError("fixture-secret")
+
+    replacements = (
+        ("product_event_ids", MappingProxyType({7: UUID(int=3)})),
+        ("product_window_end_monotonic_ns", MappingProxyType({7: 15})),
+        ("product_event_ids", MappingProxyType(HostileDict({7: UUID(int=3)}))),
+        ("product_window_end_monotonic_ns", MappingProxyType(HostileDict({7: 15}))),
+    )
+    for field_name, replacement in replacements:
+        receipt = _accounting_receipt()
+        object.__setattr__(receipt, field_name, replacement)
+        with pytest.raises(ValueError):
+            policy.RatePermit(0.0, 1, {}, receipt)
+
+    class HostileInt(int):
+        def __le__(self, other: object) -> bool:
+            calls.append("le")
+            raise AssertionError("fixture-secret")
+
+        def __hash__(self) -> int:
+            calls.append("hash")
+            raise AssertionError("fixture-secret")
+
+    receipt = _accounting_receipt()
+    attestation = receipt._attestation
+    corrupted = (*attestation[:7], ((HostileInt(7), UUID(int=3)),), attestation[8])
+    object.__setattr__(receipt, "_attestation", corrupted)
+    with pytest.raises(ValueError):
+        policy.RatePermit(0.0, 1, {}, receipt)
+    receipt = _accounting_receipt()
+    attestation = receipt._attestation
+    object.__setattr__(receipt, "_attestation", (attestation[0], HostileInt(1), *attestation[2:]))
+    with pytest.raises(ValueError):
+        policy.RatePermit(0.0, 1, {}, receipt)
+    assert calls == []
