@@ -1,0 +1,651 @@
+{
+  "schema_version": "hmt-indicators-golden/v1",
+  "authority_boundary": {
+    "network": "forbidden",
+    "exchange": "forbidden",
+    "database": "forbidden",
+    "archived_runtime_dependency": "forbidden",
+    "fixture_kind": "static_behavioral_contract"
+  },
+  "provenance": {
+    "archive_name": "hmt copy.zip",
+    "archive_sha256": "96e6f61d6d49705d4643fadb012afeedec09a9857589819a0ebd660e7cdb8963",
+    "git_commit": "cae59521639108913037dbc99fd6545d8c86ca3a",
+    "oracle_kind": "archived_hmt_wrapper_plus_vendored_package",
+    "oracle_package": {
+      "name": "technicalindicators",
+      "version": "3.1.0"
+    },
+    "oracle_files": [
+      {
+        "path": "src/lib/indicators.ts",
+        "sha256": "c28375671109b6f416c8e50f04e63f78ead3d0afb42b0cacd308a30c0bf37698",
+        "role": "hmt_wrapper_and_heikin_ashi_implementation"
+      },
+      {
+        "path": "node_modules/technicalindicators/package.json",
+        "sha256": "d0fa9b6e8b5fcf21801ab82a3098764e8185bea9fba3f8e61bafb9abb5863d61",
+        "role": "vendored_oracle_manifest"
+      },
+      {
+        "path": "node_modules/technicalindicators/dist/index.js",
+        "sha256": "83890f53cc855c07e173e6ff27235e952e66d444dafa48b740fab8970092b059",
+        "role": "vendored_oracle_runtime"
+      }
+    ],
+    "reviewed_test_files": [
+      {
+        "path": "src/lib/__tests__/indicatorRegistry.test.ts",
+        "sha256": "c5ceb9d7b91d9aa2b8e1cfedd5123e614c36ee4677d33a2d65f5ff51e9bf4d2a",
+        "coverage": "configuration_only_not_math_oracle"
+      }
+    ],
+    "direct_math_test_files": [],
+    "direct_math_test_status": "absent_from_archive",
+    "extraction_note": "Read-only archive extraction into a disposable local directory; no network or package install."
+  },
+  "normalization": {
+    "undefined_object_fields": "json_null",
+    "numbers": "unrounded_ieee754",
+    "array_warmup": "no_null_padding"
+  },
+  "input_sha256": "0fdbdccfafe72d50888474ab95053dec13775aec408dfcb3d8b657fcf88688c9",
+  "input": {
+    "candles": [
+      {
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "open": 100,
+        "high": 101.2,
+        "low": 99.4,
+        "close": 100.5,
+        "volume": 1000
+      },
+      {
+        "timestamp": "2026-01-02T00:00:00.000Z",
+        "open": 100.7,
+        "high": 102.6,
+        "low": 100.2,
+        "close": 102,
+        "volume": 1120
+      },
+      {
+        "timestamp": "2026-01-03T00:00:00.000Z",
+        "open": 102.1,
+        "high": 102.4,
+        "low": 98.8,
+        "close": 99.25,
+        "volume": 980
+      },
+      {
+        "timestamp": "2026-01-04T00:00:00.000Z",
+        "open": 101.4,
+        "high": 104.2,
+        "low": 100.9,
+        "close": 103.75,
+        "volume": 1250
+      },
+      {
+        "timestamp": "2026-01-05T00:00:00.000Z",
+        "open": 103.8,
+        "high": 105.6,
+        "low": 103.2,
+        "close": 105,
+        "volume": 1320
+      },
+      {
+        "timestamp": "2026-01-06T00:00:00.000Z",
+        "open": 105.1,
+        "high": 105.3,
+        "low": 101.8,
+        "close": 102.2,
+        "volume": 1050
+      },
+      {
+        "timestamp": "2026-01-07T00:00:00.000Z",
+        "open": 104,
+        "high": 107.3,
+        "low": 103.8,
+        "close": 106.8,
+        "volume": 1410
+      },
+      {
+        "timestamp": "2026-01-08T00:00:00.000Z",
+        "open": 106.9,
+        "high": 108.7,
+        "low": 106.2,
+        "close": 108.1,
+        "volume": 1500
+      },
+      {
+        "timestamp": "2026-01-09T00:00:00.000Z",
+        "open": 108.2,
+        "high": 108.4,
+        "low": 103.8,
+        "close": 104.4,
+        "volume": 1190
+      },
+      {
+        "timestamp": "2026-01-10T00:00:00.000Z",
+        "open": 107.5,
+        "high": 110.5,
+        "low": 107.1,
+        "close": 109.9,
+        "volume": 1620
+      }
+    ]
+  },
+  "indicators": [
+    {
+      "indicator": "rsi",
+      "hmt_export": "calculateRSI",
+      "input_fields": [
+        "close"
+      ],
+      "parameters": {
+        "period": 3
+      },
+      "output_fields": [
+        "value"
+      ],
+      "first_ready_input_length": 4,
+      "omitted_prefix_count": 3,
+      "alignment": "compressed_valid_outputs_only",
+      "component_semantics": "all emitted components are numeric",
+      "warmup_probe": {
+        "input_length": 3,
+        "status": "returns",
+        "expected": []
+      },
+      "tolerance": {
+        "absolute": "0.000000001",
+        "relative": "0.000000001"
+      },
+      "expected": [
+        68.57,
+        74.12,
+        46.53,
+        72.11,
+        76.81,
+        44.66,
+        71.38
+      ]
+    },
+    {
+      "indicator": "ema",
+      "hmt_export": "calculateEMA",
+      "input_fields": [
+        "close"
+      ],
+      "parameters": {
+        "period": 3
+      },
+      "output_fields": [
+        "value"
+      ],
+      "first_ready_input_length": 3,
+      "omitted_prefix_count": 2,
+      "alignment": "compressed_valid_outputs_only",
+      "component_semantics": "all emitted components are numeric",
+      "warmup_probe": {
+        "input_length": 2,
+        "status": "returns",
+        "expected": []
+      },
+      "tolerance": {
+        "absolute": "0.000000001",
+        "relative": "0.000000001"
+      },
+      "expected": [
+        100.58333333333333,
+        102.16666666666666,
+        103.58333333333333,
+        102.89166666666667,
+        104.84583333333333,
+        106.47291666666666,
+        105.43645833333333,
+        107.66822916666666
+      ]
+    },
+    {
+      "indicator": "sma",
+      "hmt_export": "calculateSMA",
+      "input_fields": [
+        "close"
+      ],
+      "parameters": {
+        "period": 3
+      },
+      "output_fields": [
+        "value"
+      ],
+      "first_ready_input_length": 3,
+      "omitted_prefix_count": 2,
+      "alignment": "compressed_valid_outputs_only",
+      "component_semantics": "all emitted components are numeric",
+      "warmup_probe": {
+        "input_length": 2,
+        "status": "returns",
+        "expected": []
+      },
+      "tolerance": {
+        "absolute": "0.000000001",
+        "relative": "0.000000001"
+      },
+      "expected": [
+        100.58333333333333,
+        101.66666666666667,
+        102.66666666666667,
+        103.64999999999999,
+        104.66666666666667,
+        105.7,
+        106.43333333333335,
+        107.4666666666667
+      ]
+    },
+    {
+      "indicator": "bollinger_bands",
+      "hmt_export": "calculateBollingerBands",
+      "input_fields": [
+        "close"
+      ],
+      "parameters": {
+        "period": 3,
+        "std_dev": 2
+      },
+      "output_fields": [
+        "upper",
+        "middle",
+        "lower",
+        "pb"
+      ],
+      "first_ready_input_length": 3,
+      "omitted_prefix_count": 2,
+      "alignment": "compressed_valid_outputs_only",
+      "component_semantics": "all emitted components are numeric",
+      "warmup_probe": {
+        "input_length": 2,
+        "status": "returns",
+        "expected": []
+      },
+      "tolerance": {
+        "absolute": "0.000000001",
+        "relative": "0.000000001"
+      },
+      "expected": [
+        {
+          "upper": 102.831789593872,
+          "middle": 100.58333333333333,
+          "lower": 98.33487707279465,
+          "pb": 0.20350027333556067
+        },
+        {
+          "upper": 105.37101846181548,
+          "middle": 101.66666666666667,
+          "lower": 97.96231487151786,
+          "pb": 0.7812007941661542
+        },
+        {
+          "upper": 107.60517746334303,
+          "middle": 102.66666666666667,
+          "lower": 97.72815586999032,
+          "pb": 0.7362385574719889
+        },
+        {
+          "upper": 105.94056033901458,
+          "middle": 103.64999999999999,
+          "lower": 101.3594396609854,
+          "pb": 0.18348356179436304
+        },
+        {
+          "upper": 108.45201855108758,
+          "middle": 104.66666666666667,
+          "lower": 100.88131478224577,
+          "pb": 0.7817879814705377
+        },
+        {
+          "upper": 110.7622788017519,
+          "middle": 105.7,
+          "lower": 100.6377211982481,
+          "pb": 0.7370473944628874
+        },
+        {
+          "upper": 109.49855038201937,
+          "middle": 106.43333333333335,
+          "lower": 103.36811628464733,
+          "pb": 0.16832147592859995
+        },
+        {
+          "upper": 112.0458466029532,
+          "middle": 107.4666666666667,
+          "lower": 102.88748673038019,
+          "pb": 0.7656953174138232
+        }
+      ]
+    },
+    {
+      "indicator": "adx",
+      "hmt_export": "calculateADX",
+      "input_fields": [
+        "high",
+        "low",
+        "close"
+      ],
+      "parameters": {
+        "period": 3
+      },
+      "output_fields": [
+        "adx",
+        "pdi",
+        "mdi"
+      ],
+      "first_ready_input_length": 6,
+      "omitted_prefix_count": 5,
+      "alignment": "compressed_valid_outputs_only",
+      "component_semantics": "all emitted components are numeric",
+      "warmup_probe": {
+        "input_length": 5,
+        "status": "returns",
+        "expected": []
+      },
+      "tolerance": {
+        "absolute": "0.000000001",
+        "relative": "0.000000001"
+      },
+      "expected": [
+        {
+          "adx": 34.98453440148594,
+          "pdi": 23.634336677814836,
+          "mdi": 20.289855072463855
+        },
+        {
+          "adx": 38.3832638981793,
+          "pdi": 30.400504572689957,
+          "mdi": 11.479028697571797
+        },
+        {
+          "adx": 46.11654708427429,
+          "pdi": 36.59615154774713,
+          "mdi": 8.700848571770088
+        },
+        {
+          "adx": 33.63729642580215,
+          "pdi": 21.940384064201773,
+          "mdi": 26.11063341931791
+        },
+        {
+          "adx": 32.694724013770966,
+          "pdi": 27.476493872952215,
+          "mdi": 14.5334170879324
+        }
+      ]
+    },
+    {
+      "indicator": "macd",
+      "hmt_export": "calculateMACD",
+      "input_fields": [
+        "close"
+      ],
+      "parameters": {
+        "fast_period": 3,
+        "slow_period": 5,
+        "signal_period": 2
+      },
+      "output_fields": [
+        "macd",
+        "signal",
+        "histogram"
+      ],
+      "first_ready_input_length": 5,
+      "omitted_prefix_count": 4,
+      "alignment": "compressed_valid_outputs_only",
+      "component_semantics": "signal and histogram are null until the signal seed is available",
+      "warmup_probe": {
+        "input_length": 4,
+        "status": "returns",
+        "expected": []
+      },
+      "tolerance": {
+        "absolute": "0.000000001",
+        "relative": "0.000000001"
+      },
+      "expected": [
+        {
+          "macd": 1.4833333333333343,
+          "signal": null,
+          "histogram": null
+        },
+        {
+          "macd": 0.75833333333334,
+          "signal": 1.1208333333333371,
+          "histogram": -0.36249999999999716
+        },
+        {
+          "macd": 1.1569444444444485,
+          "signal": 1.1449074074074115,
+          "histogram": 0.012037037037037068
+        },
+        {
+          "macd": 1.3136574074074048,
+          "signal": 1.257407407407407,
+          "histogram": 0.05624999999999769
+        },
+        {
+          "macd": 0.530285493827165,
+          "signal": 0.7726594650205791,
+          "histogram": -0.24237397119341408
+        },
+        {
+          "macd": 1.097447273662553,
+          "signal": 0.989184670781895,
+          "histogram": 0.10826260288065792
+        }
+      ]
+    },
+    {
+      "indicator": "stochastic",
+      "hmt_export": "calculateStochastic",
+      "input_fields": [
+        "high",
+        "low",
+        "close"
+      ],
+      "parameters": {
+        "period": 3,
+        "signal_period": 2
+      },
+      "output_fields": [
+        "k",
+        "d"
+      ],
+      "first_ready_input_length": 3,
+      "omitted_prefix_count": 2,
+      "alignment": "compressed_valid_outputs_only",
+      "component_semantics": "d is null until the signal seed is available",
+      "warmup_probe": {
+        "input_length": 2,
+        "status": "returns",
+        "expected": []
+      },
+      "tolerance": {
+        "absolute": "0.000000001",
+        "relative": "0.000000001"
+      },
+      "expected": [
+        {
+          "k": 11.842105263157979,
+          "d": null
+        },
+        {
+          "k": 91.66666666666661,
+          "d": 51.754385964912295
+        },
+        {
+          "k": 91.17647058823538,
+          "d": 91.421568627451
+        },
+        {
+          "k": 27.65957446808511,
+          "d": 59.41802252816024
+        },
+        {
+          "k": 90.9090909090909,
+          "d": 59.28433268858801
+        },
+        {
+          "k": 91.30434782608684,
+          "d": 91.10671936758888
+        },
+        {
+          "k": 12.244897959183833,
+          "d": 51.77462289263534
+        },
+        {
+          "k": 91.04477611940307,
+          "d": 51.644837039293456
+        }
+      ]
+    },
+    {
+      "indicator": "atr",
+      "hmt_export": "calculateATR",
+      "input_fields": [
+        "high",
+        "low",
+        "close"
+      ],
+      "parameters": {
+        "period": 3
+      },
+      "output_fields": [
+        "value"
+      ],
+      "first_ready_input_length": 4,
+      "omitted_prefix_count": 3,
+      "alignment": "compressed_valid_outputs_only",
+      "component_semantics": "all emitted components are numeric",
+      "warmup_probe": {
+        "input_length": 3,
+        "status": "returns",
+        "expected": []
+      },
+      "tolerance": {
+        "absolute": "0.000000001",
+        "relative": "0.000000001"
+      },
+      "expected": [
+        3.650000000000001,
+        3.233333333333331,
+        3.3222222222222206,
+        3.914814814814812,
+        3.4432098765432078,
+        3.8288065843621415,
+        4.585871056241426
+      ]
+    },
+    {
+      "indicator": "heikin_ashi",
+      "hmt_export": "calculateHeikinAshi",
+      "input_fields": [
+        "open",
+        "high",
+        "low",
+        "close"
+      ],
+      "parameters": {},
+      "output_fields": [
+        "open",
+        "high",
+        "low",
+        "close"
+      ],
+      "first_ready_input_length": 1,
+      "omitted_prefix_count": 0,
+      "alignment": "one_output_per_input",
+      "component_semantics": "all emitted components are numeric",
+      "warmup_probe": {
+        "input_length": 0,
+        "status": "throws",
+        "error_name": "TypeError"
+      },
+      "tolerance": {
+        "absolute": "0.000000001",
+        "relative": "0.000000001"
+      },
+      "expected": [
+        {
+          "open": 100.25,
+          "high": 101.2,
+          "low": 99.4,
+          "close": 100.275
+        },
+        {
+          "open": 100.2625,
+          "high": 102.6,
+          "low": 100.2,
+          "close": 101.375
+        },
+        {
+          "open": 100.81875,
+          "high": 102.4,
+          "low": 98.8,
+          "close": 100.6375
+        },
+        {
+          "open": 100.728125,
+          "high": 104.2,
+          "low": 100.728125,
+          "close": 102.5625
+        },
+        {
+          "open": 101.6453125,
+          "high": 105.6,
+          "low": 101.6453125,
+          "close": 104.39999999999999
+        },
+        {
+          "open": 103.02265625,
+          "high": 105.3,
+          "low": 101.8,
+          "close": 103.6
+        },
+        {
+          "open": 103.31132812499999,
+          "high": 107.3,
+          "low": 103.31132812499999,
+          "close": 105.47500000000001
+        },
+        {
+          "open": 104.3931640625,
+          "high": 108.7,
+          "low": 104.3931640625,
+          "close": 107.475
+        },
+        {
+          "open": 105.93408203125,
+          "high": 108.4,
+          "low": 103.8,
+          "close": 106.20000000000002
+        },
+        {
+          "open": 106.06704101562501,
+          "high": 110.5,
+          "low": 106.06704101562501,
+          "close": 108.75
+        }
+      ],
+      "observed_empty_error": "TypeError"
+    }
+  ],
+  "deferred": [],
+  "scope_exclusions": [
+    {
+      "export": "calculateAllIndicators",
+      "reason": "Composite index alignment is separate from the nine direct indicator oracles."
+    },
+    {
+      "export": "getIndicator",
+      "reason": "Routing adds no indicator mathematics beyond the direct exports."
+    }
+  ],
+  "content_sha256": "57b85958f07b776b4cc0cf81fe63ff46f36ac35ddde6fd67c638473a52012372"
+}
