@@ -79,11 +79,12 @@ class _DeltaEnvSource(EnvSettingsSource):
 
     def __call__(self) -> dict[str, Any]:
         values = super().__call__()
-        known = {
-            str(field.validation_alias).lower() for field in self.settings_cls.model_fields.values()
-        }
+        known = {str(field.validation_alias) for field in self.settings_cls.model_fields.values()}
         for name, value in self.env_vars.items():
-            if name.lower().startswith(("delta_", "database_")) and name.lower() not in known:
+            folded = name.upper()
+            if name not in known and (
+                folded in known or folded.startswith(("DELTA_", "DATABASE_"))
+            ):
                 values[name] = SecretStr(value) if value is not None else None
         return _normalize_source_booleans(values)
 
@@ -103,7 +104,19 @@ class _NormalizedSettingsSource(PydanticBaseSettingsSource):
         return self._wrapped.get_field_value(field, field_name)
 
     def __call__(self) -> dict[str, Any]:
-        return _normalize_source_booleans(self._wrapped())
+        values = _normalize_source_booleans(self._wrapped())
+        raw_values = getattr(self._wrapped, "env_vars", None)
+        if type(raw_values) is dict:
+            known = {
+                str(field.validation_alias) for field in self.settings_cls.model_fields.values()
+            }
+            for name, value in raw_values.items():
+                folded = name.upper()
+                if name not in known and (
+                    folded in known or folded.startswith(("DELTA_", "DATABASE_"))
+                ):
+                    values[name] = SecretStr(value) if value is not None else None
+        return values
 
 
 class Settings(BaseSettings):
@@ -120,6 +133,7 @@ class Settings(BaseSettings):
         extra="forbid",
         frozen=True,
         populate_by_name=True,
+        case_sensitive=True,
         hide_input_in_errors=True,
     )
 
@@ -142,11 +156,17 @@ class Settings(BaseSettings):
     delta_india_testnet_api_secret: SecretStr | None = Field(
         default=None, alias="DELTA_INDIA_TESTNET_API_SECRET"
     )
+    delta_india_testnet_credential_file: SecretStr | None = Field(
+        default=None, alias="DELTA_INDIA_TESTNET_CREDENTIAL_FILE"
+    )
     delta_india_prod_api_key: SecretStr | None = Field(
         default=None, alias="DELTA_INDIA_PROD_API_KEY"
     )
     delta_india_prod_api_secret: SecretStr | None = Field(
         default=None, alias="DELTA_INDIA_PROD_API_SECRET"
+    )
+    delta_india_prod_credential_file: SecretStr | None = Field(
+        default=None, alias="DELTA_INDIA_PROD_CREDENTIAL_FILE"
     )
     delta_global_testnet_api_key: SecretStr | None = Field(
         default=None, alias="DELTA_GLOBAL_TESTNET_API_KEY"
@@ -154,11 +174,17 @@ class Settings(BaseSettings):
     delta_global_testnet_api_secret: SecretStr | None = Field(
         default=None, alias="DELTA_GLOBAL_TESTNET_API_SECRET"
     )
+    delta_global_testnet_credential_file: SecretStr | None = Field(
+        default=None, alias="DELTA_GLOBAL_TESTNET_CREDENTIAL_FILE"
+    )
     delta_global_prod_api_key: SecretStr | None = Field(
         default=None, alias="DELTA_GLOBAL_PROD_API_KEY"
     )
     delta_global_prod_api_secret: SecretStr | None = Field(
         default=None, alias="DELTA_GLOBAL_PROD_API_SECRET"
+    )
+    delta_global_prod_credential_file: SecretStr | None = Field(
+        default=None, alias="DELTA_GLOBAL_PROD_CREDENTIAL_FILE"
     )
     production_writes_forbidden: StrictBool = Field(
         default=True, alias="PRODUCTION_WRITES_FORBIDDEN"
@@ -168,6 +194,44 @@ class Settings(BaseSettings):
     )
     database_migration_url: SecretStr | None = Field(default=None, alias="DATABASE_MIGRATION_URL")
     database_single_process: StrictBool = Field(default=True, alias="DATABASE_SINGLE_PROCESS")
+
+    def __init__(self, **values: Any) -> None:
+        """Reject ambiguous init names before the settings source drops one."""
+        ambiguous = False
+        for field_name, field in type(self).model_fields.items():
+            alias = field.validation_alias
+            if (
+                type(alias) is str
+                and alias != field_name
+                and field_name in values
+                and alias in values
+            ):
+                ambiguous = True
+                break
+        if ambiguous:
+            values.clear()
+            details = cast(
+                list[InitErrorDetails],
+                [
+                    {
+                        "type": "value_error",
+                        "loc": (),
+                        "input": None,
+                        "ctx": {
+                            "error": ValueError(
+                                "Settings field and alias must not both be supplied"
+                            )
+                        },
+                    }
+                ],
+            )
+            raise ValidationError.from_exception_data(
+                type(self).__name__, details, hide_input=True
+            ) from None
+        try:
+            super().__init__(**values)
+        finally:
+            values.clear()
 
     @classmethod
     def settings_customise_sources(
@@ -212,6 +276,14 @@ class Settings(BaseSettings):
         return value
 
     @property
+    def selected_credential_file(self) -> SecretStr | None:
+        """Return only the selected slot's optional credential-file path."""
+        value: SecretStr | None = getattr(
+            self, f"{self.selected_credential_slot.lower()}_credential_file"
+        )
+        return value
+
+    @property
     def live_config_ready(self) -> bool:
         # The validator guarantees every LIVE instance meets all configuration gates.
         return self.execution_mode is ExecutionMode.LIVE
@@ -226,12 +298,19 @@ class Settings(BaseSettings):
         if self.database_migration_url is not None:
             database_url(self.database_migration_url)
         key, secret = self.selected_api_key, self.selected_api_secret
+        credential_file = self.selected_credential_file
         if (key is None) != (secret is None):
             raise ValueError("Selected credential slot requires a complete API key/secret pair")
         if any(
             value is not None and not value.get_secret_value().strip() for value in (key, secret)
         ):
             raise ValueError("Selected credentials must not be empty or whitespace")
+        if credential_file is not None and not credential_file.get_secret_value().strip():
+            raise ValueError("Selected credential-file path must not be empty or whitespace")
+        if credential_file is not None and key is not None:
+            raise ValueError(
+                "Selected inline credentials and credential file are mutually exclusive"
+            )
         if self.execution_mode is ExecutionMode.LIVE:
             if not self.delta_live_trading_enabled:
                 raise ValueError("LIVE requires DELTA_LIVE_TRADING_ENABLED=true")
@@ -241,7 +320,7 @@ class Settings(BaseSettings):
                 != "I_UNDERSTAND_THIS_CAN_PLACE_REAL_ORDERS"
             ):
                 raise ValueError("LIVE requires the exact explicit confirmation")
-            if key is None or secret is None:
+            if (key is None or secret is None) and credential_file is None:
                 raise ValueError("LIVE requires credentials in the selected slot")
         override = self.delta_development_rest_base_url
         allow_override = self.delta_allow_development_endpoint_override
@@ -250,6 +329,22 @@ class Settings(BaseSettings):
                 "Development endpoint override requires both URL and explicit enable flag"
             )
         if override is not None:
+            credential_values = (
+                self.delta_india_testnet_api_key,
+                self.delta_india_testnet_api_secret,
+                self.delta_india_testnet_credential_file,
+                self.delta_india_prod_api_key,
+                self.delta_india_prod_api_secret,
+                self.delta_india_prod_credential_file,
+                self.delta_global_testnet_api_key,
+                self.delta_global_testnet_api_secret,
+                self.delta_global_testnet_credential_file,
+                self.delta_global_prod_api_key,
+                self.delta_global_prod_api_secret,
+                self.delta_global_prod_credential_file,
+            )
+            if any(value is not None for value in credential_values):
+                raise ValueError("Development endpoint override forbids real credentials")
             if self.execution_mode is ExecutionMode.LIVE:
                 raise ValueError("Development endpoint override makes LIVE impossible")
             if self.delta_env is not DeltaEnvironment.TESTNET:
@@ -265,6 +360,18 @@ class Settings(BaseSettings):
             except ConfigurationError as error:
                 raise ValueError("Development endpoint override is invalid") from error
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_alias_and_field_name_duplicates(cls, values: Any) -> Any:
+        """Reject ambiguous constructor payloads before Pydantic chooses a winner."""
+        if type(values) is dict:
+            for field_name, field in cls.model_fields.items():
+                alias = field.validation_alias
+                if type(alias) is str and alias != field_name:
+                    if field_name in values and alias in values:
+                        raise ValueError("Settings field and alias must not both be supplied")
+        return values
 
     @model_validator(mode="wrap")
     @classmethod

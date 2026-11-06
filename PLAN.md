@@ -551,9 +551,10 @@ Reduce-only risk-reducing actions remain possible during most halts, subject to 
 
 ### Task 2.7: Credential provider and flat-only rotation
 
-**Planned files:** `exchange/credentials.py`, credential metadata repository, CLI diagnostics and tests.
+**Planned files:** `exchange/{credentials,credential_provider}.py`, credential metadata repository, CLI diagnostics and tests.
 
 - [ ] Implement environment/secret-file `CredentialProvider`; persist only fingerprint/version/account metadata unless a separately reviewed KMS/envelope provider is used.
+- [ ] Own the sealed exact `Task27EnrollmentCapabilityIssuer` in `credential_provider.py`; the B5 `Task27EnrollmentCapabilityIssuerPort` is typing-only. Production composition must reject structural, subclassed, copied, deserialized and tests-only adapters before method lookup, and remain disabled until the exact provider/factory is accepted.
 - [ ] On a changed fingerprint/version, disable entries and require a read-only identity/permission probe plus reconciliation proving no positions, open orders or unresolved operations.
 - [ ] Commit the new metadata version only after flat verification; reset all soak/qualification evidence and require monitoring requalification.
 - [ ] Never expose credential material to the API/browser. Document external secret update/restart steps.

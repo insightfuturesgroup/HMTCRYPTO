@@ -255,6 +255,70 @@ def test_dotenv_loads_selected_credentials(tmp_path: Path) -> None:
     assert config.selected_api_secret.get_secret_value() == "dotenv-secret"
 
 
+@pytest.mark.parametrize("name", ["delta_region", "Delta_Region", "DELTA_region"])
+def test_environment_aliases_are_exact_case_sensitive(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv(name, "global")
+    with pytest.raises(ValidationError):
+        settings()
+
+
+def test_dotenv_aliases_are_exact_case_sensitive(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_text("delta_region=global\n")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=path)
+
+
+@pytest.mark.parametrize("same_value", [True, False])
+def test_constructor_rejects_alias_and_field_name_duplicates(same_value: bool) -> None:
+    with pytest.raises(ValidationError):
+        settings(
+            DELTA_REGION="india",
+            delta_region="india" if same_value else "global",
+        )
+
+
+def test_constructor_duplicate_rejection_observes_no_default_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_bytes(b"\xff")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError):
+        Settings(DELTA_REGION="india", delta_region="global")
+
+
+@pytest.mark.parametrize("credential_slot", ["selected_inline", "selected_file", "other"])
+def test_development_override_rejects_every_real_credential_source(
+    tmp_path: Path, credential_slot: str
+) -> None:
+    values: dict[str, object] = {
+        "DELTA_ALLOW_DEVELOPMENT_ENDPOINT_OVERRIDE": True,
+        "DELTA_DEVELOPMENT_REST_BASE_URL": "http://127.0.0.1:8001",
+    }
+    if credential_slot == "selected_inline":
+        values.update(
+            DELTA_INDIA_TESTNET_API_KEY="dev-key-canary",
+            DELTA_INDIA_TESTNET_API_SECRET="dev-secret-canary",
+        )
+    elif credential_slot == "selected_file":
+        path = tmp_path / "selected.json"
+        path.write_text("{}")
+        values["DELTA_INDIA_TESTNET_CREDENTIAL_FILE"] = str(path)
+    else:
+        values.update(
+            DELTA_INDIA_PROD_API_KEY="other-key-canary",
+            DELTA_INDIA_PROD_API_SECRET="other-secret-canary",
+        )
+    with pytest.raises(ValidationError) as captured:
+        settings(**values)
+    rendered = f"{captured.value!s} {captured.value!r}"
+    assert "dev-secret-canary" not in rendered
+    assert "other-secret-canary" not in rendered
+
+
 def test_settings_cannot_be_mutated_to_bypass_live_gates() -> None:
     config = settings()
     with pytest.raises(ValidationError):

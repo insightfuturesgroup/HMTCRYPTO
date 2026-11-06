@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from typing import Annotated, NoReturn, Self, SupportsIndex, cast
@@ -10,10 +9,26 @@ from uuid import UUID
 
 from pydantic import SecretStr
 
-from hmt_crypto.config import DeltaEnvironment, DeltaRegion, ExecutionMode
+from hmt_crypto.config import DeltaEnvironment, DeltaRegion
 from hmt_crypto.domain import private_primitives as _primitives
 from hmt_crypto.domain.account import AccountRef
 from hmt_crypto.exchange import _credential_validation as _cv
+from hmt_crypto.exchange._credential_lifecycle import (
+    _CURRENTNESS_STATES,
+    _ENROLLMENT_STATES,
+    _PROOF_STATES,
+    _REGISTRY_LOCK,
+    _SIGNER_STATES,
+    _ProofState,
+    _register_proof_state,
+    _register_signer_state,
+    _revoke_signer_state,
+    _SignerState,
+    _try_invalidate_enrollment,
+    _try_invalidate_proof,
+    _try_revalidate_enrollment,
+    _try_revalidate_proof,
+)
 from hmt_crypto.exchange.delta.private_origin import CanonicalPrivateOrigin
 from hmt_crypto.exchange.delta.private_read_wire import (
     _attest_frozen_private_read,
@@ -43,49 +58,6 @@ def _slot_environment(value: object) -> DeltaEnvironment:
     return _cv._exact_two_member_environment(value, _TESTNET_SLOT, _PROD_SLOT)
 
 
-@dataclass(slots=True, repr=False)
-class _SignerState:
-    snapshot: OwnedDeltaSignerSnapshot
-    enrollment: Task27EnrollmentCredentialCurrentnessPort
-    signer: DeltaSigner
-    snapshot_id: UUID
-    credential_slot: IndiaCredentialSlot
-    credential_version: int
-    fingerprint_hint: str
-    account_id: UUID
-    external_user_id: str
-    origin: CanonicalPrivateOrigin
-    environment: DeltaEnvironment
-    mode: ExecutionMode
-    credential_epoch: int
-    current_epoch: int
-    active: bool = True
-
-
-@dataclass(slots=True, repr=False)
-class _ProofState:
-    proof: AccountBindingProofSnapshot
-    currentness: Task27PrivateCredentialCurrentnessPort
-    signer_state: _SignerState
-    proof_id: UUID
-    account: AccountRef
-    origin: CanonicalPrivateOrigin
-    binding_ref: UUID
-    probe_ref: UUID
-    credential_epoch: int
-    proof_epoch: int
-    observed_at: datetime
-    expires_at: datetime
-    current_observed_at: datetime
-    current_epoch: int
-    permission_valid: bool = True
-    active: bool = True
-
-
-_SIGNER_STATES: dict[int, _SignerState] = {}
-_ENROLLMENT_STATES: dict[int, _SignerState] = {}
-_PROOF_STATES: dict[int, _ProofState] = {}
-_CURRENTNESS_STATES: dict[int, _ProofState] = {}
 _CLASSES_CLOSED = False
 
 
@@ -136,7 +108,8 @@ class _OpaqueCredentialAuthority:
 def _signer_state(value: object) -> _SignerState:
     if type(value) is not OwnedDeltaSignerSnapshot:
         _cv._fail()
-    state = _SIGNER_STATES.get(id(value))
+    with _REGISTRY_LOCK:
+        state = _SIGNER_STATES.get(id(value))
     if state is None or state.snapshot is not value:
         _cv._fail()
     return state
@@ -145,7 +118,8 @@ def _signer_state(value: object) -> _SignerState:
 def _proof_state(value: object) -> _ProofState:
     if type(value) is not AccountBindingProofSnapshot:
         _cv._fail()
-    state = _PROOF_STATES.get(id(value))
+    with _REGISTRY_LOCK:
+        state = _PROOF_STATES.get(id(value))
     if state is None or state.proof is not value:
         _cv._fail()
     return state
@@ -154,7 +128,8 @@ def _proof_state(value: object) -> _ProofState:
 def _enrollment_state(value: object) -> _SignerState:
     if type(value) is not Task27EnrollmentCredentialCurrentnessPort:
         _cv._fail()
-    state = _ENROLLMENT_STATES.get(id(value))
+    with _REGISTRY_LOCK:
+        state = _ENROLLMENT_STATES.get(id(value))
     if state is None or state.enrollment is not value:
         _cv._fail()
     return state
@@ -163,7 +138,8 @@ def _enrollment_state(value: object) -> _SignerState:
 def _currentness_state(value: object) -> _ProofState:
     if type(value) is not Task27PrivateCredentialCurrentnessPort:
         _cv._fail()
-    state = _CURRENTNESS_STATES.get(id(value))
+    with _REGISTRY_LOCK:
+        state = _CURRENTNESS_STATES.get(id(value))
     if state is None or state.currentness is not value:
         _cv._fail()
     return state
@@ -171,11 +147,6 @@ def _currentness_state(value: object) -> _ProofState:
 
 def _require_signer(state: _SignerState) -> None:
     if not state.active or state.current_epoch != state.credential_epoch:
-        _cv._fail()
-
-
-def _require_owned_signer(value: object, state: _SignerState) -> None:
-    if value is not state.snapshot or _signer_state(value) is not state:
         _cv._fail()
 
 
@@ -294,26 +265,23 @@ class Task27PrivateCredentialCurrentnessPort(_OpaqueCredentialAuthority):
         expected_credential_version: _primitives.CredentialVersion,
     ) -> AccountBindingProofSnapshot:
         """Revalidate and return the same exact current account proof."""
-        state = _currentness_state(self)
-        _require_owned_signer(signer, state.signer_state)
-        if proof is not state.proof or _proof_state(proof) is not state:
+        try:
+            state = _currentness_state(self)
+        except Exception:
+            state = None
+        result = _try_revalidate_proof(
+            state,
+            signer=signer,
+            proof=proof,
+            expected_account=expected_account,
+            expected_origin=expected_origin,
+            expected_slot=expected_slot,
+            expected_credential_version=expected_credential_version,
+        )
+        del state
+        if result is None:
             _cv._fail()
-        account = _cv._owned_account(expected_account)
-        origin, environment = _cv._exact_origin(expected_origin)
-        version = _cv._exact_int(expected_credential_version)
-        slot_environment = _slot_environment(expected_slot)
-        record = state.signer_state
-        if (
-            not _cv._same_account(account, state.account)
-            or origin is not record.origin
-            or environment is not record.environment
-            or expected_slot is not record.credential_slot
-            or slot_environment is not record.environment
-            or version != record.credential_version
-        ):
-            _cv._fail()
-        _require_proof(state)
-        return proof
+        return result
 
     def invalidate_signature_expired_nonblocking(
         self,
@@ -323,14 +291,19 @@ class Task27PrivateCredentialCurrentnessPort(_OpaqueCredentialAuthority):
         correlation_id: _primitives.ExactUuid,
     ) -> None:
         """Publish terminal signature-expiry invalidation for this pair."""
-        state = _currentness_state(self)
-        _require_owned_signer(signer, state.signer_state)
-        if proof is not state.proof or _proof_state(proof) is not state:
+        try:
+            state = _currentness_state(self)
+        except Exception:
+            state = None
+        invalidated = _try_invalidate_proof(
+            state,
+            signer=signer,
+            proof=proof,
+            correlation_id=correlation_id,
+        )
+        del state
+        if not invalidated:
             _cv._fail()
-        _cv._exact_uuid(correlation_id)
-        _require_proof(state)
-        state.signer_state.active = False
-        state.active = False
 
 
 class Task27EnrollmentCredentialCurrentnessPort(_OpaqueCredentialAuthority):
@@ -349,26 +322,23 @@ class Task27EnrollmentCredentialCurrentnessPort(_OpaqueCredentialAuthority):
         expected_credential_version: _primitives.CredentialVersion,
     ) -> OwnedDeltaSignerSnapshot:
         """Revalidate and return the same exact current signer snapshot."""
-        state = _enrollment_state(self)
-        _require_owned_signer(signer, state)
-        account_id = _cv._exact_uuid(expected_account_id)
-        user = _cv._external_user(expected_external_user_id)
-        origin, environment = _cv._exact_origin(expected_origin)
-        version = _cv._exact_int(expected_credential_version)
-        slot_environment = _slot_environment(expected_slot)
-        record = state
-        if (
-            account_id != record.account_id
-            or user != record.external_user_id
-            or origin is not record.origin
-            or environment is not record.environment
-            or expected_slot is not record.credential_slot
-            or slot_environment is not record.environment
-            or version != record.credential_version
-        ):
+        try:
+            state = _enrollment_state(self)
+        except Exception:
+            state = None
+        result = _try_revalidate_enrollment(
+            state,
+            signer=signer,
+            expected_account_id=expected_account_id,
+            expected_external_user_id=expected_external_user_id,
+            expected_origin=expected_origin,
+            expected_slot=expected_slot,
+            expected_credential_version=expected_credential_version,
+        )
+        del state
+        if result is None:
             _cv._fail()
-        _require_signer(state)
-        return signer
+        return result
 
     def invalidate_enrollment_signature_expired_nonblocking(
         self,
@@ -378,16 +348,51 @@ class Task27EnrollmentCredentialCurrentnessPort(_OpaqueCredentialAuthority):
         correlation_id: _primitives.ExactUuid,
     ) -> None:
         """Publish terminal signature-expiry invalidation for enrollment."""
-        state = _enrollment_state(self)
-        _require_owned_signer(signer, state)
-        if _cv._exact_uuid(expected_account_id) != state.account_id:
+        try:
+            state = _enrollment_state(self)
+        except Exception:
+            state = None
+        invalidated = _try_invalidate_enrollment(
+            state,
+            signer=signer,
+            expected_account_id=expected_account_id,
+            correlation_id=correlation_id,
+        )
+        del state
+        if not invalidated:
             _cv._fail()
-        _cv._exact_uuid(correlation_id)
-        _require_signer(state)
-        state.active = False
 
 
 _CLASSES_CLOSED = True
+
+
+def _try_sign_owned_private_read_at(
+    snapshot: OwnedDeltaSignerSnapshot,
+    request: _FrozenPrivateReadRequestV1,
+    *,
+    timestamp: int,
+) -> SignedAuthHeaders | None:
+    try:
+        state = _signer_state(snapshot)
+        with state.lifecycle_lock:
+            _require_signer(state)
+            if type(request) is not _FrozenPrivateReadRequestV1:
+                _cv._fail()
+            attested = _attest_frozen_private_read(request)
+            if (
+                attested.region is not DeltaRegion.INDIA
+                or attested.environment is not state.environment
+            ):
+                _cv._fail()
+            return state.signer.sign_at(
+                attested.method,
+                timestamp,
+                attested.path,
+                query_string=attested.query_string,
+                payload=attested.payload,
+            )
+    except Exception:
+        return None
 
 
 def _sign_owned_private_read_at(
@@ -397,27 +402,7 @@ def _sign_owned_private_read_at(
     timestamp: int,
 ) -> SignedAuthHeaders:
     """Sign one exact A5-attested private read at an explicit timestamp."""
-    result: SignedAuthHeaders | None = None
-    try:
-        state = _signer_state(snapshot)
-        _require_signer(state)
-        if type(request) is not _FrozenPrivateReadRequestV1:
-            _cv._fail()
-        attested = _attest_frozen_private_read(request)
-        if (
-            attested.region is not DeltaRegion.INDIA
-            or attested.environment is not state.environment
-        ):
-            _cv._fail()
-        result = state.signer.sign_at(
-            attested.method,
-            timestamp,
-            attested.path,
-            query_string=attested.query_string,
-            payload=attested.payload,
-        )
-    except Exception:
-        pass
+    result = _try_sign_owned_private_read_at(snapshot, request, timestamp=timestamp)
     if type(result) is not SignedAuthHeaders:
         _cv._fail()
     return result
@@ -483,8 +468,8 @@ def _issue_enrollment_credential_for_tests(
         credential_epoch=checked_epoch,
         current_epoch=checked_epoch,
     )
-    _SIGNER_STATES[id(snapshot)] = state
-    _ENROLLMENT_STATES[id(enrollment)] = state
+    if not _register_signer_state(state):
+        _cv._fail()
     return snapshot, enrollment
 
 
@@ -543,8 +528,8 @@ def _issue_account_binding_proof_for_tests(
         current_observed_at=observed,
         current_epoch=checked_proof_epoch,
     )
-    _PROOF_STATES[id(proof)] = proof_state
-    _CURRENTNESS_STATES[id(currentness)] = proof_state
+    if not _register_proof_state(proof_state):
+        _cv._fail()
     return proof, currentness
 
 
@@ -571,24 +556,27 @@ def _publish_test_currentness_for_tests(
         _cv._fail()
     if publication == "observed_at":
         state = _currentness_state(currentness)
-        _require_proof(state)
-        observed = _cv._exact_utc(observed_at)
-        if observed < state.current_observed_at:
-            _cv._fail()
-        state.current_observed_at = observed
+        with state.signer_state.lifecycle_lock:
+            _require_proof(state)
+            observed = _cv._exact_utc(observed_at)
+            if observed < state.current_observed_at:
+                _cv._fail()
+            state.current_observed_at = observed
     elif publication in {"proof_epoch", "permission_invalid"}:
         state = _currentness_state(currentness)
-        _require_proof(state)
-        if publication == "proof_epoch":
-            state.current_epoch += 1
-        else:
-            state.permission_valid = False
+        with state.signer_state.lifecycle_lock:
+            _require_proof(state)
+            if publication == "proof_epoch":
+                state.current_epoch += 1
+            else:
+                state.permission_valid = False
     elif publication in {"credential_epoch", "revoked"}:
         signer_state = _owner_signer_state(currentness)
-        _require_signer(signer_state)
-        if publication == "credential_epoch":
-            signer_state.current_epoch += 1
-        else:
-            signer_state.active = False
+        with signer_state.lifecycle_lock:
+            _require_signer(signer_state)
+            if publication == "credential_epoch":
+                signer_state.current_epoch += 1
+            else:
+                _revoke_signer_state(signer_state)
     else:
         _cv._fail()
