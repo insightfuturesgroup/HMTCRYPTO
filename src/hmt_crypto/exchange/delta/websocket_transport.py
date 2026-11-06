@@ -6,12 +6,11 @@ import asyncio
 import logging
 from collections.abc import Awaitable
 from contextlib import AbstractAsyncContextManager
-from enum import StrEnum
 from types import TracebackType
-from typing import Protocol, TypeVar, cast
+from typing import NoReturn, Protocol, SupportsIndex, TypeVar, cast
 
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as websockets_connect
-from websockets.exceptions import InvalidStatus
 
 from hmt_crypto.errors import (
     ConfigurationError,
@@ -22,14 +21,26 @@ from hmt_crypto.exchange.delta.websocket_contracts import (
     WsEndpoint,
     validate_ws_endpoint_for_transport,
 )
-from hmt_crypto.exchange.delta.websocket_subscriptions import (
-    GenerationControlInvalidation,
-    GenerationSubscriptionReceipt,
+from hmt_crypto.exchange.delta.websocket_errors import (
+    WebSocketAttemptAdmissionError,
+    WebSocketHandshakeCategory,
+    WebSocketHandshakeError,
+    classify_open_error,
+)
+from hmt_crypto.exchange.delta.websocket_ports import (
+    InboundKind,
+    StreamControlPort,
+    WsConnection,
+    WsConnector,
+    WsReceivePort,
 )
 
 _MIN_FRAME_BYTES = 1024 * 1024
 _MAX_FRAME_BYTES = 16 * 1024 * 1024
 _CleanupResult = TypeVar("_CleanupResult")
+_PRODUCTION_CONNECTOR_MARKER = object()
+_PRODUCTION_CONNECTION_MARKER = object()
+_RECEIVER_CAPABILITY_MARKER = object()
 
 
 class _CancellationState:
@@ -53,69 +64,13 @@ async def _finish_cleanup(
                 return task.result()
 
 
-class InboundKind(StrEnum):
-    """Bounded frame classifications observed by the later supervisor."""
-
-    TEXT_FRAME = "text_frame"
-    BINARY_FRAME = "binary_frame"
-    HEARTBEAT = "heartbeat"
-    PONG = "pong"
-    DATA = "data"
-
-
-class WsReceivePort(Protocol):
-    """Receive-only actor capability; it cannot send or close."""
-
-    async def recv(self) -> str | bytes:
-        """Receive exactly one physical frame."""
-        ...
-
-
-class WsConnection(Protocol):
-    """Supervisor-private physical connection capability."""
-
-    def receiver(self) -> WsReceivePort:
-        """Issue the sole receive capability exactly once."""
-        ...
-
-    async def send(self, message: str) -> None:
-        """Serialize one text control frame."""
-        ...
-
-    async def close(self, code: int = 1000, reason: str = "") -> None:
-        """Close the physical connection idempotently."""
-        ...
-
-
-class WsConnector(Protocol):
-    """Injected connector interface with synchronous context construction."""
-
-    def open(self, endpoint: WsEndpoint) -> AbstractAsyncContextManager[WsConnection]:
-        """Return one async context without opening eagerly."""
-        ...
-
-
-class StreamControlPort(Protocol):
-    """Neutral actor-to-supervisor control dependency."""
-
-    async def send(self, message: str) -> None:
-        """Send through the supervisor's sole serialized writer."""
-        ...
-
-    def observe_inbound(self, kind: InboundKind) -> None:
-        """Record bounded liveness classification without raw content."""
-        ...
-
-    async def invalidate(self, receipt: GenerationControlInvalidation) -> None:
-        """Invalidate one exact connection generation before repair."""
-        ...
-
-    async def subscriptions_accepted(self, receipt: GenerationSubscriptionReceipt) -> None:
-        """Record one complete desired-set acknowledgement."""
-        ...
+class _AbortTransport(Protocol):
+    def abort(self) -> None: ...
 
 
 class _RawConnection(Protocol):
+    transport: _AbortTransport
+
     async def send(self, message: str) -> None: ...
 
     async def recv(self) -> str | bytes: ...
@@ -129,83 +84,8 @@ class _ConnectFactory(Protocol):
     ) -> AbstractAsyncContextManager[_RawConnection]: ...
 
 
-class WebSocketHandshakeCategory(StrEnum):
-    """Safe reconnect classification for a failed physical open."""
-
-    RATE_LIMIT = "rate_limit"
-    CLIENT_REJECTION = "client_rejection"
-    SERVER_REJECTION = "server_rejection"
-    NETWORK = "network"
-    PROTOCOL = "protocol"
-
-
-class WebSocketHandshakeError(ExchangeDownError):
-    """A redacted handshake failure retaining only status and category."""
-
-    _code = "websocket_handshake_rejected"
-    _message = "WebSocket handshake failed"
-
-    def __init__(
-        self,
-        *,
-        category: WebSocketHandshakeCategory,
-        status_code: int | None,
-    ) -> None:
-        if type(category) is not WebSocketHandshakeCategory or (
-            status_code is not None
-            and (type(status_code) is not int or not 100 <= status_code <= 599)
-        ):
-            raise ValueError("invalid WebSocket handshake classification")
-        self._category = category
-        self._status_code = status_code
-        context: dict[str, object] = {
-            "operation": "websocket_open",
-            "state": category.value,
-        }
-        if status_code is not None:
-            context["http_status"] = status_code
-        super().__init__(context=context)
-
-    @property
-    def category(self) -> WebSocketHandshakeCategory:
-        """Return the bounded reconnect category."""
-        return self._category
-
-    @property
-    def status_code(self) -> int | None:
-        """Return the bounded HTTP status when the handshake produced one."""
-        return self._status_code
-
-    def __reduce__(self) -> tuple[object, tuple[object, ...]]:
-        """Reconstruct copies and pickles from bounded classification only."""
-        return _reconstruct_handshake_error, (self.category, self.status_code)
-
-
-def _reconstruct_handshake_error(
-    category: WebSocketHandshakeCategory,
-    status_code: int | None,
-) -> WebSocketHandshakeError:
-    return WebSocketHandshakeError(category=category, status_code=status_code)
-
-
-# Source-manifest F02: excess connection attempts are reported as HTTP 429.
-def _open_error(error: BaseException) -> WebSocketHandshakeError:
-    status: int | None = None
-    if isinstance(error, InvalidStatus):
-        candidate = error.response.status_code
-        if type(candidate) is int and 100 <= candidate <= 599:
-            status = candidate
-    if status == 429:
-        category = WebSocketHandshakeCategory.RATE_LIMIT
-    elif status is not None and 400 <= status <= 499:
-        category = WebSocketHandshakeCategory.CLIENT_REJECTION
-    elif status is not None and 500 <= status <= 599:
-        category = WebSocketHandshakeCategory.SERVER_REJECTION
-    elif isinstance(error, (OSError, TimeoutError)):
-        category = WebSocketHandshakeCategory.NETWORK
-    else:
-        category = WebSocketHandshakeCategory.PROTOCOL
-    return WebSocketHandshakeError(category=category, status_code=status)
+_OFFICIAL_CONNECT_FACTORY = cast(_ConnectFactory, websockets_connect)
+_OFFICIAL_CONNECTION_TYPE: type[object] = ClientConnection
 
 
 def _transport_error(operation: str) -> ExchangeDownError:
@@ -213,29 +93,68 @@ def _transport_error(operation: str) -> ExchangeDownError:
 
 
 class _ReceiveCapability:
-    __slots__ = ("_connection",)
+    __slots__ = ("_connection", "_issuance_marker", "_session_claimed")
 
     def __init__(self, connection: _DeltaWsConnection) -> None:
         self._connection = connection
+        self._issuance_marker = _RECEIVER_CAPABILITY_MARKER
+        self._session_claimed = False
+
+    def __copy__(self) -> NoReturn:
+        raise TypeError("WebSocket receivers cannot be copied")
+
+    def __deepcopy__(self, _memo: dict[int, object]) -> NoReturn:
+        raise TypeError("WebSocket receivers cannot be copied")
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("WebSocket receivers cannot be serialized")
+
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> NoReturn:
+        raise TypeError("WebSocket receivers cannot be serialized")
 
     async def recv(self) -> str | bytes:
         return await self._connection._recv()
 
 
 class _DeltaWsConnection:
-    __slots__ = ("_close_task", "_raw", "_receiver_issued", "_send_lock")
+    __slots__ = (
+        "_close_task",
+        "_owner_issued",
+        "_ownership_marker",
+        "_raw",
+        "_issued_receiver",
+        "_receiver_issued",
+        "_send_lock",
+    )
 
-    def __init__(self, raw: _RawConnection) -> None:
+    def __init__(self, raw: _RawConnection, *, ownership_marker: object | None) -> None:
         self._raw = raw
+        self._ownership_marker = ownership_marker
+        self._owner_issued = False
+        self._issued_receiver: _ReceiveCapability | None = None
         self._send_lock = asyncio.Lock()
         self._receiver_issued = False
         self._close_task: asyncio.Task[None] | None = None
+
+    def __copy__(self) -> NoReturn:
+        raise TypeError("WebSocket connections cannot be copied")
+
+    def __deepcopy__(self, _memo: dict[int, object]) -> NoReturn:
+        raise TypeError("WebSocket connections cannot be copied")
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("WebSocket connections cannot be serialized")
+
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> NoReturn:
+        raise TypeError("WebSocket connections cannot be serialized")
 
     def receiver(self) -> WsReceivePort:
         if self._receiver_issued:
             raise ConfigurationError(context={"operation": "websocket_receiver_claim"})
         self._receiver_issued = True
-        return _ReceiveCapability(self)
+        receiver = _ReceiveCapability(self)
+        self._issued_receiver = receiver
+        return receiver
 
     def _closing(self) -> bool:
         return self._close_task is not None
@@ -303,11 +222,36 @@ class _DeltaWsConnection:
 
 
 class _ConnectionContext(AbstractAsyncContextManager[WsConnection]):
-    __slots__ = ("_connector", "_connection", "_endpoint", "_entered", "_manager")
+    __slots__ = (
+        "_attempts",
+        "_connector",
+        "_connection",
+        "_endpoint",
+        "_entered",
+        "_manager",
+    )
 
-    def __init__(self, connector: DeltaWebsocketsConnector, endpoint: WsEndpoint) -> None:
+    def __init__(
+        self,
+        connector: DeltaWebsocketsConnector,
+        endpoint: WsEndpoint,
+        *,
+        attempts: object,
+    ) -> None:
+        from hmt_crypto.market_data.connection_attempts import ConnectionAttemptGovernor
+
+        if not (
+            _is_owned_physical_connector(connector)
+            and type(endpoint) is WsEndpoint
+            and type(attempts) is ConnectionAttemptGovernor
+            and endpoint.region == attempts.region
+            and endpoint.environment == attempts.environment
+        ):
+            del connector, endpoint, attempts
+            raise TypeError("physical WebSocket context dependencies are invalid") from None
         self._connector = connector
         self._endpoint = endpoint
+        self._attempts = attempts
         self._entered = False
         self._manager: AbstractAsyncContextManager[_RawConnection] | None = None
         self._connection: _DeltaWsConnection | None = None
@@ -317,6 +261,23 @@ class _ConnectionContext(AbstractAsyncContextManager[WsConnection]):
             raise ConfigurationError(context={"operation": "websocket_open"})
         self._entered = True
         selected = validate_ws_endpoint_for_transport(self._endpoint)
+        attempts = self._attempts
+        del self._attempts
+        from hmt_crypto.market_data.connection_attempts import ConnectionAttemptGovernor
+
+        if not (
+            type(attempts) is ConnectionAttemptGovernor
+            and selected.region == attempts.region
+            and selected.environment == attempts.environment
+        ):
+            del attempts
+            raise WebSocketAttemptAdmissionError from None
+        try:
+            await attempts.consume_physical_open_attempt()
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            raise WebSocketAttemptAdmissionError from None
         try:
             manager = self._connector._connect_factory(
                 selected.url,
@@ -331,6 +292,10 @@ class _ConnectionContext(AbstractAsyncContextManager[WsConnection]):
             )
             self._manager = manager
             raw = await manager.__aenter__()
+            if _is_owned_physical_connector(self._connector) and (
+                type(raw) is not _OFFICIAL_CONNECTION_TYPE
+            ):
+                raise TypeError("unexpected physical WebSocket connection")
         except asyncio.CancelledError as error:
             cleanup_manager = self._manager
             if cleanup_manager is not None:
@@ -345,11 +310,28 @@ class _ConnectionContext(AbstractAsyncContextManager[WsConnection]):
                     pass
                 self._manager = None
             raise
-        except Exception as error:
-            mapped = _open_error(error)
+        except BaseException as error:
+            cleanup_manager = self._manager
+            if cleanup_manager is not None:
+                cancellation = _CancellationState()
+                try:
+                    await _finish_cleanup(
+                        cleanup_manager.__aexit__(type(error), error, error.__traceback__),
+                        cancellation,
+                    )
+                except BaseException:
+                    pass
+                self._manager = None
+                if cancellation.pending:
+                    del error
+                    raise asyncio.CancelledError from None
+            mapped = classify_open_error(error)
             del error
             raise mapped from None
-        self._connection = _DeltaWsConnection(raw)
+        marker = (
+            _PRODUCTION_CONNECTION_MARKER if _is_owned_physical_connector(self._connector) else None
+        )
+        self._connection = _DeltaWsConnection(raw, ownership_marker=marker)
         return self._connection
 
     async def __aexit__(
@@ -396,6 +378,8 @@ class _ConnectionContext(AbstractAsyncContextManager[WsConnection]):
 class DeltaWebsocketsConnector:
     """One-shot injected websockets 17.x adapter with no reconnect iterator."""
 
+    __slots__ = ("_connect_factory", "_library_logger", "_max_size", "_ownership_marker")
+
     def __init__(
         self,
         *,
@@ -405,10 +389,9 @@ class DeltaWebsocketsConnector:
         if type(max_size) is not int or not _MIN_FRAME_BYTES <= max_size <= _MAX_FRAME_BYTES:
             raise ConfigurationError(context={"operation": "configure_websocket_transport"})
         self._max_size = max_size
+        self._ownership_marker = _PRODUCTION_CONNECTOR_MARKER if connect_factory is None else None
         self._connect_factory = (
-            cast(_ConnectFactory, websockets_connect)
-            if connect_factory is None
-            else connect_factory
+            _OFFICIAL_CONNECT_FACTORY if connect_factory is None else connect_factory
         )
         self._library_logger = logging.Logger(
             "hmt_crypto.websocket.library", level=logging.CRITICAL
@@ -420,9 +403,38 @@ class DeltaWebsocketsConnector:
         """Return the dedicated disabled logger passed to the library."""
         return self._library_logger
 
-    def open(self, endpoint: WsEndpoint) -> AbstractAsyncContextManager[WsConnection]:
-        """Return one single-use async context; opening occurs on entry."""
-        return _ConnectionContext(self, endpoint)
+    def open(
+        self,
+        endpoint: WsEndpoint,
+        *,
+        attempts: object,
+    ) -> AbstractAsyncContextManager[WsConnection]:
+        """Bind exact admission for consumption immediately before the factory."""
+        from hmt_crypto.market_data.connection_attempts import ConnectionAttemptGovernor
+
+        valid = (
+            _is_owned_physical_connector(self)
+            and type(endpoint) is WsEndpoint
+            and type(attempts) is ConnectionAttemptGovernor
+            and endpoint.region == attempts.region
+            and endpoint.environment == attempts.environment
+        )
+        if not valid:
+            del endpoint, attempts
+            raise TypeError("physical WebSocket admission dependencies are invalid") from None
+        return _ConnectionContext(self, endpoint, attempts=attempts)
+
+
+def _is_owned_physical_connector(value: object) -> bool:
+    """Return whether composition created the exact default connector."""
+    try:
+        return (
+            type(value) is DeltaWebsocketsConnector
+            and value._ownership_marker is _PRODUCTION_CONNECTOR_MARKER
+            and value._connect_factory is _OFFICIAL_CONNECT_FACTORY
+        )
+    except BaseException:
+        return False
 
 
 __all__ = [
@@ -431,6 +443,7 @@ __all__ = [
     "StreamControlPort",
     "WebSocketHandshakeCategory",
     "WebSocketHandshakeError",
+    "WebSocketAttemptAdmissionError",
     "WsConnection",
     "WsConnector",
     "WsReceivePort",

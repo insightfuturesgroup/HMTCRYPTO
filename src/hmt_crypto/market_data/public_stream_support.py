@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any
 
 from hmt_crypto.errors import ExchangeProtocolError
+from hmt_crypto.exchange.delta.websocket_public_parsers import PublicParseContext
 from hmt_crypto.exchange.delta.websocket_subscriptions import (
     DesiredSubscriptions,
     WsSubscription,
@@ -117,6 +119,45 @@ def generation_result(
         observations_applied=observations_applied,
         desired_revision=desired_revision,
     )
+
+
+def parse_context(
+    *,
+    binding: PublicCatalogueBinding | None,
+    generation: PublicConnectionGeneration,
+    local_sequence: int,
+    received_at: datetime,
+) -> PublicParseContext:
+    """Build the exact parser context or fail closed without a binding."""
+    if binding is None:
+        raise ExchangeProtocolError(
+            context={"operation": "public_catalogue_binding", "scope": "public"}
+        )
+    return PublicParseContext(
+        catalogue=binding.catalogue,
+        catalogue_snapshot_id=binding.catalogue_snapshot_id,
+        connection_generation=generation.connection_generation,
+        local_sequence_start=local_sequence,
+        received_at=received_at,
+        spot_asset_ids=binding.spot_asset_ids,
+    )
+
+
+async def stop_task(task: asyncio.Task[None] | None) -> None:
+    """Cancel and observe one module-owned liveness task before returning."""
+    if task is None:
+        return
+    current = asyncio.current_task()
+    cancellation_count = current.cancelling() if current is not None else 0
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        if current is not None and current.cancelling() > cancellation_count:
+            raise
+    except BaseException:
+        return
 
 
 def require_binding(

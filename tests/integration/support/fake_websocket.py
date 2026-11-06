@@ -14,6 +14,7 @@ class FakeWebSocket:
         self.incoming = deque(incoming)
         self.sent: list[str] = []
         self.closed = False
+        self.transport = self
 
     async def send(self, message: str) -> None:
         self.sent.append(message)
@@ -22,6 +23,9 @@ class FakeWebSocket:
         return self.incoming.popleft()
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed = True
+
+    def abort(self) -> None:
         self.closed = True
 
 

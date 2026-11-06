@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -148,12 +149,37 @@ class CatalogueRefreshPort(Protocol):
     async def request_catalogue_refresh(self, request: CatalogueRefreshRequest) -> None: ...
 
 
+class CatalogueRefreshMailbox:
+    """Bounded non-blocking handoff for sanitized catalogue refresh requests."""
+
+    __slots__ = ("_max_pending", "_requests")
+
+    def __init__(self, *, max_pending: int = 256) -> None:
+        if type(max_pending) is not int or not 1 <= max_pending <= 4096:
+            raise ValueError("catalogue refresh bound is invalid")
+        self._max_pending = max_pending
+        self._requests: deque[CatalogueRefreshRequest] = deque()
+
+    async def request_catalogue_refresh(self, request: CatalogueRefreshRequest) -> None:
+        """Enqueue one exact request without awaiting an external dependency."""
+        if type(request) is not CatalogueRefreshRequest or len(self._requests) >= self._max_pending:
+            del request
+            raise RuntimeError("catalogue refresh mailbox is unavailable")
+        self._requests.append(request)
+
+    @property
+    def requests(self) -> tuple[CatalogueRefreshRequest, ...]:
+        """Return an immutable snapshot of pending refresh requests."""
+        return tuple(self._requests)
+
+
 MonotonicNs = Callable[[], int]
 SleepNs = Callable[[int], Awaitable[None]]
 
 
 __all__ = [
     "CatalogueRefreshPort",
+    "CatalogueRefreshMailbox",
     "CatalogueRefreshRequest",
     "MonotonicNs",
     "PublicCatalogueBinding",

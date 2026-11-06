@@ -10,10 +10,8 @@ from typing import cast
 from hmt_crypto.errors import ExchangeDownError, ExchangeProtocolError
 from hmt_crypto.exchange.delta.websocket_codec import encode_subscribe, encode_unsubscribe
 from hmt_crypto.exchange.delta.websocket_contracts import WsChannel, WsPlane
-from hmt_crypto.exchange.delta.websocket_public_parsers import (
-    DeltaPublicFrameParser,
-    PublicParseContext,
-)
+from hmt_crypto.exchange.delta.websocket_ownership import _is_owned_receive_capability
+from hmt_crypto.exchange.delta.websocket_public_parsers import DeltaPublicFrameParser
 from hmt_crypto.exchange.delta.websocket_subscriptions import (
     DesiredSubscriptions,
     GenerationSubscriptionReceipt,
@@ -23,7 +21,10 @@ from hmt_crypto.exchange.delta.websocket_subscriptions import (
     desired_subscriptions,
     parse_subscriptions_ack,
 )
-from hmt_crypto.exchange.delta.websocket_transport import StreamControlPort, WsReceivePort
+from hmt_crypto.exchange.delta.websocket_transport import (
+    StreamControlPort,
+    WsReceivePort,
+)
 from hmt_crypto.market_data import public_stream_support as _support
 from hmt_crypto.market_data.contracts import (
     BookStreamError,
@@ -31,8 +32,9 @@ from hmt_crypto.market_data.contracts import (
     MarketObservation,
 )
 from hmt_crypto.market_data.orderbook import BookInvalidationReason, BookRecoveryAction
-from hmt_crypto.market_data.public_stream_control import PublicControlSession
+from hmt_crypto.market_data.public_stream_control import LivenessWake, _PublicControlSession
 from hmt_crypto.market_data.public_stream_models import (
+    CatalogueRefreshMailbox,
     CatalogueRefreshPort,
     CatalogueRefreshRequest,
     MonotonicNs,
@@ -44,9 +46,14 @@ from hmt_crypto.market_data.public_stream_models import (
     SleepNs,
 )
 from hmt_crypto.market_data.state import MarketStateStore
+from hmt_crypto.market_data.stream_control_composition import (
+    is_owned_stream_control_owner,
+)
+from hmt_crypto.market_data.stream_control_owner import StreamControlOwner
+from hmt_crypto.market_data.stream_liveness_runner import run_stream_liveness
 
 
-class PublicGenerationRunner:
+class _PublicGenerationRunner:
     """Compose parsing, state, registry and control for one opened connection."""
 
     def __init__(
@@ -63,9 +70,19 @@ class PublicGenerationRunner:
         monotonic_ns: MonotonicNs,
         sleep_ns: SleepNs,
         utc_now: Callable[[], datetime],
+        production_owned: bool,
     ) -> None:
         if type(generation) is not PublicConnectionGeneration:
             raise TypeError("public connection generation is invalid")
+        if type(production_owned) is not bool:
+            raise TypeError("public generation ownership is invalid")
+        if production_owned and not (
+            _is_owned_receive_capability(receiver)
+            and is_owned_stream_control_owner(control)
+            and type(catalogue_refresh) is CatalogueRefreshMailbox
+        ):
+            del receiver, control, catalogue_refresh
+            raise TypeError("public generation capabilities are invalid") from None
         self.generation = generation
         self.registry = registry
         self.parser = parser
@@ -73,32 +90,79 @@ class PublicGenerationRunner:
         self.catalogue_refresh = catalogue_refresh
         self.state = state
         self.utc_now = utc_now
-        self.session = PublicControlSession(
+        self.session = _PublicControlSession(
             generation=generation,
             receiver=receiver,
             control=control,
+            catalogue_refresh=catalogue_refresh,
             monotonic_ns=monotonic_ns,
             sleep_ns=sleep_ns,
+            production_owned=production_owned,
         )
         self.binding: PublicCatalogueBinding | None = None
         self.local_sequence = 1
         self.observations_applied = 0
         self.desired_revision = 0
         self.finalization_deadline: int | None = None
+        self.liveness_owner = control if type(control) is StreamControlOwner else None
+        self.liveness_task: asyncio.Task[None] | None = None
 
-    def _context(self) -> PublicParseContext:
-        if self.binding is None:
-            raise ExchangeProtocolError(
-                context={"operation": "public_catalogue_binding", "scope": "public"}
-            )
-        return PublicParseContext(
-            catalogue=self.binding.catalogue,
-            catalogue_snapshot_id=self.binding.catalogue_snapshot_id,
-            connection_generation=self.generation.connection_generation,
-            local_sequence_start=self.local_sequence,
-            received_at=self.utc_now(),
-            spot_asset_ids=self.binding.spot_asset_ids,
-        )
+    async def _start_liveness(self) -> None:
+        if self.liveness_owner is None:
+            return
+        await self.liveness_owner.start()
+        self._launch_liveness()
+
+    def _launch_liveness(self) -> None:
+        owner = self.liveness_owner
+        if owner is None:
+            return
+        task = asyncio.create_task(run_stream_liveness(owner))
+        self.liveness_task = task
+        self.session.bind_liveness_task(task)
+
+    async def _service_liveness(self) -> None:
+        task = self.liveness_task
+        if task is None or not task.done():
+            return
+        self.liveness_task = None
+        self.session.bind_liveness_task(None)
+        try:
+            task.result()
+        except BaseException:
+            raise _support.ControlTimeout from None
+        owner = self.liveness_owner
+        if owner is None:
+            raise _support.ControlTimeout
+        try:
+            async with asyncio.timeout(5):
+                await owner.send_reserved_ping()
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            raise _support.ControlTimeout from None
+        self._launch_liveness()
+
+    async def _receive_liveness(self, deadline: int | None = None) -> str | bytes | None:
+        while True:
+            await self._service_liveness()
+            try:
+                frame = (
+                    await self.session.receive_or_poll()
+                    if deadline is None
+                    else await self.session.receive_before(deadline)
+                )
+            except LivenessWake:
+                await self._service_liveness()
+                continue
+            await self._service_liveness()
+            return frame
+
+    async def _stop_liveness(self) -> None:
+        task = self.liveness_task
+        self.liveness_task = None
+        self.session.bind_liveness_task(None)
+        await _support.stop_task(task)
 
     async def _request_catalogue_refresh(
         self,
@@ -119,8 +183,8 @@ class PublicGenerationRunner:
             catalogue_snapshot_id=self.binding.catalogue_snapshot_id,
             channel=channel,
         )
-        await self.session.bounded(
-            self.catalogue_refresh.request_catalogue_refresh(request),
+        await self.session.request_catalogue_refresh(
+            request,
             deadline=self.session.deadline(),
         )
         raise _support.CatalogueMismatch
@@ -138,7 +202,10 @@ class PublicGenerationRunner:
     ) -> None:
         deadline = self.session.deadline()
         while True:
-            message = self.session.decode(await self.session.receive_before(deadline))
+            frame = await self._receive_liveness(deadline)
+            if frame is None:
+                raise _support.ControlTimeout
+            message = self.session.decode(frame)
             message_type = message.get("type")
             if message_type in {"heartbeat", "pong"}:
                 continue
@@ -163,8 +230,8 @@ class PublicGenerationRunner:
             evidence_sha256=desired.evidence_sha256,
             accepted_at_monotonic_ns=self.session.now(),
         )
-        await self.session.bounded(
-            self.session.control.subscriptions_accepted(receipt),
+        await self.session.subscriptions_accepted(
+            receipt,
             deadline=self.session.deadline(),
         )
         self.desired_revision = desired.revision
@@ -280,7 +347,15 @@ class PublicGenerationRunner:
                 context={"operation": "public_unsolicited_channel", "scope": "public"}
             )
         await self._check_binding(channel, current)
-        outcomes = self.parser.parse(message, context=self._context())
+        outcomes = self.parser.parse(
+            message,
+            context=_support.parse_context(
+                binding=self.binding,
+                generation=self.generation,
+                local_sequence=self.local_sequence,
+                received_at=self.utc_now(),
+            ),
+        )
         self.local_sequence += len(outcomes)
         for outcome in outcomes:
             if type(outcome) is CatalogueMismatchSignal:
@@ -356,13 +431,15 @@ class PublicGenerationRunner:
         """Run until one fail-closed terminal result or caller cancellation."""
         current = _support.empty_desired(0)
         try:
+            await self._start_liveness()
             self.binding = _support.require_binding(self.catalogue_provider, self.generation)
             current = await self._initial_subscribe()
             while True:
-                frame = await self.session.receive_or_poll()
+                frame = await self._receive_liveness()
                 if frame is None:
                     await self._check_binding("catalogue_binding", current)
                     current = await self._sync_registry(current)
+                    self.session.complete_registry_poll()
                     continue
                 message = self.session.decode(frame)
                 message_type = message.get("type")
@@ -412,7 +489,10 @@ class PublicGenerationRunner:
             finally:
                 raise
         finally:
-            await self.session.finish_receive(deadline=self._begin_finalization())
+            try:
+                await self._stop_liveness()
+            finally:
+                await self.session.finish_receive(deadline=self._begin_finalization())
 
 
-__all__ = ["PublicGenerationRunner"]
+__all__: list[str] = []

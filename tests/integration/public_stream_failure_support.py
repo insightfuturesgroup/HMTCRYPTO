@@ -22,7 +22,11 @@ from hmt_crypto.exchange.delta.websocket_subscriptions import (
 from hmt_crypto.exchange.delta.websocket_transport import InboundKind
 from hmt_crypto.exchange.delta.wire_schemas import parse_product
 from hmt_crypto.market_data.public_stream import PublicConnectionGeneration, PublicStreamActor
-from hmt_crypto.market_data.public_stream_models import PublicCatalogueBinding
+from hmt_crypto.market_data.public_stream_models import (
+    CatalogueRefreshMailbox,
+    PublicCatalogueBinding,
+)
+from hmt_crypto.market_data.public_stream_runner import _PublicGenerationRunner
 from hmt_crypto.market_data.readiness import MarketFreshnessPolicy
 from hmt_crypto.market_data.state import MarketStateStore
 
@@ -101,6 +105,7 @@ class ScriptedControl:
         self.active_sends = 0
         self.send_cancellations = 0
         self.release_send = asyncio.Event()
+        self.events: list[str] = []
         self.invalidations: list[GenerationControlInvalidation] = []
         self.receipts: list[GenerationSubscriptionReceipt] = []
 
@@ -110,6 +115,7 @@ class ScriptedControl:
         call = self.send_calls
         if call == self.fail_send_at:
             raise ExchangeDownError(context={"operation": "websocket_send"})
+        self.events.append("send")
         if call != self.resist_send_at:
             return
         self.active_sends += 1
@@ -126,9 +132,11 @@ class ScriptedControl:
         del kind
 
     async def invalidate(self, receipt: GenerationControlInvalidation) -> None:
+        self.events.append("invalidate")
         self.invalidations.append(receipt)
 
     async def subscriptions_accepted(self, receipt: GenerationSubscriptionReceipt) -> None:
+        self.events.append("receipt")
         self.receipts.append(receipt)
 
 
@@ -158,11 +166,6 @@ class CatalogueProvider:
 
     def current(self) -> PublicCatalogueBinding:
         return self.binding
-
-
-class RefreshPort:
-    async def request_catalogue_refresh(self, request: object) -> None:
-        del request
 
 
 def generation() -> PublicConnectionGeneration:
@@ -211,12 +214,37 @@ def harness(time: ManualTime) -> tuple[PublicStreamActor, SubscriptionRegistry, 
         registry=registry,
         parser=DeltaPublicFrameParser(),
         catalogue_provider=CatalogueProvider(),
-        catalogue_refresh=RefreshPort(),
+        catalogue_refresh=CatalogueRefreshMailbox(),
         state=state,
         monotonic_ns=time.monotonic_ns,
         sleep_ns=time.sleep_ns,
     )
     return actor, registry, state
+
+
+async def run_scripted_generation(
+    actor: PublicStreamActor,
+    selected: PublicConnectionGeneration,
+    *,
+    receiver: object,
+    control: object,
+):  # type: ignore[no-untyped-def]
+    """Run the non-production structural test harness outside the package API."""
+    runner = _PublicGenerationRunner(
+        generation=selected,
+        receiver=receiver,  # type: ignore[arg-type]
+        control=control,  # type: ignore[arg-type]
+        registry=actor._registry,
+        parser=actor._parser,
+        catalogue_provider=actor._catalogue_provider,
+        catalogue_refresh=actor._catalogue_refresh,
+        state=actor._state,
+        monotonic_ns=actor._monotonic_ns,
+        sleep_ns=actor._sleep_ns,
+        utc_now=actor._utc_now,
+        production_owned=False,
+    )
+    return await runner.run()
 
 
 async def settle() -> None:

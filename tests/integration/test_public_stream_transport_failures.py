@@ -15,6 +15,7 @@ from public_stream_failure_support import (
     ack,
     generation,
     harness,
+    run_scripted_generation,
     settle,
     ticker_frame,
 )
@@ -66,7 +67,12 @@ async def _start_live(
     ticker = WsSubscription.for_channel(WsChannel.TICKER, symbols=("XBTUSD_CAT",))
     lease = await registry.acquire(owner_id=UUID(int=1), entries=(ticker,))
     task = asyncio.create_task(
-        actor.run_generation(generation(), receiver=receiver, control=control)
+        run_scripted_generation(
+            actor,
+            generation(),
+            receiver=receiver,
+            control=control,
+        )
     )
     await settle()
     assert len(control.receipts) == 1

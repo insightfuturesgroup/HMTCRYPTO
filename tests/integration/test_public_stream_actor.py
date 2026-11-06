@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from public_stream_failure_support import run_scripted_generation
 
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion
 from hmt_crypto.exchange.delta.catalog_models import CatalogSnapshot, CatalogSource
@@ -28,7 +29,10 @@ from hmt_crypto.exchange.delta.websocket_subscriptions import (
 )
 from hmt_crypto.exchange.delta.websocket_transport import InboundKind
 from hmt_crypto.exchange.delta.wire_schemas import parse_product
-from hmt_crypto.market_data.public_stream_models import PublicCatalogueBinding
+from hmt_crypto.market_data.public_stream_models import (
+    CatalogueRefreshMailbox,
+    PublicCatalogueBinding,
+)
 from hmt_crypto.market_data.readiness import MarketFreshnessPolicy
 from hmt_crypto.market_data.state import MarketStateStore
 
@@ -139,12 +143,31 @@ class CatalogueProvider:
         return self.binding
 
 
-class RefreshPort:
-    def __init__(self) -> None:
-        self.requests: list[object] = []
+RefreshPort = CatalogueRefreshMailbox
 
-    async def request_catalogue_refresh(self, request: object) -> None:
-        self.requests.append(request)
+
+class HostileRefresh:
+    def __getattribute__(self, name: str) -> object:
+        if name == "request_catalogue_refresh":
+            raise BaseException("structural-refresh-secret")
+        return object.__getattribute__(self, name)
+
+    def __repr__(self) -> str:
+        return "<structural-refresh-secret>"
+
+
+def _source_trace(error: BaseException) -> str:
+    rendered: list[str] = [repr(error), repr(error.__cause__), repr(error.__context__)]
+    traceback = error.__traceback__
+    while traceback is not None:
+        if "/src/hmt_crypto/" in traceback.tb_frame.f_code.co_filename:
+            for value in traceback.tb_frame.f_locals.values():
+                try:
+                    rendered.append(repr(value))
+                except BaseException:
+                    rendered.append("<unprintable>")
+        traceback = traceback.tb_next
+    return "\n".join(rendered)
 
 
 async def _settle() -> None:
@@ -258,6 +281,17 @@ def test_symbol_admission_uses_exact_raw_mark_candle_and_symbol_less_contracts()
     assert is_subscribed({"type": "system_status"}, desired)
 
 
+def test_structural_refresh_is_rejected_without_method_lookup_or_secret_trace() -> None:
+    time = ManualTime()
+    registry = SubscriptionRegistry(plane=WsPlane.PUBLIC)
+    hostile = HostileRefresh()
+
+    with pytest.raises(TypeError) as captured:
+        _actor(registry, time, refresh=hostile)  # type: ignore[arg-type]
+
+    assert "structural-refresh-secret" not in _source_trace(captured.value)
+
+
 @pytest.mark.asyncio
 async def test_initial_ack_and_live_data_use_receive_only_capability_without_auth() -> None:
     from hmt_crypto.market_data.public_stream import PublicGenerationStatus
@@ -270,8 +304,8 @@ async def test_initial_ack_and_live_data_use_receive_only_capability_without_aut
     control = Control(first_sent=encode_enable_heartbeat())
     await receiver.feed(_ack(ticker), _ticker_frame(), EOFError())
 
-    result = await _actor(registry, time).run_generation(
-        _generation(), receiver=receiver, control=control
+    result = await run_scripted_generation(
+        _actor(registry, time), _generation(), receiver=receiver, control=control
     )
     await lease.aclose()
 
@@ -296,7 +330,9 @@ async def test_registry_change_without_inbound_frames_invalidates_before_dynamic
     control = Control()
     await receiver.feed(_ack(first))
     task = asyncio.create_task(
-        _actor(registry, time).run_generation(_generation(), receiver=receiver, control=control)
+        run_scripted_generation(
+            _actor(registry, time), _generation(), receiver=receiver, control=control
+        )
     )
     await _settle()
     assert len(control.receipts) == 1
@@ -331,7 +367,9 @@ async def test_heartbeats_do_not_extend_initial_ack_deadline() -> None:
     control = Control()
     await receiver.feed('{"type":"heartbeat"}', '{"type":"pong"}')
     task = asyncio.create_task(
-        _actor(registry, time).run_generation(_generation(), receiver=receiver, control=control)
+        run_scripted_generation(
+            _actor(registry, time), _generation(), receiver=receiver, control=control
+        )
     )
     await _settle()
     time.advance(2_000_000_000)
@@ -367,7 +405,9 @@ async def test_book_gap_repairs_only_symbol_after_five_seconds_and_folds_release
         '"ts":1793872800000001,"seq":7,"sy":"XBTUSD_CAT","cs":863104686}',
     )
     task = asyncio.create_task(
-        _actor(registry, time).run_generation(_generation(), receiver=receiver, control=control)
+        run_scripted_generation(
+            _actor(registry, time), _generation(), receiver=receiver, control=control
+        )
     )
     await _settle()
     assert control.invalidations[-1].kind.value == "book_gap"
@@ -403,7 +443,7 @@ async def test_catalogue_mismatch_requests_refresh_and_closes_generation_safely(
     refresh = RefreshPort()
     actor = _actor(registry, time, refresh=refresh)
     await receiver.feed(_ack(ticker), _ticker_frame(product_id=9999, symbol="XBTUSD_CAT"))
-    result = await actor.run_generation(_generation(), receiver=receiver, control=control)
+    result = await run_scripted_generation(actor, _generation(), receiver=receiver, control=control)
     await lease.aclose()
 
     assert result.status is PublicGenerationStatus.CATALOGUE_MISMATCH
@@ -430,8 +470,11 @@ async def test_catalogue_mismatch_poisons_only_identified_component_before_recon
         _ticker_frame(),
         _ticker_frame(product_id=9999, symbol="XBTUSD_CAT"),
     )
-    result = await _actor(registry, time, state=state).run_generation(
-        _generation(), receiver=receiver, control=control
+    result = await run_scripted_generation(
+        _actor(registry, time, state=state),
+        _generation(),
+        receiver=receiver,
+        control=control,
     )
     await lease.aclose()
 
@@ -452,7 +495,9 @@ async def test_send_completion_is_bounded_and_actor_cancellation_cleans_receive_
     control = Control()
     control.send_gate = asyncio.Event()
     task = asyncio.create_task(
-        _actor(registry, time).run_generation(_generation(), receiver=receiver, control=control)
+        run_scripted_generation(
+            _actor(registry, time), _generation(), receiver=receiver, control=control
+        )
     )
     await _settle()
     time.advance(2_000_000_000)
@@ -467,8 +512,11 @@ async def test_send_completion_is_bounded_and_actor_cancellation_cleans_receive_
     )
     await receiver2.feed(_ack(ticker), _ticker_frame())
     task2 = asyncio.create_task(
-        _actor(registry, time, state=state2).run_generation(
-            _generation(), receiver=receiver2, control=control2
+        run_scripted_generation(
+            _actor(registry, time, state=state2),
+            _generation(),
+            receiver=receiver2,
+            control=control2,
         )
     )
     await _settle()
@@ -493,8 +541,8 @@ async def test_interleaved_current_data_is_applied_while_fixed_ack_deadline_rema
     control = Control()
     await receiver.feed(_ticker_frame(), _ack(ticker), EOFError())
 
-    result = await _actor(registry, time).run_generation(
-        _generation(), receiver=receiver, control=control
+    result = await run_scripted_generation(
+        _actor(registry, time), _generation(), receiver=receiver, control=control
     )
     await lease.aclose()
 
@@ -518,8 +566,8 @@ async def test_catalogue_valid_but_unsubscribed_symbol_is_rejected_before_public
         _ticker_frame(product_id=1102, symbol="ETHUSD_CAT"),
         EOFError(),
     )
-    result = await _actor(registry, time).run_generation(
-        _generation(), receiver=receiver, control=control
+    result = await run_scripted_generation(
+        _actor(registry, time), _generation(), receiver=receiver, control=control
     )
     await lease.aclose()
 
@@ -541,8 +589,11 @@ async def test_catalogue_publication_is_bound_once_for_connection_generation() -
     refresh = RefreshPort()
     await receiver.feed(_ack(ticker))
     task = asyncio.create_task(
-        _actor(registry, time, provider=provider, refresh=refresh).run_generation(
-            _generation(), receiver=receiver, control=control
+        run_scripted_generation(
+            _actor(registry, time, provider=provider, refresh=refresh),
+            _generation(),
+            receiver=receiver,
+            control=control,
         )
     )
     await _settle()
@@ -572,8 +623,11 @@ async def test_receiver_end_invalidates_state_before_returning_terminal_result()
         freshness_policy=MarketFreshnessPolicy(), monotonic_ns=time.monotonic_ns
     )
     await receiver.feed(_ack(ticker), _ticker_frame(), EOFError())
-    await _actor(registry, time, state=state).run_generation(
-        _generation(), receiver=receiver, control=control
+    await run_scripted_generation(
+        _actor(registry, time, state=state),
+        _generation(),
+        receiver=receiver,
+        control=control,
     )
     await lease.aclose()
 
@@ -606,8 +660,8 @@ async def test_repair_rejects_early_returning_sleep_without_resubscribing() -> N
         _ack(book),
         EOFError(),
     )
-    result = await _actor(registry, time).run_generation(
-        _generation(), receiver=receiver, control=control
+    result = await run_scripted_generation(
+        _actor(registry, time), _generation(), receiver=receiver, control=control
     )
     await lease.aclose()
 
@@ -638,7 +692,9 @@ async def test_repair_hang_is_cut_off_by_independent_safety_deadline() -> None:
         _ack(),
     )
     task = asyncio.create_task(
-        _actor(registry, time).run_generation(_generation(), receiver=receiver, control=control)
+        run_scripted_generation(
+            _actor(registry, time), _generation(), receiver=receiver, control=control
+        )
     )
     await _settle()
     time.advance(7_000_000_000)
@@ -665,7 +721,9 @@ async def test_repair_of_released_sole_symbol_finishes_with_empty_desired_set() 
         _ack(),
     )
     task = asyncio.create_task(
-        _actor(registry, time).run_generation(_generation(), receiver=receiver, control=control)
+        run_scripted_generation(
+            _actor(registry, time), _generation(), receiver=receiver, control=control
+        )
     )
     await _settle()
     await lease.aclose()
@@ -696,8 +754,11 @@ async def test_non_ticker_catalogue_mismatch_schedules_channel_refresh() -> None
         '{"type":"trades","sy":"UNKNOWN","ts":1793872800000000,'
         '"t":1793872799000000,"p":"100","s":"2","r":"m"}',
     )
-    result = await _actor(registry, time, refresh=refresh).run_generation(
-        _generation(), receiver=receiver, control=control
+    result = await run_scripted_generation(
+        _actor(registry, time, refresh=refresh),
+        _generation(),
+        receiver=receiver,
+        control=control,
     )
     await lease.aclose()
 
