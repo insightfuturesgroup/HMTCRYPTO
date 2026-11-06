@@ -485,8 +485,12 @@ def test_every_deleted_a4_slot_fails_freeze_and_existing_request_attestation(
         (PrivateRouteId.BALANCES, "default_page_size", 10),
         (PrivateRouteId.OPEN_ORDERS, "pagination", PrivatePaginationPolicy.NONE),
         (PrivateRouteId.OPEN_ORDERS, "max_pages", None),
-        (PrivateRouteId.FILLS, "dispatch_capability", PrivateDispatchCapability.READ_ONLY),
-        (PrivateRouteId.FILLS, "profile_state", PrivateProfileState.REVIEWED),
+        (PrivateRouteId.FILLS, "dispatch_capability", PrivateDispatchCapability.NONE),
+        (
+            PrivateRouteId.FILLS,
+            "profile_state",
+            PrivateProfileState.DISABLED_PENDING_TESTNET,
+        ),
     ),
 )
 def test_profile_corruption_fails_wire_for_nonpaged_paged_and_held_routes(

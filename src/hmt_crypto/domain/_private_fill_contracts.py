@@ -84,9 +84,17 @@ class FillNotionalType(ExactStrEnum):
 class FillMetadataProfile(ExactStrEnum):
     __module__ = _ORDERS_MODULE
 
+    NORMAL_V1 = "NORMAL_V1"
+    ADL_V1 = "ADL_V1"
+    LIQUIDATION_V1 = "LIQUIDATION_V1"
+    SETTLEMENT_V1 = "SETTLEMENT_V1"
+    OTC_V1 = "OTC_V1"
+
 
 class SettlementFillOrderProfile(ExactStrEnum):
     __module__ = _ORDERS_MODULE
+
+    COMPACT_UUID_V1 = "COMPACT_UUID_V1"
 
 
 class FillMetadataValue(PrivateBoundaryModel):

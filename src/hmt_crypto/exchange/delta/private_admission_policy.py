@@ -13,10 +13,12 @@ from hmt_crypto.exchange.delta.private_routes import PrivateRouteId
 
 _ADMITTED_READ_ROUTES = (
     PrivateRouteId.BALANCES,
+    PrivateRouteId.TRANSACTIONS,
     PrivateRouteId.MARGINED_POSITIONS,
     PrivateRouteId.LATEST_POSITION,
     PrivateRouteId.OPEN_ORDERS,
     PrivateRouteId.ORDER_HISTORY,
+    PrivateRouteId.FILLS,
     PrivateRouteId.ORDER_BY_ID,
     PrivateRouteId.ORDER_BY_CLIENT_ID,
     PrivateRouteId.GET_LEVERAGE,
@@ -30,7 +32,7 @@ def _fail() -> NoReturn:
 def _require_admissible_private_read(
     value: object,
 ) -> _FrozenPrivateReadRequestV1:
-    """Attest one frozen request and enforce the closed eight-route allowlist."""
+    """Attest one frozen request and enforce the closed reviewed-read allowlist."""
     try:
         if type(value) is not _FrozenPrivateReadRequestV1:
             _fail()

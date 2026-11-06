@@ -345,12 +345,12 @@ def run() -> None:
             )
 
     for query in (WalletTransactionQuery(), FillQuery()):
-        held = _freeze_private_read(
+        reviewed = _freeze_private_read(
             query,
             region=DeltaRegion.INDIA,
             environment=DeltaEnvironment.TESTNET,
         )
-        _expect_admission_error(lambda held=held: _admit(held, context))
+        assert _admit(reviewed, context).route_id is reviewed.route_id
 
     wrong_request = _request_cases()[1][1]
     _expect_admission_error(

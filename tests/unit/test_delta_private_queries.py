@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from hmt_crypto.domain.private_orders import OrderSide, OrderType
+from hmt_crypto.domain.private_wallet import WalletTransactionType
 from hmt_crypto.errors import ConfigurationError
 from hmt_crypto.exchange.delta import private_query as codec
 from hmt_crypto.exchange.delta.private_routes import (
@@ -234,6 +235,15 @@ def test_all_ten_read_routes_have_literal_canonical_targets() -> None:
     (
         (WalletTransactionQuery(), b"?page_size=10"),
         (WalletTransactionQuery(asset_id=5), b"?asset_ids=5&page_size=10"),
+        (
+            WalletTransactionQuery(
+                transaction_types=(
+                    WalletTransactionType.FUNDING,
+                    WalletTransactionType.COMMISSION,
+                )
+            ),
+            b"?transaction_types=funding,commission&page_size=10",
+        ),
         (WalletTransactionQuery(start_time=_STAMP), b"?start_time=1767323045000006&page_size=10"),
         (WalletTransactionQuery(end_time=_STAMP), b"?end_time=1767323045000006&page_size=10"),
         (WalletTransactionQuery(after="a?b"), b"?after=a%3Fb&page_size=10"),
@@ -436,8 +446,8 @@ def test_hostile_corrupted_values_do_not_run_caller_callbacks() -> None:
     assert calls == []
 
 
-def test_wallet_transaction_type_filter_remains_disabled_after_corruption() -> None:
-    """Catch A5 emitting the unresolved `transaction_types` wire profile."""
+def test_wallet_transaction_type_filter_rejects_counterfeit_members() -> None:
+    """Catch the reviewed filter accepting non-canonical enum members."""
 
     class ForeignType(StrEnum):
         FUNDING = "funding"
@@ -470,12 +480,8 @@ def test_targets_attest_exact_a4_read_profiles_and_declared_fields() -> None:
         assert spec.access is PrivateRouteAccess.READ
         assert spec.authentication is PrivateAuthentication.HMAC_SIGNED_EXTERNAL_USER
         assert spec.body_fields == () and spec.nested_body_fields == ()
-        if target.route_id in (PrivateRouteId.TRANSACTIONS, PrivateRouteId.FILLS):
-            assert spec.dispatch_capability is PrivateDispatchCapability.NONE
-            assert spec.profile_state is PrivateProfileState.DISABLED_PENDING_TESTNET
-        else:
-            assert spec.dispatch_capability is PrivateDispatchCapability.READ_ONLY
-            assert spec.profile_state is PrivateProfileState.REVIEWED
+        assert spec.dispatch_capability is PrivateDispatchCapability.READ_ONLY
+        assert spec.profile_state is PrivateProfileState.REVIEWED
 
         keys = ()
         if target.query_string:

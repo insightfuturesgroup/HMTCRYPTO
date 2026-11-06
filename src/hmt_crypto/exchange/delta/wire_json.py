@@ -155,6 +155,8 @@ def error_from_envelope(
         "invalidapikey",
         "invalidkey",
         "invalidsignature",
+        "ipnotwhitelisted",
+        "ipnotwhitelistedforapikey",
         "signaturemismatch",
     }:
         return AuthError(context=error_context)

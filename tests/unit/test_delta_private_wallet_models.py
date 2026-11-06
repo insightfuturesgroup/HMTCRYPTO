@@ -119,8 +119,8 @@ def test_wallet_transaction_vocabulary_and_observation_are_exact() -> None:
         TypeAdapter(wallet.WalletTransactionType).validate_python("deposit")
 
 
-def test_wallet_metadata_preserves_missing_and_null_while_value_is_closed() -> None:
-    """Catch metadata collapsing absence states or admitting an untyped VALUE payload."""
+def test_wallet_metadata_preserves_presence_and_only_reviewed_empty_profile() -> None:
+    """Catch metadata presence collapse or an unreviewed profile crossing the boundary."""
     wallet = _wallet()
     api = account_api()
     adapter = TypeAdapter(wallet.WalletTransactionMetadataPresence)
@@ -130,6 +130,13 @@ def test_wallet_metadata_preserves_missing_and_null_while_value_is_closed() -> N
     assert type(null) is api.NullField
     assert missing.model_dump() == {"kind": "MISSING"}
     assert null.model_dump() == {"kind": "NULL"}
+    value = adapter.validate_python(
+        {
+            "kind": "VALUE",
+            "value": {"profile": wallet.WalletTransactionMetadataProfile.EMPTY_OBJECT},
+        }
+    )
+    assert value.value.profile is wallet.WalletTransactionMetadataProfile.EMPTY_OBJECT
     for invalid in (
         {"kind": "VALUE", "value": {"profile": "UNAVAILABLE"}},
         {"kind": "VALUE", "value": None},
@@ -138,7 +145,9 @@ def test_wallet_metadata_preserves_missing_and_null_while_value_is_closed() -> N
     ):
         with pytest.raises(ValidationError):
             adapter.validate_python(invalid)
-    assert tuple(wallet.WalletTransactionMetadataProfile) == ()
+    assert tuple(wallet.WalletTransactionMetadataProfile) == (
+        wallet.WalletTransactionMetadataProfile.EMPTY_OBJECT,
+    )
     with pytest.raises(ValidationError):
         wallet.WalletTransactionMetadataValue.model_validate({"profile": "anything"})
 

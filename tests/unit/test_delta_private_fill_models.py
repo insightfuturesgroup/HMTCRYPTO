@@ -224,17 +224,25 @@ def test_fill_order_reference_is_exactly_tagged_and_numeric_raw_matches() -> Non
             adapter.validate_python(invalid)
 
 
-def test_settlement_and_metadata_value_branches_remain_unconstructible() -> None:
-    """Catch invented settlement UUID or metadata profiles opening closed branches."""
+def test_settlement_and_metadata_value_branches_are_closed_to_reviewed_profiles() -> None:
+    """Catch invented settlement UUID or metadata profiles opening the branches."""
     orders = _orders()
-    assert tuple(orders.SettlementFillOrderProfile) == ()
-    assert tuple(orders.FillMetadataProfile) == ()
-    with pytest.raises(ValidationError):
-        orders.SettlementFillOrderRef(
-            kind="SETTLEMENT",
-            profile="UNAVAILABLE",
-            order_uuid=UUID("071b5513-6557-4d0a-ad99-557931137dbd"),
-        )
+    assert tuple(orders.SettlementFillOrderProfile) == (
+        orders.SettlementFillOrderProfile.COMPACT_UUID_V1,
+    )
+    assert tuple(orders.FillMetadataProfile) == (
+        orders.FillMetadataProfile.NORMAL_V1,
+        orders.FillMetadataProfile.ADL_V1,
+        orders.FillMetadataProfile.LIQUIDATION_V1,
+        orders.FillMetadataProfile.SETTLEMENT_V1,
+        orders.FillMetadataProfile.OTC_V1,
+    )
+    settlement = orders.SettlementFillOrderRef(
+        kind="SETTLEMENT",
+        profile=orders.SettlementFillOrderProfile.COMPACT_UUID_V1,
+        order_uuid=UUID("071b5513-6557-4d0a-ad99-557931137dbd"),
+    )
+    assert settlement.profile is orders.SettlementFillOrderProfile.COMPACT_UUID_V1
     with pytest.raises(ValidationError):
         orders.FillMetadataValue(profile="UNAVAILABLE")
     presence = TypeAdapter(orders.FillMetadataPresence)

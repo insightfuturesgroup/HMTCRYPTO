@@ -342,6 +342,8 @@ def _wallet_target(value: object) -> _CanonicalPrivateReadTarget:
     pairs: list[tuple[str, str]] = []
     if query.asset_id is not None:
         pairs.append(("asset_ids", str(query.asset_id)))
+    if query.transaction_types:
+        pairs.append(("transaction_types", _enum_values(query.transaction_types)))
     pairs.extend(_page_pairs(query))
     return _issue_target(spec, path=spec.path_template, pairs=tuple(pairs))
 

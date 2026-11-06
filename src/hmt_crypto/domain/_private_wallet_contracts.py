@@ -68,13 +68,15 @@ class WalletTransactionType(ExactStrEnum):
 
 
 class WalletTransactionMetadataProfile(ExactStrEnum):
-    """Intentionally empty until a reviewed typed metadata profile exists."""
+    """Reviewed opaque metadata shapes that can cross the read boundary."""
 
     __module__ = _WALLET_MODULE
 
+    EMPTY_OBJECT = "EMPTY_OBJECT"
+
 
 class WalletTransactionMetadataValue(PrivateBoundaryModel):
-    """Closed metadata value whose empty profile makes VALUE unavailable."""
+    """A validated metadata shape; raw arbitrary metadata is never retained."""
 
     __module__ = _WALLET_MODULE
     model_config = ConfigDict(defer_build=True)

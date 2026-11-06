@@ -12,13 +12,21 @@ PRIVATE_ROUTE_ROWS: tuple[tuple[object, ...], ...] = (
         ("transactions", "india_only", "GET", "/v2/wallet/transactions")
         + (
             (),
-            ("asset_ids", "start_time", "end_time", "after", "before", "page_size"),
+            (
+                "asset_ids",
+                "transaction_types",
+                "start_time",
+                "end_time",
+                "after",
+                "before",
+                "page_size",
+            ),
             (),
             (),
         )
         + ("transaction_page", 4194304, "forward_cursor", 10, 50, 200, 10000)
         + ("read", "hmac_signed_external_user", "safe_read", "safe_read")
-        + ("transactions", 10, "none", "none", "disabled_pending_testnet")
+        + ("transactions", 10, "none", "read_only", "reviewed")
     ),
     (
         ("margined_positions", "india_only", "GET", "/v2/positions/margined")
@@ -95,7 +103,7 @@ PRIVATE_ROUTE_ROWS: tuple[tuple[object, ...], ...] = (
         )
         + ("fill_page", 8388608, "forward_cursor", 10, 50, 200, 10000)
         + ("read", "hmac_signed_external_user", "safe_read", "safe_read")
-        + ("fills", 10, "none", "none", "disabled_pending_testnet")
+        + ("fills", 10, "none", "read_only", "reviewed")
     ),
     (
         ("order_by_id", "india_only", "GET", "/v2/orders/{order_id}")

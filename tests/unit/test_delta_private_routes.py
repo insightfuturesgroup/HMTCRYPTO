@@ -86,7 +86,15 @@ ROWS: tuple[tuple[object, ...], ...] = (
         "GET",
         "/v2/wallet/transactions",
         (),
-        ("asset_ids", "start_time", "end_time", "after", "before", "page_size"),
+        (
+            "asset_ids",
+            "transaction_types",
+            "start_time",
+            "end_time",
+            "after",
+            "before",
+            "page_size",
+        ),
         (),
         (),
         "transaction_page",
@@ -386,6 +394,7 @@ def test_private_route_request_field_allowlists_match_a3() -> None:
     )
     assert get_private_route_spec(PrivateRouteId.TRANSACTIONS).query_fields == (
         "asset_ids",
+        "transaction_types",
         "start_time",
         "end_time",
         "after",
@@ -441,7 +450,7 @@ def test_private_route_response_byte_and_collection_bounds_are_exact() -> None:
 
 
 def test_private_route_access_auth_retry_idempotency_and_dispatch_are_exact() -> None:
-    disabled = {PrivateRouteId.TRANSACTIONS, PrivateRouteId.FILLS}
+    disabled: set[PrivateRouteId] = set()
     operations = {
         "place_order": ("create_order", 5, PrivateEngineAccounting.ONE_PRODUCT_OPERATION),
         "modify_order": ("modify_order", 5, PrivateEngineAccounting.ONE_PRODUCT_OPERATION),

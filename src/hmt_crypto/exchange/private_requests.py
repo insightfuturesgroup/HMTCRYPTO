@@ -178,10 +178,6 @@ class WalletTransactionQuery(PrivateBoundaryModel):
             after=self.after,
             before=self.before,
         )
-        if self.transaction_types:
-            raise type(self)._safe_error(
-                "private_wallet_filter", "wallet transaction type filter unavailable"
-            ) from None
         return self
 
 
