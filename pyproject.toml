@@ -38,6 +38,10 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/hmt_crypto"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"alembic.ini" = "hmt_crypto_migrations/alembic.ini"
+"migrations" = "hmt_crypto_migrations/migrations"
+
 [tool.hatch.build.targets.sdist]
 exclude = [
     "/tests/integration/support/task210_worker_clock_issuer.py",
