@@ -1,7 +1,34 @@
-"""Secret-safe URL parsing shared by settings and database construction."""
+"""Secret-safe URL parsing and exchange-credential-free database projection."""
+
+from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import SecretStr
 from sqlalchemy.engine import URL, make_url
+
+DatabaseExecutionMode = Literal["BACKTEST", "PAPER", "LIVE"]
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseRuntimeConfig:
+    """Minimum exchange-credential-free configuration accepted by the database owner."""
+
+    execution_mode: DatabaseExecutionMode
+    database_url: SecretStr
+    database_single_process: bool
+
+    def __post_init__(self) -> None:
+        mode: object = self.execution_mode
+        url_value: object = self.database_url
+        single_process: object = self.database_single_process
+        if (
+            type(mode) is not str
+            or mode not in {"BACKTEST", "PAPER", "LIVE"}
+            or type(url_value) is not SecretStr
+            or type(single_process) is not bool
+        ):
+            raise ValueError("invalid database runtime configuration") from None
+        database_url(url_value)
 
 
 def database_url(value: SecretStr) -> URL:
@@ -29,3 +56,6 @@ def database_url(value: SecretStr) -> URL:
         return url
     except Exception:
         raise ValueError("Database URL must use a supported explicit async dialect") from None
+
+
+__all__ = ["DatabaseExecutionMode", "DatabaseRuntimeConfig", "database_url"]

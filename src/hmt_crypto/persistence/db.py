@@ -28,7 +28,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 from hmt_crypto.config import ExecutionMode, Settings
 from hmt_crypto.errors import ConfigurationError
-from hmt_crypto.persistence.configuration import database_url
+from hmt_crypto.persistence.configuration import DatabaseRuntimeConfig, database_url
 from hmt_crypto.persistence.errors import PersistenceError
 
 APP_SCHEMA = "hmt_crypto"
@@ -152,18 +152,29 @@ class Database:
     URL, driver exception or literal SQL containing secrets.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings | DatabaseRuntimeConfig) -> None:
         try:
-            if type(settings) is not Settings:
+            if type(settings) is Settings:
+                owned = Settings.model_validate(settings.model_dump())
+                runtime = DatabaseRuntimeConfig(
+                    execution_mode=owned.execution_mode.value,
+                    database_url=owned.database_url,
+                    database_single_process=owned.database_single_process,
+                )
+            elif type(settings) is DatabaseRuntimeConfig:
+                runtime = DatabaseRuntimeConfig(
+                    execution_mode=settings.execution_mode,
+                    database_url=settings.database_url,
+                    database_single_process=settings.database_single_process,
+                )
+            else:
                 raise ValueError
-            # Revalidate even model_copy/model_construct inputs before admission.
-            owned = Settings.model_validate(settings.model_dump())
-            url = database_url(owned.database_url)
+            url = database_url(runtime.database_url)
         except (ValidationError, ValueError):
             raise ConfigurationError() from None
         if url.drivername == "sqlite+aiosqlite" and (
-            owned.execution_mode not in (ExecutionMode.PAPER, ExecutionMode.BACKTEST)
-            or not owned.database_single_process
+            runtime.execution_mode not in (ExecutionMode.PAPER.value, ExecutionMode.BACKTEST.value)
+            or not runtime.database_single_process
         ):
             raise ConfigurationError()
         options: dict[str, Any] = {

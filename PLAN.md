@@ -1,5 +1,12 @@
 # HMT-Crypto Implementation Plan
 
+> **Implementation status (2026-11-06):** Phases 0–5 have an offline implementation baseline.
+> Environment-dependent qualification and deliberately disabled exchange-writing/private-stream
+> activation are tracked in [`PHASE_STATUS.md`](./PHASE_STATUS.md) and
+> [`docs/GO_LIVE_CHECKLIST.md`](./docs/GO_LIVE_CHECKLIST.md). Unchecked task boxes below are the
+> original acceptance plan; they are not assertions that external testnet, Supabase, Vercel, or
+> production evidence exists.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a new, independent Python 3.11+ crypto trading system for Delta Exchange, preserving HMT's proven strategy and safety behavior while removing all Zerodha/India-market coupling.

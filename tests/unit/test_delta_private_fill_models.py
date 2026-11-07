@@ -8,6 +8,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from delta_private_model_test_support import preserve_private_owner_modules
 from pydantic import TypeAdapter, ValidationError
 
 pytestmark = pytest.mark.unit
@@ -16,23 +17,8 @@ pytestmark = pytest.mark.unit
 @pytest.fixture(scope="module", autouse=True)
 def _release_later_owner_modules() -> Iterator[None]:
     """Keep this later-owner contract module neutral to earlier-owner suites."""
-    yield
-    import sys
-
-    domain = sys.modules.get("hmt_crypto.domain")
-    for name in (
-        "hmt_crypto.domain.private_orders",
-        "hmt_crypto.domain._private_order_contracts",
-        "hmt_crypto.domain._private_fill_contracts",
-        "hmt_crypto.domain._private_result_contracts",
-        "hmt_crypto.domain.private_wallet",
-        "hmt_crypto.domain._private_wallet_contracts",
-        "hmt_crypto.domain.private_positions",
-        "hmt_crypto.domain._private_positions_contracts",
-    ):
-        sys.modules.pop(name, None)
-        if domain is not None:
-            domain.__dict__.pop(name.rsplit(".", 1)[1], None)
+    with preserve_private_owner_modules():
+        yield
 
 
 def _orders() -> object:

@@ -20,7 +20,10 @@ from hmt_crypto.persistence.db import Base
 from hmt_crypto.persistence.execution_event_models import OrderAttemptEvent, OrderTransition
 from hmt_crypto.persistence.fill_models import Fill, FillOrderLink
 from hmt_crypto.persistence.identity_models import Account, CredentialVersion
+from hmt_crypto.persistence.kill_workflow_models import KillWorkflow, KillWorkflowEvent
+from hmt_crypto.persistence.operator_audit_models import OperatorAuditEvent
 from hmt_crypto.persistence.order_models import Order
+from hmt_crypto.persistence.paper_execution_models import PaperExecutionEvent, PaperExecutionHead
 from hmt_crypto.persistence.pnl_models import PnlSnapshot
 from hmt_crypto.persistence.protection_models import (
     ExitIntent,
@@ -40,6 +43,7 @@ from hmt_crypto.persistence.risk_rate_consumption_models import RiskRateConsumpt
 from hmt_crypto.persistence.risk_reservation_models import RiskReservation
 from hmt_crypto.persistence.signal_models import Signal
 from hmt_crypto.persistence.snapshot_models import BalanceSnapshot, PositionSnapshot
+from hmt_crypto.reconciliation.checkpoint_models import AccountReconciliationCheckpoint
 
 metadata = Base.metadata
 
@@ -56,6 +60,11 @@ __all__ = [
     "OrderAttempt",
     "OrderAttemptEvent",
     "OrderTransition",
+    "OperatorAuditEvent",
+    "KillWorkflow",
+    "KillWorkflowEvent",
+    "PaperExecutionHead",
+    "PaperExecutionEvent",
     "Fill",
     "FillOrderLink",
     "ExitIntent",
@@ -70,6 +79,7 @@ __all__ = [
     "ReconciliationResource",
     "ReconciliationDrift",
     "ReconciliationAcknowledgement",
+    "AccountReconciliationCheckpoint",
     "RiskState",
     "RiskHalt",
     "RiskHaltEvent",

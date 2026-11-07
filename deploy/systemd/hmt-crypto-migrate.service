@@ -1,0 +1,25 @@
+[Unit]
+Description=HMT-Crypto one-shot database migration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hmt-crypto
+Group=hmt-crypto
+WorkingDirectory=/opt/hmt-crypto
+EnvironmentFile=/etc/hmt-crypto/migration.env
+ExecStart=/opt/hmt-crypto/.venv/bin/alembic upgrade head
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077

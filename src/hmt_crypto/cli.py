@@ -67,7 +67,27 @@ products_app = typer.Typer(
     pretty_exceptions_enable=False,
     rich_markup_mode=None,
 )
+account_app = typer.Typer(
+    name="account",
+    help="Explicit database account setup.",
+    cls=_JsonBoundaryGroup,
+    add_completion=False,
+    no_args_is_help=True,
+    pretty_exceptions_enable=False,
+    rich_markup_mode=None,
+)
+database_app = typer.Typer(
+    name="database",
+    help="Explicit database lifecycle commands.",
+    cls=_JsonBoundaryGroup,
+    add_completion=False,
+    no_args_is_help=True,
+    pretty_exceptions_enable=False,
+    rich_markup_mode=None,
+)
 app.add_typer(products_app, name="products")
+app.add_typer(account_app, name="account")
+app.add_typer(database_app, name="database")
 
 
 @app.callback()
@@ -121,6 +141,24 @@ def config_check() -> None:
 def clock_check() -> None:
     """Show absent Phase 1 clock/private-probe evidence without network I/O."""
     _run_sync(cli_runtime.clock_check_payload)
+
+
+@account_app.command("bootstrap")
+def account_bootstrap(
+    profile_name: Annotated[str, typer.Option("--profile")] = "paper-primary",
+) -> None:
+    """Create or recover a PAPER/BACKTEST database profile after migration."""
+    _run_async(
+        lambda: cli_runtime.account_bootstrap_payload(
+            cli_runtime.load_settings(), profile_name=profile_name
+        )
+    )
+
+
+@database_app.command("init-dev")
+def database_init_dev() -> None:
+    """Create current tables for single-process SQLite development only."""
+    _run_async(lambda: cli_runtime.database_init_dev_payload(cli_runtime.load_settings()))
 
 
 @products_app.command("sync")

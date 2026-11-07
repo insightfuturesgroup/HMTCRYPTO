@@ -72,6 +72,12 @@ def test_postgres_ddl_has_private_scoped_named_restrict_constraints():
         "risk_rate_consumptions",
         "api_audit_events",
         "api_audit_payloads",
+        "operator_audit_events",
+        "kill_workflows",
+        "kill_workflow_events",
+        "paper_execution_heads",
+        "paper_execution_events",
+        "account_reconciliation_checkpoints",
     }
     assert "CREATE TABLE hmt_crypto.accounts" in ddl
     assert "TIMESTAMP WITH TIME ZONE" in ddl

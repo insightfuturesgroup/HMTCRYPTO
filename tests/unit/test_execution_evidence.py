@@ -15,6 +15,7 @@ def evidence_api():
 
 
 TARGET = UUID("00000000-0000-0000-0000-000000000001")
+PREVIEW = UUID("00000000-0000-0000-0000-000000000002")
 MARKET = {
     "product_id": 1101,
     "requested_contracts": 2,
@@ -31,6 +32,7 @@ INTENTS = [
     ("SET_LEVERAGE", {"product_id": 1101, "leverage": Decimal("2.5")}),
     ("SET_MARGIN_MODE", {"margin_mode": "isolated"}),
     ("CHANGE_POSITION_MARGIN", {"product_id": 1101, "margin_delta": Decimal("-2.5")}),
+    ("GLOBAL_KILL", {"flatten": False, "preview_id": PREVIEW}),
 ]
 
 
@@ -115,6 +117,28 @@ def test_product_only_receipt_cannot_omit_operation_defining_value(operation):
 def test_unrepresented_advanced_operation_is_not_admitted(operation):
     with pytest.raises(PersistenceError):
         evidence_api().encode_evidence("intent", operation, 1, {"product_id": 1101})
+
+
+def test_global_kill_evidence_is_minimal_exact_and_hash_bound():
+    api = evidence_api()
+    cancel_payload, cancel_digest = api.encode_evidence(
+        "intent", "GLOBAL_KILL", 1, {"flatten": False, "preview_id": PREVIEW}
+    )
+    flatten_payload, flatten_digest = api.encode_evidence(
+        "intent", "GLOBAL_KILL", 1, {"flatten": True, "preview_id": PREVIEW}
+    )
+    assert cancel_payload == (
+        '{"flatten":false,"preview_id":"00000000-0000-0000-0000-000000000002"}'
+    )
+    assert cancel_digest != flatten_digest
+    api.validate_stored_evidence("intent", "GLOBAL_KILL", 1, cancel_payload, cancel_digest)
+    with pytest.raises(PersistenceError):
+        api.encode_evidence(
+            "intent",
+            "GLOBAL_KILL",
+            1,
+            {"flatten": False, "preview_id": PREVIEW, "confirmation": "secret"},
+        )
 
 
 @pytest.mark.parametrize("operation,values", INTENTS)

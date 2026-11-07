@@ -116,10 +116,18 @@ def _payload(result: Any) -> dict[str, Any]:
     return value
 
 
-def test_help_exposes_only_the_six_read_only_command_surfaces() -> None:
+def test_help_exposes_public_reads_and_explicit_account_bootstrap_only() -> None:
     result = _invoke("--help")
     assert result.exit_code == 0
-    for allowed in ("config-check", "clock-check", "products", "ticker", "candles"):
+    for allowed in (
+        "account",
+        "database",
+        "config-check",
+        "clock-check",
+        "products",
+        "ticker",
+        "candles",
+    ):
         assert allowed in result.stdout
     for forbidden in (
         "order",
@@ -138,6 +146,12 @@ def test_help_exposes_only_the_six_read_only_command_surfaces() -> None:
     products = _invoke("products", "--help")
     assert products.exit_code == 0
     assert "sync" in products.stdout and "show" in products.stdout
+    account = _invoke("account", "--help")
+    assert account.exit_code == 0
+    assert "bootstrap" in account.stdout
+    database = _invoke("database", "--help")
+    assert database.exit_code == 0
+    assert "init-dev" in database.stdout
 
 
 def test_config_check_is_local_safe_and_defaults_to_paper_india_testnet(

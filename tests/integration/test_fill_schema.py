@@ -103,6 +103,12 @@ def test_fill_schema_adds_only_two_tables_with_no_direct_order_foreign_key():
         "risk_rate_consumptions",
         "api_audit_events",
         "api_audit_payloads",
+        "operator_audit_events",
+        "kill_workflows",
+        "kill_workflow_events",
+        "paper_execution_heads",
+        "paper_execution_events",
+        "account_reconciliation_checkpoints",
     }
     assert {table.name for table in api.metadata.tables.values()} - baseline == {
         "fills",

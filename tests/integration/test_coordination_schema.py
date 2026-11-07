@@ -117,6 +117,12 @@ def test_exact_two_coordination_tables_and_aggregate_exports():
         "risk_rate_consumptions",
         "api_audit_events",
         "api_audit_payloads",
+        "operator_audit_events",
+        "kill_workflows",
+        "kill_workflow_events",
+        "paper_execution_heads",
+        "paper_execution_events",
+        "account_reconciliation_checkpoints",
     }
     assert api.RecoveryIncarnation.__tablename__ == "recovery_incarnations"
     assert api.LeadershipLease.__tablename__ == "leadership_leases"

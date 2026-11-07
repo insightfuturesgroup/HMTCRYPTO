@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hmt_crypto.persistence.attempt_models import OrderAttempt
 from hmt_crypto.persistence.command_models import CommandOperation
 from hmt_crypto.persistence.errors import PersistenceValueError
-from hmt_crypto.persistence.execution_evidence import OPERATIONS, IntentEvidence, encode_evidence
+from hmt_crypto.persistence.execution_evidence import (
+    COMMAND_OPERATIONS,
+    IntentEvidence,
+    encode_evidence,
+)
 from hmt_crypto.persistence.leadership_repository import (
     LeadershipRepository,
     _duration,
@@ -31,12 +35,12 @@ from hmt_crypto.persistence.repository_contracts import (
     ClaimResult,
     CommandClaim,
     CommandCorrelation,
+    CommandOperationKind,
     CommandReceipt,
     EnqueueDisposition,
     EnqueueResult,
     LeadershipFence,
     NulFreeBoundedString128,
-    OperationKind,
     PreAttemptTerminalStatus,
 )
 from hmt_crypto.persistence.repository_errors import (
@@ -165,7 +169,7 @@ class CommandRepository:
         scope: AccountScope,
         *,
         request_id: NulFreeBoundedString128,
-        operation_kind: OperationKind,
+        operation_kind: CommandOperationKind,
         correlation: CommandCorrelation,
         evidence: IntentEvidence | dict[str, object],
     ) -> EnqueueResult:
@@ -175,7 +179,7 @@ class CommandRepository:
         try:
             TypeAdapter(NulFreeBoundedString128).validate_python(request_id)
             operation: object = operation_kind
-            if type(operation) is not str or operation not in OPERATIONS:
+            if type(operation) is not str or operation not in COMMAND_OPERATIONS:
                 raise PersistenceValueError()
         except ValidationError:
             raise PersistenceValueError() from None
@@ -185,10 +189,21 @@ class CommandRepository:
             .where(*_scope(CommandOperation, scope), CommandOperation.request_id == request_id)
             .execution_options(populate_existing=True)
         )
+        active_kill = (
+            select(CommandOperation)
+            .where(
+                *_scope(CommandOperation, scope),
+                CommandOperation.operation_kind == "GLOBAL_KILL",
+                CommandOperation.status.in_(("QUEUED", "CLAIMED")),
+            )
+            .order_by(CommandOperation.created_at, CommandOperation.id)
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
 
         def replay(row: CommandOperation) -> EnqueueResult:
             receipt = _command(scope, row)
-            if receipt.available_at != receipt.created_at:
+            if receipt.available_at != receipt.created_at and row.operation_kind != "GLOBAL_KILL":
                 raise RepositoryInvariantError()
             if (
                 row.operation_kind,
@@ -208,7 +223,7 @@ class CommandRepository:
             if session.get_bind().dialect.name == "postgresql":
                 stamp = stamp.prefix_with("MATERIALIZED")
             values: dict[str, Any] = dict(
-                id=uuid4(),
+                id=(correlation.correlation_id if operation_kind == "GLOBAL_KILL" else uuid4()),
                 **scope.model_dump(),
                 request_id=request_id,
                 operation_kind=operation_kind,
@@ -241,22 +256,79 @@ class CommandRepository:
                 .where(literal(True))
             )
             insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
-            statement = (
-                insert(CommandOperation)
-                .from_select(names, source)
-                .on_conflict_do_nothing(
+            pending_insert = insert(CommandOperation).from_select(names, source)
+            if operation_kind == "GLOBAL_KILL":
+                pending_insert = pending_insert.on_conflict_do_nothing()
+            else:
+                pending_insert = pending_insert.on_conflict_do_nothing(
                     index_elements=["account_id", "region", "environment", "mode", "request_id"]
                 )
-                .returning(CommandOperation)
-            )
+            statement = pending_insert.returning(CommandOperation)
             row = (await session.execute(statement)).scalar_one_or_none()
             if row is None:
                 winner = (await session.execute(lookup)).scalar_one_or_none()
-                if winner is None:
-                    raise RepositoryInvariantError()
-                return replay(winner)
+                if winner is not None:
+                    return replay(winner)
+                if operation_kind == "GLOBAL_KILL":
+                    current = (await session.execute(active_kill)).scalar_one_or_none()
+                    if current is not None:
+                        return EnqueueResult(
+                            disposition=EnqueueDisposition.ACTIVE,
+                            command=_command(scope, current),
+                        )
+                raise RepositoryInvariantError()
         await _flush(session)
         return EnqueueResult(disposition=EnqueueDisposition.CREATED, command=_command(scope, row))
+
+    async def get_by_identity(
+        self,
+        session: AsyncSession,
+        scope: AccountScope,
+        command_id: UUID,
+    ) -> CommandReceipt | None:
+        """Read one scoped command without claiming or changing it."""
+        await _admit(session)
+        scope = _input(AccountScope, scope)
+        _uuid(command_id)
+        with session.no_autoflush:
+            row = (
+                await session.execute(
+                    select(CommandOperation)
+                    .where(*_scope(CommandOperation, scope), CommandOperation.id == command_id)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+        return None if row is None else _command(scope, row)
+
+    async def get_active_global_kill(
+        self,
+        session: AsyncSession,
+        scope: AccountScope,
+    ) -> CommandReceipt | None:
+        """Return the sole queued/claimed global kill command for one scope."""
+        await _admit(session)
+        scope = _input(AccountScope, scope)
+        with session.no_autoflush:
+            rows = (
+                (
+                    await session.execute(
+                        select(CommandOperation)
+                        .where(
+                            *_scope(CommandOperation, scope),
+                            CommandOperation.operation_kind == "GLOBAL_KILL",
+                            CommandOperation.status.in_(("QUEUED", "CLAIMED")),
+                        )
+                        .order_by(CommandOperation.created_at, CommandOperation.id)
+                        .limit(2)
+                        .execution_options(populate_existing=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if len(rows) > 1:
+            raise RepositoryInvariantError()
+        return None if not rows else _command(scope, rows[0])
 
     @_lock_operation
     async def claim_next(

@@ -22,6 +22,16 @@ build/
 dist/
 *.egg-info/
 
+# Phase 5 dashboard dependencies and build output.
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/*.tsbuildinfo
+ui/vite.config.js
+ui/vite.config.d.ts
+deploy/api.env
+deploy/worker.env
+
 # Local data and logs.
 *.db
 *.db-*

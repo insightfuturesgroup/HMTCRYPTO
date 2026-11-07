@@ -25,6 +25,7 @@ OPERATIONS = (
     "SET_MARGIN_MODE",
     "CHANGE_POSITION_MARGIN",
 )
+COMMAND_OPERATIONS = (*OPERATIONS, "GLOBAL_KILL")
 ATTEMPT_EVENT_KINDS = (
     "DEFINITE_NOT_SENT",
     "DISPATCH_STARTED",
@@ -61,6 +62,8 @@ class IntentEvidence(DomainModel):
     margin_mode: Literal["isolated", "portfolio"] | None = None
     leverage: Decimal | None = None
     margin_delta: Decimal | None = None
+    flatten: StrictBool | None = None
+    preview_id: UUID | None = None
 
     @field_validator("limit_price", "leverage", "margin_delta", mode="before")
     @classmethod
@@ -82,6 +85,7 @@ _REQUIRED = {
     "SET_LEVERAGE": frozenset({"product_id", "leverage"}),
     "SET_MARGIN_MODE": frozenset({"margin_mode"}),
     "CHANGE_POSITION_MARGIN": frozenset({"product_id", "margin_delta"}),
+    "GLOBAL_KILL": frozenset({"flatten", "preview_id"}),
 }
 _OPTIONAL = {
     "PLACE_ORDER": frozenset({"limit_price"}),
@@ -161,7 +165,7 @@ _CONTRACTS: dict[str, type[DomainModel]] = {
     "protection_authorization": ProtectionAuthorizationEvidence,
 }
 _OPERATIONS = {
-    "intent": OPERATIONS,
+    "intent": COMMAND_OPERATIONS,
     "event": ATTEMPT_EVENT_KINDS,
     "transition": TRANSITION_KINDS,
     "fill": FILL_TYPES,
@@ -226,8 +230,9 @@ def validate_stored_evidence(
             for key in ("limit_price", "leverage", "margin_delta"):
                 if key in raw:
                     raw[key] = Decimal(raw[key])
-            if "target_order_id" in raw:
-                raw["target_order_id"] = UUID(raw["target_order_id"])
+            for key in ("target_order_id", "preview_id"):
+                if key in raw:
+                    raw[key] = UUID(raw[key])
         if encode_evidence(kind, operation, schema_version, raw) != (payload, digest):
             raise PersistenceValueError()
     except Exception:

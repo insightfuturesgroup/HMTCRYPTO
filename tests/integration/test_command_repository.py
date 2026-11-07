@@ -32,6 +32,100 @@ async def enqueue(session, scope, *, request="request", correlation=None):
     )
 
 
+async def enqueue_kill(session, scope, *, request, preview, flatten=False):
+    return await CommandRepository().enqueue_or_replay(
+        session,
+        scope,
+        request_id=request,
+        operation_kind="GLOBAL_KILL",
+        correlation=CommandCorrelation(correlation_id=uuid4()),
+        evidence={"flatten": flatten, "preview_id": preview},
+    )
+
+
+@pytest.mark.asyncio
+async def test_global_kill_is_single_active_idempotent_and_queryable(schema_db):
+    scope, _, _ = await seed_scope(schema_db)
+    repo = CommandRepository()
+    first_request, first_preview = str(uuid4()), uuid4()
+    async with schema_db.transaction() as session:
+        first = await enqueue_kill(
+            session,
+            scope,
+            request=first_request,
+            preview=first_preview,
+        )
+        assert first.disposition.value == "CREATED"
+        assert first.command.command_id == first.command.correlation_id
+    async with schema_db.transaction() as session:
+        replay = await repo.enqueue_or_replay(
+            session,
+            scope,
+            request_id=first_request,
+            operation_kind="GLOBAL_KILL",
+            correlation=CommandCorrelation(correlation_id=first.command.correlation_id),
+            evidence={"flatten": False, "preview_id": first_preview},
+        )
+        assert replay.disposition.value == "EXISTING"
+        assert replay.command == first.command
+        assert await repo.get_by_identity(session, scope, first.command.command_id) == first.command
+        assert await repo.get_active_global_kill(session, scope) == first.command
+
+    async with schema_db.transaction() as session:
+        blocked = await enqueue_kill(
+            session,
+            scope,
+            request=str(uuid4()),
+            preview=uuid4(),
+            flatten=True,
+        )
+        assert blocked.disposition.value == "ACTIVE"
+        assert blocked.command == first.command
+
+
+@pytest.mark.asyncio
+async def test_terminal_global_kill_allows_a_new_identity(schema_db):
+    scope, _, _ = await seed_scope(schema_db)
+    repo = CommandRepository()
+    async with schema_db.transaction() as session:
+        first = await enqueue_kill(
+            session,
+            scope,
+            request=str(uuid4()),
+            preview=uuid4(),
+        )
+    async with schema_db.transaction() as session:
+        claimed = await repo.claim_next(
+            session,
+            scope,
+            owner_id=uuid4(),
+            duration=timedelta(minutes=1),
+            leadership=None,
+        )
+    async with schema_db.transaction() as session:
+        command = await repo.lock_by_identity(session, scope, first.command.command_id)
+        current = repo.refine_current_claim(command, claimed.claim, leadership=None)
+        terminal = await repo.lock_unreserved_terminalization(session, current)
+        sampled = await RepositoryClock().sample_after_locks(session, last_lock=terminal)
+        await repo.terminalize_unreserved_at(
+            session,
+            terminal,
+            leadership=None,
+            sampled_at=sampled,
+            terminal_status="FAILED",
+        )
+    async with schema_db.transaction() as session:
+        second = await enqueue_kill(
+            session,
+            scope,
+            request=str(uuid4()),
+            preview=uuid4(),
+            flatten=True,
+        )
+        assert second.disposition.value == "CREATED"
+        assert second.command.command_id != first.command.command_id
+
+
 @pytest.mark.asyncio
 async def test_enqueue_exact_replay_conflict_and_one_cte_time(schema_db, monkeypatch):
     scope, _, _ = await seed_scope(schema_db)

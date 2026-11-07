@@ -135,7 +135,7 @@ def test_private_v1_policy_snapshot_is_atomic_and_complete() -> None:
         for spec in PRIVATE_ROUTE_SPECS
     )
     assert sha256(repr(profile_snapshot).encode("ascii")).hexdigest() == (
-        "52440f6435794ffe2462b1f03ea6d51569b294f939b137b355e7f3e36a01e51b"
+        "3041d9e4891e2e395f0d7d55b72b0d757883025ff599022f1a92033edd8d4ef5"
     )
     assert all(
         spec.authentication is PrivateAuthentication.HMAC_SIGNED_EXTERNAL_USER

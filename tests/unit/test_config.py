@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from hmt_crypto.config import Settings
+from hmt_crypto.config import DeltaRegion, Settings
 
 CONFIRMATION = "I_UNDERSTAND_THIS_CAN_PLACE_REAL_ORDERS"
 SLOTS = (
@@ -253,6 +253,16 @@ def test_dotenv_loads_selected_credentials(tmp_path: Path) -> None:
     assert config.rest_base_url == "https://api.delta.exchange"
     assert config.selected_api_key.get_secret_value() == "dotenv-key"
     assert config.selected_api_secret.get_secret_value() == "dotenv-secret"
+
+
+def test_dotenv_ignores_separately_typed_api_and_alert_settings(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_text(
+        "DELTA_REGION=india\n"
+        "HMT_API_ALLOWED_ORIGIN=https://console.example\n"
+        "HMT_ALERT_TELEGRAM_CHAT_ID=12345\n"
+    )
+    assert Settings(_env_file=path).delta_region is DeltaRegion.INDIA
 
 
 @pytest.mark.parametrize("name", ["delta_region", "Delta_Region", "DELTA_region"])

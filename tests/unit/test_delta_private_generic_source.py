@@ -254,6 +254,8 @@ def test_coordinated_public_branch_and_alias_tag_replacement_still_rejects() -> 
     source = _source()
     registry = importlib.import_module("hmt_crypto.domain._private_generic_registry")
     _owners, rows = _owners_and_rows()
+    reviewed_before = registry._load_reviewed_rows()
+    assert reviewed_before is not None
     original_tags = api.NullableOpaqueCursor.__private_tags__
 
     class ForgedNull(api.NullField):
@@ -267,7 +269,7 @@ def test_coordinated_public_branch_and_alias_tag_replacement_still_rejects() -> 
             assert registry._load_reviewed_rows() is None
         finally:
             api.NullableOpaqueCursor.__private_tags__ = original_tags
-    assert len(registry._load_reviewed_rows() or ()) == 2
+    assert registry._load_reviewed_rows() == reviewed_before
 
 
 @contextmanager

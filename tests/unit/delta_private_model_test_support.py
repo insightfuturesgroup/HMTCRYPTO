@@ -6,11 +6,56 @@ import importlib
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
 from pydantic import ValidationError
+
+_PRIVATE_OWNER_MODULE_NAMES = (
+    "hmt_crypto.domain.private_orders",
+    "hmt_crypto.domain._private_order_contracts",
+    "hmt_crypto.domain._private_fill_contracts",
+    "hmt_crypto.domain._private_result_contracts",
+    "hmt_crypto.domain.private_wallet",
+    "hmt_crypto.domain._private_wallet_contracts",
+    "hmt_crypto.domain.private_positions",
+    "hmt_crypto.domain._private_positions_contracts",
+)
+
+
+@contextmanager
+def preserve_private_owner_modules() -> Iterator[None]:
+    """Restore pre-existing private-domain module bindings after an isolated test module."""
+    absent = object()
+    domain = sys.modules.get("hmt_crypto.domain")
+    modules = {name: sys.modules.get(name, absent) for name in _PRIVATE_OWNER_MODULE_NAMES}
+    domain_bindings = {
+        name: (
+            domain.__dict__.get(name.rsplit(".", 1)[1], absent) if domain is not None else absent
+        )
+        for name in _PRIVATE_OWNER_MODULE_NAMES
+    }
+    try:
+        yield
+    finally:
+        current_domain = sys.modules.get("hmt_crypto.domain")
+        for name in _PRIVATE_OWNER_MODULE_NAMES:
+            previous_module = modules[name]
+            if previous_module is absent:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous_module
+            if current_domain is None:
+                continue
+            short_name = name.rsplit(".", 1)[1]
+            previous_binding = domain_bindings[name]
+            if previous_binding is absent:
+                current_domain.__dict__.pop(short_name, None)
+            else:
+                current_domain.__dict__[short_name] = previous_binding
 
 
 def account_api() -> SimpleNamespace:

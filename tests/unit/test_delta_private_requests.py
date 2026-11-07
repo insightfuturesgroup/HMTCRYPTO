@@ -507,23 +507,24 @@ def test_rejected_tuple_elements_are_not_retained() -> None:
     assert callbacks == []
 
 
-def test_wallet_query_keeps_one_asset_and_empty_transaction_type_gate() -> None:
+def test_wallet_query_accepts_one_asset_and_reviewed_transaction_type_filter() -> None:
     assert WalletTransactionQuery(asset_id=None).asset_id is None
     assert WalletTransactionQuery(asset_id=17).asset_id == 17
     assert WalletTransactionQuery(transaction_types=()).transaction_types == ()
-    with pytest.raises(ValidationError):
-        WalletTransactionQuery(transaction_types=(WalletTransactionType.FUNDING,))
+    assert WalletTransactionQuery(
+        transaction_types=(WalletTransactionType.FUNDING,)
+    ).transaction_types == (WalletTransactionType.FUNDING,)
     with pytest.raises(ValidationError):
         WalletTransactionQuery(asset_id=(17,))  # type: ignore[arg-type]
 
 
-def test_wallet_enum_admission_precedes_the_empty_filter_gate() -> None:
+def test_wallet_enum_filter_accepts_only_canonical_members() -> None:
     with pytest.raises(ValidationError) as raw:
         WalletTransactionQuery(transaction_types=("funding",))  # type: ignore[arg-type]
-    with pytest.raises(ValidationError) as canonical:
-        WalletTransactionQuery(transaction_types=(WalletTransactionType.FUNDING,))
     assert raw.value.errors(include_url=False)[0]["type"] == "private_model_value"
-    assert canonical.value.errors(include_url=False)[0]["type"] == "private_wallet_filter"
+    assert WalletTransactionQuery(
+        transaction_types=(WalletTransactionType.FUNDING,)
+    ).transaction_types == (WalletTransactionType.FUNDING,)
 
 
 def test_read_order_lookup_accepts_broader_observed_client_id() -> None:

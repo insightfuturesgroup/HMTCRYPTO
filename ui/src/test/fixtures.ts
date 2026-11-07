@@ -1,0 +1,61 @@
+import { type DashboardSnapshot } from "../api/contracts";
+
+export function dashboardFixture(
+  overrides: Partial<DashboardSnapshot> = {},
+): DashboardSnapshot {
+  return {
+    sequence: 42,
+    generatedAt: "2026-11-06T12:00:00Z",
+    evidenceObservedAt: "2026-11-06T12:00:00Z",
+    region: "india",
+    environment: "testnet",
+    mode: "PAPER",
+    accountLabel: "testnet-paper",
+    catalogueFresh: true,
+    streamConnected: true,
+    reconciliationState: "READY_CLAIM",
+    riskHalted: false,
+    collateralAsset: "INR",
+    equity: "100000.00",
+    availableBalance: "75000.00",
+    totalExposure: "25000.00",
+    dailyPnl: "125.50",
+    marginUsagePercent: "25.00",
+    positions: [
+      {
+        productId: 27,
+        symbol: "BTCUSD",
+        side: "long",
+        contracts: "2",
+        entryPrice: "60000.00",
+        lastPrice: "61010.00",
+        markPrice: "61000.00",
+        leverage: "2",
+        liquidationPrice: "40000.00",
+        unrealisedPnl: "250.00",
+        realisedPnl: "50.00",
+        marginUsed: "10000.00",
+        fundingRate: "0.0100",
+        protectionState: "PAPER_SIMULATED",
+        protectionObservedAt: "2026-11-06T12:00:00Z",
+        protectionReconciliationGeneration: 3,
+      },
+    ],
+    openOrders: [
+      {
+        localOrderId: "d0c5479a-e1ce-45fb-b6e5-08cf85bb2387",
+        exchangeOrderId: "exchange-order-1",
+        clientOrderId: "client-order-1",
+        symbol: "BTCUSD",
+        side: "sell",
+        orderType: "limit_order",
+        contracts: "2",
+        limitPrice: "62000.00",
+        status: "open",
+        reduceOnly: true,
+        updatedAt: "2026-11-06T12:00:00Z",
+      },
+    ],
+    ...overrides,
+  };
+}

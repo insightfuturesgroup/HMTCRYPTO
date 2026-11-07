@@ -238,6 +238,7 @@ OperationKind = Literal[
     "SET_MARGIN_MODE",
     "CHANGE_POSITION_MARGIN",
 ]
+CommandOperationKind = OperationKind | Literal["GLOBAL_KILL"]
 PreAttemptTerminalStatus = Literal["FAILED", "CANCELLED"]
 StoredAttemptEventKind = Literal[
     "DEFINITE_NOT_SENT",
@@ -310,7 +311,7 @@ class CommandReceipt(DomainModel):
     scope: AccountScope
     command_id: UUID
     request_id: NulFreeBoundedString128
-    operation_kind: OperationKind
+    operation_kind: CommandOperationKind
     correlation_id: UUID
     status: Literal["QUEUED", "CLAIMED", "COMPLETED", "FAILED", "CANCELLED"]
     available_at: UtcDateTime
@@ -395,6 +396,7 @@ class AttemptEventProposal(DomainModel):
 class EnqueueDisposition(StrEnum):
     CREATED = "CREATED"
     EXISTING = "EXISTING"
+    ACTIVE = "ACTIVE"
 
 
 class EventDisposition(StrEnum):

@@ -12,17 +12,23 @@ dependencies = [
     "SQLAlchemy[asyncio]>=2.0.44,<2.1",
     "alembic>=1.17.1,<2",
     "aiosqlite>=0.21.0,<0.23",
+    "argon2-cffi>=23.1,<26",
     "asyncpg>=0.30.0,<0.32",
+    "fastapi>=0.115,<1",
     "httpx>=0.28.1,<0.29",
+    "prometheus-client>=0.21,<1",
     "pydantic>=2.14.2,<2.15",
     "pydantic-settings>=2.7,<3",
     "structlog>=24.4,<27",
     "typer>=0.15,<1",
+    "uvicorn[standard]>=0.34,<1",
     "websockets>=17.4,<18",
 ]
 
 [project.scripts]
 hmt-crypto = "hmt_crypto.cli:main"
+hmt-crypto-api = "hmt_crypto.api.server:main"
+hmt-crypto-worker = "hmt_crypto.worker.server:main"
 
 [project.optional-dependencies]
 dev = [

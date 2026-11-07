@@ -24,6 +24,8 @@ MIGRATIONS = ROOT / "migrations"
 VERSIONS = MIGRATIONS / "versions"
 BASELINE = VERSIONS / "phase2_baseline_v1.py"
 HARDENING = VERSIONS / "phase2_hardening_v1.py"
+CONTROL = VERSIONS / "phase5_control_v1.py"
+RECONCILIATION_CHECKPOINT = VERSIONS / "phase5_reconcile_checkpoint_v1.py"
 MANIFEST = MIGRATIONS / "schema_manifest.json"
 EXPECTED_TABLES = {
     "accounts",
@@ -79,15 +81,17 @@ def _canonical_fingerprint(statements: tuple[str, ...]) -> str:
     return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
-def test_revision_chain_has_one_baseline_and_one_hardening_head() -> None:
+def test_revision_chain_extends_the_frozen_phase2_history() -> None:
     config = Config(str(ROOT / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions(base="base", head="heads"))
     assert [(revision.revision, revision.down_revision) for revision in revisions] == [
+        ("phase5_reconcile_checkpoint_v1", "phase5_control_v1"),
+        ("phase5_control_v1", "phase2_hardening_v1"),
         ("phase2_hardening_v1", "phase2_baseline_v1"),
         ("phase2_baseline_v1", None),
     ]
-    assert script.get_current_head() == "phase2_hardening_v1"
+    assert script.get_current_head() == "phase5_reconcile_checkpoint_v1"
 
 
 def test_built_wheel_contains_the_operator_migration_history(tmp_path: Path) -> None:
@@ -118,6 +122,8 @@ def test_built_wheel_contains_the_operator_migration_history(tmp_path: Path) -> 
         "hmt_crypto_migrations/migrations/schema_manifest.json",
         "hmt_crypto_migrations/migrations/versions/phase2_baseline_v1.py",
         "hmt_crypto_migrations/migrations/versions/phase2_hardening_v1.py",
+        "hmt_crypto_migrations/migrations/versions/phase5_control_v1.py",
+        "hmt_crypto_migrations/migrations/versions/phase5_reconcile_checkpoint_v1.py",
     } <= packaged
 
 
@@ -474,6 +480,13 @@ def test_offline_upgrade_renders_without_importing_models_or_leaking_dsn(
     assert "CREATE TABLE public.hmt_crypto_alembic_version" in rendered
     assert "CREATE TABLE hmt_crypto_alembic_version" not in rendered
     assert "CREATE SCHEMA hmt_crypto" in rendered
-    assert rendered.count("CREATE TABLE hmt_crypto.") == 37
+    assert rendered.count("CREATE TABLE hmt_crypto.") == 43
+    assert "CREATE TABLE hmt_crypto.kill_workflows" in rendered
+    assert "CREATE TABLE hmt_crypto.kill_workflow_events" in rendered
+    assert "CREATE TABLE hmt_crypto.paper_execution_heads" in rendered
+    assert "CREATE TABLE hmt_crypto.paper_execution_events" in rendered
+    assert "CREATE TABLE hmt_crypto.account_reconciliation_checkpoints" in rendered
+    assert "CONSTRAINT ck_kill_workflows_identity_matches_command" in rendered
+    assert "ON hmt_crypto.kill_workflow_events" in rendered
     assert "CREATE TRIGGER" in rendered
     assert secret not in rendered

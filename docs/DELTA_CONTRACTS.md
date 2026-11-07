@@ -44,6 +44,11 @@ seconds, so the final timestamp and signature must be created immediately before
 `SignatureExpired`, `UnauthorizedApiAccess`, invalid/wrong-environment keys, signature
 mismatch, IP-whitelist failures, and CDN/`User-Agent` rejection are distinct failures.
 
+The current India permission guide says Orders, Positions, and Wallet endpoints require
+**Trading** permission, including account reads. A private-account qualification key is therefore
+treated as write-capable even when HMT-Crypto's own write path is disabled. Read Data alone is not
+documented as sufficient for those private resources.
+
 HMT-Crypto never stores or logs the API secret, signature, signed prehash, raw auth
 headers, or full key. A short irreversible key fingerprint is diagnostic metadata only.
 

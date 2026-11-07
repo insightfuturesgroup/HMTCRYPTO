@@ -52,6 +52,7 @@ async def schema_db(tmp_path):
                 api.RiskState,
                 api.ReconciliationAcknowledgement,
                 api.ReconciliationDrift,
+                api.AccountReconciliationCheckpoint,
                 api.PnlSnapshot,
                 api.FundingSnapshot,
                 api.WalletTransaction,

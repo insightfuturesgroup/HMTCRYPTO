@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from hmt_crypto.api.account_bootstrap import bootstrap_account
 from hmt_crypto.clock import (
     LocalClockDiagnostics,
     SignedProbeEvidence,
@@ -23,6 +24,7 @@ from hmt_crypto.exchange.delta.rate_limiter import (
     ScopeKind,
     WeightedRateLimiter,
 )
+from hmt_crypto.persistence.dev_schema import initialize_development_schema
 from hmt_crypto.persistence.redaction import JsonValue
 
 _USER_AGENT = "hmt-crypto/0.1.0"
@@ -227,6 +229,33 @@ async def products_sync_payload(settings: Settings) -> dict[str, JsonValue]:
     return evidence
 
 
+async def account_bootstrap_payload(
+    settings: Settings,
+    *,
+    profile_name: str,
+) -> dict[str, JsonValue]:
+    """Create or recover one credential-free development account profile."""
+    result = await bootstrap_account(settings, profile_name=profile_name)
+    return {
+        "account_id": str(result.account_id),
+        "profile_name": result.profile_name,
+        "created": result.created,
+        "region": settings.delta_region.value,
+        "environment": settings.delta_env.value,
+        "execution_mode": settings.execution_mode.value,
+    }
+
+
+async def database_init_dev_payload(settings: Settings) -> dict[str, JsonValue]:
+    """Explicitly initialize a local SQLite development schema."""
+    table_count = await initialize_development_schema(settings)
+    return {
+        "initialized": True,
+        "backend": "sqlite-development-only",
+        "table_count": table_count,
+    }
+
+
 def _selector(product_id: str | None, symbol: str | None) -> int | str:
     if (product_id is None) == (symbol is None):
         raise ValueError("exactly one product selector is required")
@@ -306,9 +335,11 @@ async def candles_payload(
 
 
 __all__ = [
+    "account_bootstrap_payload",
     "candles_payload",
     "clock_check_payload",
     "config_check_payload",
+    "database_init_dev_payload",
     "load_settings",
     "product_show_payload",
     "products_sync_payload",

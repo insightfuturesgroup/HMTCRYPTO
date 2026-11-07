@@ -190,7 +190,9 @@ def _acceptance_traceback_retains_secret(error: BaseException, secret: str) -> b
     return False
 
 
-async def _schema_evidence(url: URL) -> tuple[int, int, bool, str | None, int, int]:
+async def _schema_evidence(
+    url: URL,
+) -> tuple[int, int, bool, bool, bool, str | None, int, int]:
     engine = create_async_engine(
         url,
         hide_parameters=True,
@@ -212,6 +214,30 @@ async def _schema_evidence(url: URL) -> tuple[int, int, bool, str | None, int, i
                     "ON namespace.oid = relation.relnamespace "
                     "WHERE namespace.nspname = 'hmt_crypto' "
                     "AND NOT trigger.tgisinternal"
+                )
+            )
+            kill_event_trigger = await connection.scalar(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger AS trigger "
+                    "JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid "
+                    "JOIN pg_catalog.pg_namespace AS namespace "
+                    "ON namespace.oid = relation.relnamespace "
+                    "WHERE namespace.nspname = 'hmt_crypto' "
+                    "AND relation.relname = 'kill_workflow_events' "
+                    "AND trigger.tgname = 'hmt_crypto_append_only' "
+                    "AND NOT trigger.tgisinternal)"
+                )
+            )
+            paper_event_trigger = await connection.scalar(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger AS trigger "
+                    "JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid "
+                    "JOIN pg_catalog.pg_namespace AS namespace "
+                    "ON namespace.oid = relation.relnamespace "
+                    "WHERE namespace.nspname = 'hmt_crypto' "
+                    "AND relation.relname = 'paper_execution_events' "
+                    "AND trigger.tgname = 'hmt_crypto_append_only' "
+                    "AND NOT trigger.tgisinternal)"
                 )
             )
             invoker = await connection.scalar(
@@ -285,6 +311,8 @@ async def _schema_evidence(url: URL) -> tuple[int, int, bool, str | None, int, i
                 int(table_count or 0),
                 int(trigger_count or 0),
                 bool(invoker),
+                bool(kill_event_trigger),
+                bool(paper_event_trigger),
                 revision,
                 int(forbidden_privileges or 0),
                 int(policies or 0),
@@ -604,7 +632,16 @@ def test_migration_security_and_downgrade_contracts_on_disposable_postgres(
 
         command.upgrade(config, "head")
         evidence = asyncio.run(_schema_evidence(url))
-        assert evidence == (37, 25, True, "phase2_hardening_v1", 0, 0)
+        assert evidence == (
+            43,
+            29,
+            True,
+            True,
+            True,
+            "phase5_reconcile_checkpoint_v1",
+            0,
+            0,
+        )
         asyncio.run(_exercise_append_only_and_retention_purge(url))
         retention_role_created = True
         with pytest.raises(RuntimeError, match="without exposing server diagnostics"):

@@ -56,9 +56,34 @@ if TYPE_CHECKING:
     from hmt_crypto.exchange.private_requests import (
         WalletTransactionQuery as WalletTransactionQuery,
     )
+    from hmt_crypto.exchange.trading import (
+        AccountTradingClient as AccountTradingClient,
+    )
+    from hmt_crypto.exchange.trading import (
+        PrivateComponent as PrivateComponent,
+    )
+    from hmt_crypto.exchange.trading import (
+        PrivateEventStream as PrivateEventStream,
+    )
+    from hmt_crypto.exchange.trading import (
+        PrivateSubscriptionRequest as PrivateSubscriptionRequest,
+    )
+    from hmt_crypto.exchange.trading import (
+        TradingClient as TradingClient,
+    )
 else:
     _PRIVATE_EXPORTS = (
         ("PrivateReadClient", "hmt_crypto.exchange.private"),
+        *(
+            (name, "hmt_crypto.exchange.trading")
+            for name in (
+                "AccountTradingClient",
+                "PrivateComponent",
+                "PrivateEventStream",
+                "PrivateSubscriptionRequest",
+                "TradingClient",
+            )
+        ),
         *(
             (name, "hmt_crypto.exchange.private_requests")
             for name in (
@@ -109,6 +134,11 @@ __all__ = [
     "ProductQuery",
     "ProductRef",
     "PrivateReadClient",
+    "AccountTradingClient",
+    "PrivateComponent",
+    "PrivateEventStream",
+    "PrivateSubscriptionRequest",
+    "TradingClient",
     "PrivateContractTypeFilter",
     "MarginedPositionContractTypeFilter",
     "OpenOrderStateFilter",

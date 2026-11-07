@@ -46,6 +46,12 @@ def test_execution_metadata_tables_and_compiles_postgres():
         "risk_rate_consumptions",
         "api_audit_events",
         "api_audit_payloads",
+        "operator_audit_events",
+        "kill_workflows",
+        "kill_workflow_events",
+        "paper_execution_heads",
+        "paper_execution_events",
+        "account_reconciliation_checkpoints",
     }, "The approved persistence evidence tables are missing"
     metadata = MetaData(schema="hmt_crypto", naming_convention=api.metadata.naming_convention)
     for table in api.metadata.tables.values():

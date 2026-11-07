@@ -104,7 +104,14 @@ class _NormalizedSettingsSource(PydanticBaseSettingsSource):
         return self._wrapped.get_field_value(field, field_name)
 
     def __call__(self) -> dict[str, Any]:
-        values = _normalize_source_booleans(self._wrapped())
+        raw = self._wrapped()
+        values = _normalize_source_booleans(
+            {
+                name: value
+                for name, value in raw.items()
+                if not name.startswith(("HMT_API_", "HMT_ALERT_", "HMT_WORKER_"))
+            }
+        )
         raw_values = getattr(self._wrapped, "env_vars", None)
         if type(raw_values) is dict:
             known = {

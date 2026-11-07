@@ -3,12 +3,12 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, Index, UniqueConstraint, Uuid, event
+from sqlalchemy import CheckConstraint, Index, UniqueConstraint, Uuid, event, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from hmt_crypto.persistence.db import Base
 from hmt_crypto.persistence.errors import PersistenceValueError
-from hmt_crypto.persistence.execution_evidence import OPERATIONS
+from hmt_crypto.persistence.execution_evidence import COMMAND_OPERATIONS
 from hmt_crypto.persistence.execution_support import (
     EvidenceRow,
     ScopedRow,
@@ -29,7 +29,7 @@ class CommandOperation(ScopedRow, EvidenceRow, Base):
     __table_args__ = (
         *scoped_constraints(__tablename__),
         *evidence_constraints(),
-        checked("operation_kind", OPERATIONS),
+        checked("operation_kind", COMMAND_OPERATIONS),
         UniqueConstraint(
             "id",
             *SCOPE,
@@ -60,6 +60,15 @@ class CommandOperation(ScopedRow, EvidenceRow, Base):
         pair_check("leader_ref", "leader_generation"),
         pair_check("recovery_ref", "recovery_generation"),
         UniqueConstraint(*SCOPE, "request_id", name="uq_command_operations_scope_request"),
+        Index(
+            "uq_command_operations_one_active_global_kill",
+            *SCOPE,
+            unique=True,
+            postgresql_where=text(
+                "operation_kind = 'GLOBAL_KILL' AND status IN ('QUEUED','CLAIMED')"
+            ),
+            sqlite_where=text("operation_kind = 'GLOBAL_KILL' AND status IN ('QUEUED','CLAIMED')"),
+        ),
         Index("ix_command_operations_queue", *SCOPE, "status", "available_at", "created_at"),
     )
 

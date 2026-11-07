@@ -174,6 +174,16 @@ _DOMAIN_ALL = (
 _EXCHANGE_PRIVATE = (
     ("PrivateReadClient", "hmt_crypto.exchange.private"),
     *(
+        (name, "hmt_crypto.exchange.trading")
+        for name in (
+            "AccountTradingClient",
+            "PrivateComponent",
+            "PrivateEventStream",
+            "PrivateSubscriptionRequest",
+            "TradingClient",
+        )
+    ),
+    *(
         (name, "hmt_crypto.exchange.private_requests")
         for name in (
             "PrivateContractTypeFilter",

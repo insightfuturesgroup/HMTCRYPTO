@@ -98,6 +98,12 @@ def test_exact_two_added_tables_exports_and_acyclic_stable_scoped_keys():
         "risk_rate_consumptions",
         "api_audit_events",
         "api_audit_payloads",
+        "operator_audit_events",
+        "kill_workflows",
+        "kill_workflow_events",
+        "paper_execution_heads",
+        "paper_execution_events",
+        "account_reconciliation_checkpoints",
     }
     expected = {
         "WorkerHeartbeat": {
