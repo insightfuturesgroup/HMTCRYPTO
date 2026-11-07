@@ -1,0 +1,131 @@
+name: hmt-crypto
+
+services:
+  database:
+    image: postgres:17.6-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hmt_crypto
+      POSTGRES_USER: hmt_crypto
+      # Local-compose only. Production uses distinct Supabase runtime and
+      # migration roles supplied through a protected environment file.
+      POSTGRES_PASSWORD: ${HMT_LOCAL_DB_PASSWORD:?set HMT_LOCAL_DB_PASSWORD}
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - hmt_crypto_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hmt_crypto -d hmt_crypto"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+
+  api:
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    init: true
+    # This file contains control/API settings only. Delta credentials belong to
+    # the separately qualified worker and must never enter this process.
+    env_file: deploy/api.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://hmt_crypto:${HMT_LOCAL_DB_PASSWORD:?set HMT_LOCAL_DB_PASSWORD}@database:5432/hmt_crypto
+      DATABASE_SINGLE_PROCESS: "false"
+      HMT_API_BIND_HOST: 0.0.0.0
+      HMT_API_BIND_PORT: "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    expose: ["8000"]
+    networks: [backend]
+
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    init: true
+    # The shipped process is intentionally PAPER/BACKTEST-only. It owns no
+    # Delta credentials and drains durable controls against the local journal.
+    env_file: deploy/worker.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://hmt_crypto:${HMT_LOCAL_DB_PASSWORD:?set HMT_LOCAL_DB_PASSWORD}@database:5432/hmt_crypto
+      DATABASE_SINGLE_PROCESS: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [backend]
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    restart: "no"
+    environment:
+      DATABASE_MIGRATION_URL: postgresql+asyncpg://hmt_crypto:${HMT_LOCAL_DB_PASSWORD:?set HMT_LOCAL_DB_PASSWORD}@database:5432/hmt_crypto
+    depends_on:
+      database:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [backend]
+
+  ui:
+    build:
+      context: .
+      target: ui
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=16m,noexec,nosuid,nodev
+      - /var/run:size=1m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [backend]
+
+networks:
+  backend:
+    internal: true
+
+volumes:
+  hmt_crypto_postgres:

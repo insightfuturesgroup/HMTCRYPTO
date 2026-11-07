@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hmt-crypto"
+version = "0.1.0"
+description = "Safety-first Delta Exchange research and paper trading core"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "SQLAlchemy[asyncio]>=2.0.44,<2.1",
+    "alembic>=1.17.1,<2",
+    "aiosqlite>=0.21.0,<0.23",
+    "argon2-cffi>=23.1,<26",
+    "asyncpg>=0.30.0,<0.32",
+    "fastapi>=0.115,<1",
+    "httpx>=0.28.1,<0.29",
+    "prometheus-client>=0.21,<1",
+    "pydantic>=2.14.2,<2.15",
+    "pydantic-settings>=2.7,<3",
+    "structlog>=24.4,<27",
+    "typer>=0.15,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "websockets>=17.4,<18",
+]
+
+[project.scripts]
+hmt-crypto = "hmt_crypto.cli:main"
+hmt-crypto-api = "hmt_crypto.api.server:main"
+hmt-crypto-worker = "hmt_crypto.worker.server:main"
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2,<2",
+    "hypothesis>=6.120,<7",
+    "mypy>=1.14,<2",
+    "pytest>=8.3,<10",
+    "pytest-asyncio>=1.0,<2",
+    "respx>=0.22,<0.23",
+    "ruff>=0.9,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hmt_crypto"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"alembic.ini" = "hmt_crypto_migrations/alembic.ini"
+"migrations" = "hmt_crypto_migrations/migrations"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/tests/integration/support/task210_worker_clock_issuer.py",
+    "/tests/integration/support/task27_private_credentials_issuer.py",
+    "/tests/unit/delta_private_limiter_test_support.py",
+    "/.superpowers",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "unit: isolated behavior with no external services",
+    "contract: sanitized exchange payload and protocol contracts",
+    "integration: external service integration",
+    "testnet: Delta testnet checks",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+# Keep the Phase 0 prose baseline outside Python formatting gates.
+[tool.ruff.format]
+exclude = ["*.md"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+files = ["src"]

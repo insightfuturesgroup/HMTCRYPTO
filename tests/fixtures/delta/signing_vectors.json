@@ -1,0 +1,41 @@
+[
+  {
+    "name": "empty-query-and-body",
+    "api_key": "delta-fixture-key-2026",
+    "api_secret": "delta-fixture-secret-2026",
+    "user_agent": "hmt-crypto-signing-test/1.0",
+    "method": "GET",
+    "timestamp": 1700000000,
+    "path": "/v2/profile",
+    "query_string": "",
+    "payload": "",
+    "expected_prehash": "GET1700000000/v2/profile",
+    "expected_signature": "49bc03fc21400e9fe3e5ca962379907510818ff9964da29870d0510f2eeaeb74"
+  },
+  {
+    "name": "ordered-percent-encoded-query",
+    "api_key": "delta-fixture-key-2026",
+    "api_secret": "delta-fixture-secret-2026",
+    "user_agent": "hmt-crypto-signing-test/1.0",
+    "method": "get",
+    "timestamp": 1700000001,
+    "path": "/v2/orders",
+    "query_string": "?client_order_id=alpha%20beta&note=%E2%82%B9&state=open",
+    "payload": "",
+    "expected_prehash": "GET1700000001/v2/orders?client_order_id=alpha%20beta&note=%E2%82%B9&state=open",
+    "expected_signature": "8b93ebedf4401017823e7d7d3e584d325b011b66a81bf20a1ab41309d0b28b92"
+  },
+  {
+    "name": "exact-compact-unicode-json",
+    "api_key": "delta-fixture-key-2026",
+    "api_secret": "delta-fixture-secret-2026",
+    "user_agent": "hmt-crypto-signing-test/1.0",
+    "method": "post",
+    "timestamp": 1700000002,
+    "path": "/v2/orders",
+    "query_string": "",
+    "payload": "{\"product_id\":123,\"side\":\"buy\",\"client_order_id\":\"देल्टा-01\",\"limit_price\":\"123.45\"}",
+    "expected_prehash": "POST1700000002/v2/orders{\"product_id\":123,\"side\":\"buy\",\"client_order_id\":\"देल्टा-01\",\"limit_price\":\"123.45\"}",
+    "expected_signature": "c68b36e21a73519bdb51936cfebc0540c15fd93355f8ec48708690c711a70191"
+  }
+]

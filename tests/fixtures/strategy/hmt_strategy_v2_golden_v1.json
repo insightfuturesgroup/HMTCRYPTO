@@ -1,0 +1,1068 @@
+{
+  "schema_version": "hmt-strategy-v2-golden/v1",
+  "authority_boundary": {
+    "network": "forbidden",
+    "exchange": "forbidden",
+    "database": "forbidden",
+    "archived_runtime_dependency": "forbidden",
+    "fixture_kind": "static_behavioral_contract"
+  },
+  "provenance": {
+    "archive_name": "hmt copy.zip",
+    "archive_sha256": "96e6f61d6d49705d4643fadb012afeedec09a9857589819a0ebd660e7cdb8963",
+    "git_commit": "cae59521639108913037dbc99fd6545d8c86ca3a",
+    "exported_function": "evaluateStrategyV2",
+    "strategy_config_schema_sha256": "0242587622b9784518ed9900fb0b87aa282bd169a0f4b5f81c9663872cad8e8e",
+    "source_files": [
+      {
+        "path": "supabase/functions/_shared/strategyEvaluatorV2.ts",
+        "sha256": "9e4c2f83ae48261a7f5032e25ccbefd7b1ae8a46d3e545b6d3151ed811d648d2"
+      },
+      {
+        "path": "supabase/functions/_shared/strategyConfigTypes.ts",
+        "sha256": "0242587622b9784518ed9900fb0b87aa282bd169a0f4b5f81c9663872cad8e8e"
+      },
+      {
+        "path": "src/lib/strategyTemplates/algo615.ts",
+        "sha256": "adb69aed8a98e3bbf26207f86495c49b7daa4e6298291377d056b59eb1c5862c"
+      },
+      {
+        "path": "src/lib/__tests__/strategyEvaluatorV2.test.ts",
+        "sha256": "2d85bdfccfe25bc7ff628aca77de0565094841e6b12648568d0ab86de2c900ac"
+      }
+    ],
+    "reviewed_adjacent_files": [
+      {
+        "path": "supabase/functions/_shared/indicatorRegistry.ts",
+        "sha256": "68bf0050688adb229d32b8d99a767715f6d61330fe906873db2822c6c70a7363"
+      },
+      {
+        "path": "src/lib/__tests__/indicatorRegistry.test.ts",
+        "sha256": "c5ceb9d7b91d9aa2b8e1cfedd5123e614c36ee4677d33a2d65f5ff51e9bf4d2a"
+      }
+    ],
+    "extraction_note": "Read-only archive extraction into a disposable local directory; no network or package install."
+  },
+  "adjacent_indicator_review": {
+    "classification": "reusable_with_changes",
+    "fixture_status": "reviewed_and_deferred_from_evaluator_golden",
+    "reusable_behavior": "ATR and EMA parameter normalization is broker-independent.",
+    "adaptation_boundary": "Map candle intervals to Delta data and replace previous-trading-day and trading-session assumptions before porting pivot or buildup behavior.",
+    "rationale": "evaluateStrategyV2 consumes precomputed fields and does not calculate indicators, so indicator math belongs to a separate golden slice."
+  },
+  "portability_notes": {
+    "lots": "Captured only as evaluator action units; crypto execution must convert approved quantity to Delta contracts.",
+    "broker_override": "Captured as final execution-override precedence; a crypto port should use an exchange-neutral name.",
+    "schedule_harness": "One fixed Monday all-day entry only makes archived evaluator branches reachable; its IST semantics are excluded."
+  },
+  "exclusions": [
+    {
+      "id": "india_vix_regimes",
+      "classification": "india_specific_must_replace",
+      "excluded_behavior": "India VIX selection and Zerodha VIX sourcing",
+      "crypto_replacement": "One unbounded strategy regime; funding and volatility are separate explicit inputs."
+    },
+    {
+      "id": "india_session_calendar",
+      "classification": "india_specific_must_replace",
+      "excluded_behavior": "IST weekday windows, NSE holidays, and exchange close square-off",
+      "crypto_replacement": "24x7 operation with configurable UTC risk and maintenance windows."
+    },
+    {
+      "id": "india_results_calendar",
+      "classification": "not_needed_for_crypto",
+      "excluded_behavior": "Equity corporate-results event lookup and blocking",
+      "crypto_replacement": "Optional crypto event and funding awareness outside the portable strategy core."
+    },
+    {
+      "id": "kite_broker_behavior",
+      "classification": "india_specific_must_replace",
+      "excluded_behavior": "Zerodha order, product, margin, and active-position behavior",
+      "crypto_replacement": "Delta OMS, reconciliation, contract sizing, leverage, and margin controls."
+    },
+    {
+      "id": "india_symbol_normalization",
+      "classification": "india_specific_must_replace",
+      "excluded_behavior": "NSE derivative suffix stripping and underlying-symbol matching",
+      "crypto_replacement": "ProductCatalog symbol and numeric product_id identity."
+    },
+    {
+      "id": "india_lot_semantics",
+      "classification": "india_specific_must_replace",
+      "excluded_behavior": "Kite instrument-dump lot and product assumptions",
+      "crypto_replacement": "Decimal-safe conversion among quantity, notional, and Delta contracts."
+    }
+  ],
+  "portable_config_sha256": "74ec85d185522e12b65b382f74aef73650fbcc9b41bf8f9b77ddfad2430c9d6f",
+  "portable_config": {
+    "schema_version": 2,
+    "algo_name": "HMT portable Strategy-v2 golden harness",
+    "algo_version": "golden-v1",
+    "description": "Synthetic broker-independent evaluator characterization; not a trading strategy.",
+    "engines": {
+      "BUY_CORE": {
+        "engine_id": "BUY_CORE",
+        "name": "Portable buy core",
+        "direction": "BUY",
+        "mode": "live",
+        "default_lots": 2,
+        "atr_multiplier": 1.2,
+        "sl_atr_multiplier": 1.3,
+        "target_atr_multiplier": 1.4,
+        "rules": [
+          {
+            "field": "volume_ratio",
+            "operator": "gte",
+            "min": 0.5
+          },
+          {
+            "field": "trade_score",
+            "operator": "gte",
+            "min": 50
+          }
+        ]
+      },
+      "SELL_CORE": {
+        "engine_id": "SELL_CORE",
+        "name": "Portable sell core",
+        "direction": "SELL",
+        "mode": "live",
+        "default_lots": 3,
+        "atr_multiplier": 1.15,
+        "sl_atr_multiplier": 1.25,
+        "target_atr_multiplier": 1.35,
+        "rules": [
+          {
+            "field": "volume_ratio",
+            "operator": "gte",
+            "min": 0.5
+          },
+          {
+            "field": "trade_score",
+            "operator": "gte",
+            "min": 50
+          }
+        ]
+      }
+    },
+    "regimes": {
+      "PORTABLE_UNBOUNDED": {
+        "regime_id": "PORTABLE_UNBOUNDED",
+        "name": "Portable unbounded harness regime",
+        "enabled": true,
+        "vix_min": null,
+        "vix_max": null,
+        "buy_schedule": {
+          "1": {
+            "start_time": "00:00",
+            "end_time": "23:59",
+            "engines": [
+              {
+                "engine_id": "BUY_CORE",
+                "accelerator_ids": [
+                  "GROUPED",
+                  "OVERRIDDEN"
+                ],
+                "accelerator_overrides": {
+                  "OVERRIDDEN": {
+                    "lots": 6,
+                    "atr_multiplier": 2.1,
+                    "sl_atr_multiplier": 2.2,
+                    "target_atr_multiplier": 2.3
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "sell_schedule": {
+          "1": {
+            "start_time": "00:00",
+            "end_time": "23:59",
+            "engines": [
+              {
+                "engine_id": "SELL_CORE",
+                "accelerator_ids": []
+              }
+            ]
+          }
+        }
+      }
+    },
+    "accelerators": {
+      "GROUPED": {
+        "accelerator_id": "GROUPED",
+        "name": "Portable grouped accelerator",
+        "priority": 1,
+        "mode": "live",
+        "enabled": true,
+        "conditions": [],
+        "condition_groups": [
+          {
+            "group_id": "momentum",
+            "conditions": [
+              {
+                "field": "trade_grade",
+                "operator": "eq",
+                "value": "GROUPED"
+              },
+              {
+                "field": "volume_ratio",
+                "operator": "gte",
+                "min": 2
+              }
+            ]
+          },
+          {
+            "group_id": "quality",
+            "conditions": [
+              {
+                "field": "trade_grade",
+                "operator": "eq",
+                "value": "GROUPED"
+              },
+              {
+                "field": "adx",
+                "operator": "gte",
+                "min": 35
+              }
+            ]
+          }
+        ],
+        "action": {
+          "lots": 4,
+          "atr_multiplier": 1.5,
+          "sl_atr_multiplier": 1.6,
+          "target_atr_multiplier": 1.7
+        }
+      },
+      "OVERRIDDEN": {
+        "accelerator_id": "OVERRIDDEN",
+        "name": "Portable override accelerator",
+        "priority": 2,
+        "mode": "live",
+        "enabled": true,
+        "conditions": [
+          {
+            "field": "trade_grade",
+            "operator": "eq",
+            "value": "OVERRIDE"
+          },
+          {
+            "field": "volume_ratio",
+            "operator": "gte",
+            "min": 1
+          }
+        ],
+        "action": {
+          "lots": 5,
+          "atr_multiplier": 1.8,
+          "sl_atr_multiplier": 1.9,
+          "target_atr_multiplier": 2
+        }
+      }
+    },
+    "standard": {
+      "lots": 1,
+      "target_atr_multiplier": 1.1,
+      "stock_target_overrides": [
+        {
+          "symbol": "BTCUSD",
+          "target_atr_multiplier": 3.1
+        }
+      ]
+    },
+    "guardrails": {
+      "one_active_trade_per_stock": false,
+      "stock_universe": {
+        "mode": "all",
+        "whitelist": [],
+        "blocklist": []
+      },
+      "event_calendar": {
+        "enabled": false,
+        "event_types": [],
+        "days_before": 0,
+        "days_after": 0,
+        "action": "block"
+      }
+    }
+  },
+  "cases": [
+    {
+      "case_id": "buy_engine_standard",
+      "intent": "Engine AND-rules pass and engine multipliers supply the standard action.",
+      "payload": {
+        "volume_ratio": 1,
+        "trade_score": 80,
+        "trade_grade": "STANDARD",
+        "adx": 20,
+        "trade_type": "BUY"
+      },
+      "options": {
+        "market": "delta_india",
+        "now": "2026-07-13T05:00:00.000Z",
+        "symbol": "ETHUSD",
+        "eventCalendarMatches": [],
+        "eventCalendarLookupStatus": "success",
+        "tradeType": "BUY"
+      },
+      "expected": {
+        "passed": true,
+        "status": "passed",
+        "reason": "Passed — eligible for live execution",
+        "direction": "BUY",
+        "matched_engine_id": "BUY_CORE",
+        "matched_accelerator_id": null,
+        "lots": 2,
+        "atr_multiplier": 1.2,
+        "sl_atr_multiplier": 1.3,
+        "target_atr_multiplier": 1.4,
+        "atr_multiplier_source": "engine",
+        "sl_multiplier_source": "engine",
+        "target_multiplier_source": "engine",
+        "stock_target_override_symbol": null,
+        "diagnostics": {
+          "engine_rules": [
+            {
+              "rule": "volume_ratio gte",
+              "pass": true,
+              "reason": "volume_ratio=1 >= 0.5"
+            },
+            {
+              "rule": "trade_score gte",
+              "pass": true,
+              "reason": "trade_score=80 >= 50"
+            }
+          ],
+          "failed_rule": null,
+          "accelerator_condition_mode": null,
+          "accelerator_group_passes": {},
+          "accelerator_evaluations": [
+            {
+              "accelerator_id": "GROUPED",
+              "status": "failed",
+              "condition_mode": "or_groups",
+              "groups": [
+                {
+                  "group_id": "momentum",
+                  "pass": false,
+                  "failed_rule": "trade_grade=\"STANDARD\" != \"GROUPED\"",
+                  "rule_passes": [
+                    false,
+                    false
+                  ]
+                },
+                {
+                  "group_id": "quality",
+                  "pass": false,
+                  "failed_rule": "trade_grade=\"STANDARD\" != \"GROUPED\"",
+                  "rule_passes": [
+                    false,
+                    false
+                  ]
+                }
+              ]
+            },
+            {
+              "accelerator_id": "OVERRIDDEN",
+              "status": "failed",
+              "condition_mode": "and",
+              "groups": [
+                {
+                  "group_id": "legacy",
+                  "pass": false,
+                  "failed_rule": "trade_grade=\"STANDARD\" != \"OVERRIDE\"",
+                  "rule_passes": [
+                    false,
+                    true
+                  ]
+                }
+              ]
+            }
+          ],
+          "final_action": {
+            "lots": 2,
+            "atr_multiplier": 1.2,
+            "sl_atr_multiplier": 1.3,
+            "target_atr_multiplier": 1.4
+          },
+          "trace_statuses": {
+            "engine_BUY_CORE": "success",
+            "engine_selection": "success",
+            "engine_mode": "success",
+            "acc_GROUPED": "failed",
+            "acc_OVERRIDDEN": "failed",
+            "accelerator_selection": "skipped",
+            "stock_target_override": "skipped",
+            "final_action": "success"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "grouped_accelerator_first_group",
+      "intent": "The first accelerator group passes; rules inside the group remain ANDed.",
+      "payload": {
+        "volume_ratio": 2.5,
+        "trade_score": 80,
+        "trade_grade": "GROUPED",
+        "adx": 10,
+        "trade_type": "BUY"
+      },
+      "options": {
+        "market": "delta_india",
+        "now": "2026-07-13T05:00:00.000Z",
+        "symbol": "ETHUSD",
+        "eventCalendarMatches": [],
+        "eventCalendarLookupStatus": "success",
+        "tradeType": "BUY"
+      },
+      "expected": {
+        "passed": true,
+        "status": "passed",
+        "reason": "Passed — eligible for live execution",
+        "direction": "BUY",
+        "matched_engine_id": "BUY_CORE",
+        "matched_accelerator_id": "GROUPED",
+        "lots": 4,
+        "atr_multiplier": 1.5,
+        "sl_atr_multiplier": 1.6,
+        "target_atr_multiplier": 1.7,
+        "atr_multiplier_source": "accelerator",
+        "sl_multiplier_source": "accelerator",
+        "target_multiplier_source": "accelerator",
+        "stock_target_override_symbol": null,
+        "diagnostics": {
+          "engine_rules": [
+            {
+              "rule": "volume_ratio gte",
+              "pass": true,
+              "reason": "volume_ratio=2.5 >= 0.5"
+            },
+            {
+              "rule": "trade_score gte",
+              "pass": true,
+              "reason": "trade_score=80 >= 50"
+            }
+          ],
+          "failed_rule": null,
+          "accelerator_condition_mode": "or_groups",
+          "accelerator_group_passes": {
+            "momentum": true,
+            "quality": false
+          },
+          "accelerator_evaluations": [
+            {
+              "accelerator_id": "GROUPED",
+              "status": "success",
+              "condition_mode": "or_groups",
+              "groups": [
+                {
+                  "group_id": "momentum",
+                  "pass": true,
+                  "failed_rule": null,
+                  "rule_passes": [
+                    true,
+                    true
+                  ]
+                },
+                {
+                  "group_id": "quality",
+                  "pass": false,
+                  "failed_rule": "adx=10 < 35",
+                  "rule_passes": [
+                    true,
+                    false
+                  ]
+                }
+              ]
+            }
+          ],
+          "final_action": {
+            "lots": 4,
+            "atr_multiplier": 1.5,
+            "sl_atr_multiplier": 1.6,
+            "target_atr_multiplier": 1.7
+          },
+          "trace_statuses": {
+            "engine_BUY_CORE": "success",
+            "engine_selection": "success",
+            "engine_mode": "success",
+            "acc_GROUPED": "success",
+            "acc_GROUPED_action": "success",
+            "stock_target_override": "skipped",
+            "final_action": "success"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "grouped_accelerator_second_group",
+      "intent": "The second accelerator group demonstrates OR-across-groups behavior.",
+      "payload": {
+        "volume_ratio": 1,
+        "trade_score": 80,
+        "trade_grade": "GROUPED",
+        "adx": 40,
+        "trade_type": "BUY"
+      },
+      "options": {
+        "market": "delta_india",
+        "now": "2026-07-13T05:00:00.000Z",
+        "symbol": "ETHUSD",
+        "eventCalendarMatches": [],
+        "eventCalendarLookupStatus": "success",
+        "tradeType": "BUY"
+      },
+      "expected": {
+        "passed": true,
+        "status": "passed",
+        "reason": "Passed — eligible for live execution",
+        "direction": "BUY",
+        "matched_engine_id": "BUY_CORE",
+        "matched_accelerator_id": "GROUPED",
+        "lots": 4,
+        "atr_multiplier": 1.5,
+        "sl_atr_multiplier": 1.6,
+        "target_atr_multiplier": 1.7,
+        "atr_multiplier_source": "accelerator",
+        "sl_multiplier_source": "accelerator",
+        "target_multiplier_source": "accelerator",
+        "stock_target_override_symbol": null,
+        "diagnostics": {
+          "engine_rules": [
+            {
+              "rule": "volume_ratio gte",
+              "pass": true,
+              "reason": "volume_ratio=1 >= 0.5"
+            },
+            {
+              "rule": "trade_score gte",
+              "pass": true,
+              "reason": "trade_score=80 >= 50"
+            }
+          ],
+          "failed_rule": null,
+          "accelerator_condition_mode": "or_groups",
+          "accelerator_group_passes": {
+            "momentum": false,
+            "quality": true
+          },
+          "accelerator_evaluations": [
+            {
+              "accelerator_id": "GROUPED",
+              "status": "success",
+              "condition_mode": "or_groups",
+              "groups": [
+                {
+                  "group_id": "momentum",
+                  "pass": false,
+                  "failed_rule": "volume_ratio=1 < 2",
+                  "rule_passes": [
+                    true,
+                    false
+                  ]
+                },
+                {
+                  "group_id": "quality",
+                  "pass": true,
+                  "failed_rule": null,
+                  "rule_passes": [
+                    true,
+                    true
+                  ]
+                }
+              ]
+            }
+          ],
+          "final_action": {
+            "lots": 4,
+            "atr_multiplier": 1.5,
+            "sl_atr_multiplier": 1.6,
+            "target_atr_multiplier": 1.7
+          },
+          "trace_statuses": {
+            "engine_BUY_CORE": "success",
+            "engine_selection": "success",
+            "engine_mode": "success",
+            "acc_GROUPED": "success",
+            "acc_GROUPED_action": "success",
+            "stock_target_override": "skipped",
+            "final_action": "success"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "schedule_override_precedence",
+      "intent": "A schedule action override wins over accelerator and engine multipliers.",
+      "payload": {
+        "volume_ratio": 1.5,
+        "trade_score": 80,
+        "trade_grade": "OVERRIDE",
+        "adx": 20,
+        "trade_type": "BUY"
+      },
+      "options": {
+        "market": "delta_india",
+        "now": "2026-07-13T05:00:00.000Z",
+        "symbol": "ETHUSD",
+        "eventCalendarMatches": [],
+        "eventCalendarLookupStatus": "success",
+        "tradeType": "BUY"
+      },
+      "expected": {
+        "passed": true,
+        "status": "passed",
+        "reason": "Passed — eligible for live execution",
+        "direction": "BUY",
+        "matched_engine_id": "BUY_CORE",
+        "matched_accelerator_id": "OVERRIDDEN",
+        "lots": 6,
+        "atr_multiplier": 2.1,
+        "sl_atr_multiplier": 2.2,
+        "target_atr_multiplier": 2.3,
+        "atr_multiplier_source": "schedule_override",
+        "sl_multiplier_source": "schedule_override",
+        "target_multiplier_source": "schedule_override",
+        "stock_target_override_symbol": null,
+        "diagnostics": {
+          "engine_rules": [
+            {
+              "rule": "volume_ratio gte",
+              "pass": true,
+              "reason": "volume_ratio=1.5 >= 0.5"
+            },
+            {
+              "rule": "trade_score gte",
+              "pass": true,
+              "reason": "trade_score=80 >= 50"
+            }
+          ],
+          "failed_rule": null,
+          "accelerator_condition_mode": "and",
+          "accelerator_group_passes": {
+            "legacy": true
+          },
+          "accelerator_evaluations": [
+            {
+              "accelerator_id": "GROUPED",
+              "status": "failed",
+              "condition_mode": "or_groups",
+              "groups": [
+                {
+                  "group_id": "momentum",
+                  "pass": false,
+                  "failed_rule": "trade_grade=\"OVERRIDE\" != \"GROUPED\"",
+                  "rule_passes": [
+                    false,
+                    false
+                  ]
+                },
+                {
+                  "group_id": "quality",
+                  "pass": false,
+                  "failed_rule": "trade_grade=\"OVERRIDE\" != \"GROUPED\"",
+                  "rule_passes": [
+                    false,
+                    false
+                  ]
+                }
+              ]
+            },
+            {
+              "accelerator_id": "OVERRIDDEN",
+              "status": "success",
+              "condition_mode": "and",
+              "groups": [
+                {
+                  "group_id": "legacy",
+                  "pass": true,
+                  "failed_rule": null,
+                  "rule_passes": [
+                    true,
+                    true
+                  ]
+                }
+              ]
+            }
+          ],
+          "final_action": {
+            "lots": 6,
+            "atr_multiplier": 2.1,
+            "sl_atr_multiplier": 2.2,
+            "target_atr_multiplier": 2.3
+          },
+          "trace_statuses": {
+            "engine_BUY_CORE": "success",
+            "engine_selection": "success",
+            "engine_mode": "success",
+            "acc_GROUPED": "failed",
+            "acc_OVERRIDDEN": "success",
+            "acc_OVERRIDDEN_action": "success",
+            "stock_target_override": "skipped",
+            "final_action": "success"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "execution_override_precedence",
+      "intent": "The evaluator's final broker override hook wins over schedule action overrides.",
+      "payload": {
+        "volume_ratio": 1.5,
+        "trade_score": 80,
+        "trade_grade": "OVERRIDE",
+        "adx": 20,
+        "trade_type": "BUY"
+      },
+      "options": {
+        "market": "delta_india",
+        "now": "2026-07-13T05:00:00.000Z",
+        "symbol": "ETHUSD",
+        "eventCalendarMatches": [],
+        "eventCalendarLookupStatus": "success",
+        "tradeType": "BUY",
+        "brokerOverrides": {
+          "lots": 7,
+          "atr_multiplier": 2.4,
+          "sl_atr_multiplier": 2.5,
+          "target_atr_multiplier": 2.6
+        }
+      },
+      "expected": {
+        "passed": true,
+        "status": "passed",
+        "reason": "Passed — eligible for live execution",
+        "direction": "BUY",
+        "matched_engine_id": "BUY_CORE",
+        "matched_accelerator_id": "OVERRIDDEN",
+        "lots": 7,
+        "atr_multiplier": 2.4,
+        "sl_atr_multiplier": 2.5,
+        "target_atr_multiplier": 2.6,
+        "atr_multiplier_source": "broker_override",
+        "sl_multiplier_source": "broker_override",
+        "target_multiplier_source": "broker_override",
+        "stock_target_override_symbol": null,
+        "diagnostics": {
+          "engine_rules": [
+            {
+              "rule": "volume_ratio gte",
+              "pass": true,
+              "reason": "volume_ratio=1.5 >= 0.5"
+            },
+            {
+              "rule": "trade_score gte",
+              "pass": true,
+              "reason": "trade_score=80 >= 50"
+            }
+          ],
+          "failed_rule": null,
+          "accelerator_condition_mode": "and",
+          "accelerator_group_passes": {
+            "legacy": true
+          },
+          "accelerator_evaluations": [
+            {
+              "accelerator_id": "GROUPED",
+              "status": "failed",
+              "condition_mode": "or_groups",
+              "groups": [
+                {
+                  "group_id": "momentum",
+                  "pass": false,
+                  "failed_rule": "trade_grade=\"OVERRIDE\" != \"GROUPED\"",
+                  "rule_passes": [
+                    false,
+                    false
+                  ]
+                },
+                {
+                  "group_id": "quality",
+                  "pass": false,
+                  "failed_rule": "trade_grade=\"OVERRIDE\" != \"GROUPED\"",
+                  "rule_passes": [
+                    false,
+                    false
+                  ]
+                }
+              ]
+            },
+            {
+              "accelerator_id": "OVERRIDDEN",
+              "status": "success",
+              "condition_mode": "and",
+              "groups": [
+                {
+                  "group_id": "legacy",
+                  "pass": true,
+                  "failed_rule": null,
+                  "rule_passes": [
+                    true,
+                    true
+                  ]
+                }
+              ]
+            }
+          ],
+          "final_action": {
+            "lots": 7,
+            "atr_multiplier": 2.4,
+            "sl_atr_multiplier": 2.5,
+            "target_atr_multiplier": 2.6
+          },
+          "trace_statuses": {
+            "engine_BUY_CORE": "success",
+            "engine_selection": "success",
+            "engine_mode": "success",
+            "acc_GROUPED": "failed",
+            "acc_OVERRIDDEN": "success",
+            "acc_OVERRIDDEN_action": "success",
+            "stock_target_override": "skipped",
+            "broker_action_override": "success",
+            "final_action": "success"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "stock_target_override",
+      "intent": "A symbol target override wins over an engine target on the standard path.",
+      "payload": {
+        "volume_ratio": 1,
+        "trade_score": 80,
+        "trade_grade": "STANDARD",
+        "adx": 20,
+        "trade_type": "BUY"
+      },
+      "options": {
+        "market": "delta_india",
+        "now": "2026-07-13T05:00:00.000Z",
+        "symbol": "BTCUSD",
+        "eventCalendarMatches": [],
+        "eventCalendarLookupStatus": "success",
+        "tradeType": "BUY"
+      },
+      "expected": {
+        "passed": true,
+        "status": "passed",
+        "reason": "Passed — eligible for live execution",
+        "direction": "BUY",
+        "matched_engine_id": "BUY_CORE",
+        "matched_accelerator_id": null,
+        "lots": 2,
+        "atr_multiplier": 1.2,
+        "sl_atr_multiplier": 1.3,
+        "target_atr_multiplier": 3.1,
+        "atr_multiplier_source": "engine",
+        "sl_multiplier_source": "engine",
+        "target_multiplier_source": "stock_override",
+        "stock_target_override_symbol": "BTCUSD",
+        "diagnostics": {
+          "engine_rules": [
+            {
+              "rule": "volume_ratio gte",
+              "pass": true,
+              "reason": "volume_ratio=1 >= 0.5"
+            },
+            {
+              "rule": "trade_score gte",
+              "pass": true,
+              "reason": "trade_score=80 >= 50"
+            }
+          ],
+          "failed_rule": null,
+          "accelerator_condition_mode": null,
+          "accelerator_group_passes": {},
+          "accelerator_evaluations": [
+            {
+              "accelerator_id": "GROUPED",
+              "status": "failed",
+              "condition_mode": "or_groups",
+              "groups": [
+                {
+                  "group_id": "momentum",
+                  "pass": false,
+                  "failed_rule": "trade_grade=\"STANDARD\" != \"GROUPED\"",
+                  "rule_passes": [
+                    false,
+                    false
+                  ]
+                },
+                {
+                  "group_id": "quality",
+                  "pass": false,
+                  "failed_rule": "trade_grade=\"STANDARD\" != \"GROUPED\"",
+                  "rule_passes": [
+                    false,
+                    false
+                  ]
+                }
+              ]
+            },
+            {
+              "accelerator_id": "OVERRIDDEN",
+              "status": "failed",
+              "condition_mode": "and",
+              "groups": [
+                {
+                  "group_id": "legacy",
+                  "pass": false,
+                  "failed_rule": "trade_grade=\"STANDARD\" != \"OVERRIDE\"",
+                  "rule_passes": [
+                    false,
+                    true
+                  ]
+                }
+              ]
+            }
+          ],
+          "final_action": {
+            "lots": 2,
+            "atr_multiplier": 1.2,
+            "sl_atr_multiplier": 1.3,
+            "target_atr_multiplier": 3.1
+          },
+          "trace_statuses": {
+            "engine_BUY_CORE": "success",
+            "engine_selection": "success",
+            "engine_mode": "success",
+            "acc_GROUPED": "failed",
+            "acc_OVERRIDDEN": "failed",
+            "accelerator_selection": "skipped",
+            "stock_target_override": "success",
+            "final_action": "success"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "sell_direction",
+      "intent": "Direction chooses the SELL schedule and SELL engine without broker behavior.",
+      "payload": {
+        "volume_ratio": 1,
+        "trade_score": 80,
+        "trade_grade": "STANDARD",
+        "adx": 20,
+        "trade_type": "SELL"
+      },
+      "options": {
+        "market": "delta_india",
+        "now": "2026-07-13T05:00:00.000Z",
+        "symbol": "ETHUSD",
+        "eventCalendarMatches": [],
+        "eventCalendarLookupStatus": "success",
+        "tradeType": "SELL"
+      },
+      "expected": {
+        "passed": true,
+        "status": "passed",
+        "reason": "Passed — eligible for live execution",
+        "direction": "SELL",
+        "matched_engine_id": "SELL_CORE",
+        "matched_accelerator_id": null,
+        "lots": 3,
+        "atr_multiplier": 1.15,
+        "sl_atr_multiplier": 1.25,
+        "target_atr_multiplier": 1.35,
+        "atr_multiplier_source": "engine",
+        "sl_multiplier_source": "engine",
+        "target_multiplier_source": "engine",
+        "stock_target_override_symbol": null,
+        "diagnostics": {
+          "engine_rules": [
+            {
+              "rule": "volume_ratio gte",
+              "pass": true,
+              "reason": "volume_ratio=1 >= 0.5"
+            },
+            {
+              "rule": "trade_score gte",
+              "pass": true,
+              "reason": "trade_score=80 >= 50"
+            }
+          ],
+          "failed_rule": null,
+          "accelerator_condition_mode": null,
+          "accelerator_group_passes": {},
+          "accelerator_evaluations": [],
+          "final_action": {
+            "lots": 3,
+            "atr_multiplier": 1.15,
+            "sl_atr_multiplier": 1.25,
+            "target_atr_multiplier": 1.35
+          },
+          "trace_statuses": {
+            "engine_SELL_CORE": "success",
+            "engine_selection": "success",
+            "engine_mode": "success",
+            "accelerator_selection": "skipped",
+            "stock_target_override": "skipped",
+            "final_action": "success"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "engine_rule_failure_diagnostics",
+      "intent": "A failed engine rule rejects the signal and preserves the first failure diagnostic.",
+      "payload": {
+        "volume_ratio": 0.25,
+        "trade_score": 40,
+        "trade_grade": "STANDARD",
+        "adx": 20,
+        "trade_type": "BUY"
+      },
+      "options": {
+        "market": "delta_india",
+        "now": "2026-07-13T05:00:00.000Z",
+        "symbol": "ETHUSD",
+        "eventCalendarMatches": [],
+        "eventCalendarLookupStatus": "success",
+        "tradeType": "BUY"
+      },
+      "expected": {
+        "passed": false,
+        "status": "rejected",
+        "reason": "No engine passed rules: BUY_CORE (Portable buy core): volume_ratio=0.25 < 0.5",
+        "direction": "BUY",
+        "matched_engine_id": null,
+        "matched_accelerator_id": null,
+        "lots": 0,
+        "atr_multiplier": null,
+        "sl_atr_multiplier": null,
+        "target_atr_multiplier": 0,
+        "atr_multiplier_source": null,
+        "sl_multiplier_source": null,
+        "target_multiplier_source": null,
+        "stock_target_override_symbol": null,
+        "diagnostics": {
+          "engine_rules": [
+            {
+              "rule": "volume_ratio gte",
+              "pass": false,
+              "reason": "volume_ratio=0.25 < 0.5"
+            },
+            {
+              "rule": "trade_score gte",
+              "pass": false,
+              "reason": "trade_score=40 < 50"
+            }
+          ],
+          "failed_rule": "volume_ratio=0.25 < 0.5",
+          "accelerator_condition_mode": null,
+          "accelerator_group_passes": {},
+          "accelerator_evaluations": [],
+          "final_action": null,
+          "trace_statuses": {
+            "engine_BUY_CORE": "failed",
+            "engine_selection": "failed"
+          }
+        }
+      }
+    }
+  ],
+  "content_sha256": "158d4aedf3cc694ec089c63e8c0b09c978b281e919469c16b607a790b807ea33"
+}

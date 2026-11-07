@@ -1,0 +1,36 @@
+[Unit]
+Description=HMT-Crypto PAPER/BACKTEST durable worker
+After=network-online.target hmt-crypto-migrate.service
+Wants=network-online.target
+Requires=hmt-crypto-migrate.service
+
+[Service]
+Type=simple
+User=hmt-crypto
+Group=hmt-crypto
+WorkingDirectory=/opt/hmt-crypto
+EnvironmentFile=/etc/hmt-crypto/worker.env
+ExecStart=/opt/hmt-crypto/.venv/bin/hmt-crypto-worker
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

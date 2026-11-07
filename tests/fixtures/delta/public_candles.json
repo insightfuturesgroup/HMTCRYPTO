@@ -1,0 +1,7 @@
+{
+  "success": true,
+  "result": [
+    {"time": 1700000000, "open": "100.0", "high": "103.0", "low": "99.5", "close": "102.0", "volume": "12.5"},
+    {"time": 1700000060, "open": 102.0, "high": 104.25, "low": 101.75, "close": 103.5, "volume": 7}
+  ]
+}

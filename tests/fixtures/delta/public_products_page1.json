@@ -1,0 +1,28 @@
+{
+  "success": true,
+  "result": [
+    {
+      "id": 101,
+      "symbol": "XBTUSD_TEST",
+      "contract_type": "perpetual_futures",
+      "notional_type": "vanilla",
+      "contract_value": "0.001",
+      "contract_unit_currency": "XBT",
+      "tick_size": "0.5",
+      "state": "live",
+      "trading_status": "operational",
+      "is_quanto": false,
+      "initial_margin": "0.02",
+      "maintenance_margin": "0.01",
+      "default_leverage": "50",
+      "max_leverage_notional": "100000",
+      "position_size_limit": 5000,
+      "position_notional_limit": "250000",
+      "product_specs": {"only_reduce_only_orders_allowed": false},
+      "underlying_asset": {"id": 1, "symbol": "XBT", "precision": 8, "minimum_precision": 1},
+      "quoting_asset": {"id": 2, "symbol": "USD", "precision": 8, "minimum_precision": 2},
+      "settling_asset": {"id": 2, "symbol": "USD", "precision": 8, "minimum_precision": 2}
+    }
+  ],
+  "meta": {"after": "synthetic-next", "before": null}
+}

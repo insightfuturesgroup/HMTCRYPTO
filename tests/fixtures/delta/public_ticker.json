@@ -1,0 +1,14 @@
+{
+  "success": true,
+  "result": {
+    "product_id": 101,
+    "symbol": "XBTUSD_TEST",
+    "contract_type": "perpetual_futures",
+    "timestamp": 1700000000,
+    "mark_price": "50000.125",
+    "spot_price": "49990.25",
+    "close": 49999.875,
+    "quotes": {"best_bid": "50000.0", "best_ask": "50000.5"},
+    "price_band": {"lower_limit": "45000", "upper_limit": "55000"}
+  }
+}

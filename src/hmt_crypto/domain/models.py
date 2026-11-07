@@ -1,0 +1,152 @@
+"""Immutable, exact domain models for Phase 1 public exchange data."""
+
+from __future__ import annotations
+
+from typing import Annotated, Any, Self, cast
+from uuid import UUID
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    StrictBool,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
+from pydantic_core import InitErrorDetails
+
+from hmt_crypto.domain.enums import ContractType, NotionalType, ProductState, TradingStatus
+from hmt_crypto.domain.money import NonNegativeDecimal, PositiveDecimal, UtcDateTime
+
+PositiveId = Annotated[int, Field(strict=True, gt=0)]
+NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
+NonEmptyText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, strict=True),
+]
+
+
+class DomainModel(BaseModel):
+    """Shared fail-closed configuration for immutable public domain values."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def remove_structured_validation_inputs(
+        cls, values: Any, handler: ModelWrapValidatorHandler[Self]
+    ) -> Self:
+        """Remove raw exchange inputs from every Pydantic error representation."""
+        try:
+            return handler(values)
+        except ValidationError as error:
+            details = cast(list[InitErrorDetails], error.errors(include_input=False))
+            raise ValidationError.from_exception_data(
+                cls.__name__, details, hide_input=True
+            ) from None
+
+
+class Asset(DomainModel):
+    """An exchange asset identified by its environment-specific numeric ID."""
+
+    id: PositiveId
+    symbol: NonEmptyText
+    precision: NonNegativeInt | None = None
+    minimum_precision: NonNegativeInt | None = None
+
+
+class Product(DomainModel):
+    """Catalogue metadata retained without inferring contract rules from symbols."""
+
+    id: PositiveId
+    symbol: NonEmptyText
+    contract_type: ContractType
+    notional_type: NotionalType
+    contract_value: PositiveDecimal
+    contract_unit_currency: NonEmptyText
+    tick_size: PositiveDecimal
+    state: ProductState
+    trading_status: TradingStatus
+    underlying_asset: Asset
+    quoting_asset: Asset
+    settling_asset: Asset | None
+    is_quanto: StrictBool
+    only_reduce_only_orders_allowed: StrictBool = False
+    position_size_limit: NonNegativeDecimal | None = None
+    position_notional_limit: NonNegativeDecimal | None = None
+    initial_margin: NonNegativeDecimal | None = None
+    maintenance_margin: NonNegativeDecimal | None = None
+    default_leverage: PositiveDecimal | None = None
+    max_leverage_notional: NonNegativeDecimal | None = None
+
+    @model_validator(mode="after")
+    def validate_settling_asset_applicability(self) -> Self:
+        if self.contract_type is not ContractType.SPOT and self.settling_asset is None:
+            raise ValueError("derivative products require a settling asset")
+        return self
+
+
+class Ticker(DomainModel):
+    """A normalized ticker snapshot with a UTC observation timestamp."""
+
+    product_id: PositiveId
+    symbol: NonEmptyText
+    timestamp: UtcDateTime
+    contract_type: ContractType = ContractType.UNKNOWN
+    # REST ticker does not document trading status. Catalogue Product is authoritative.
+    product_trading_status: TradingStatus = TradingStatus.UNKNOWN
+    mark_price: PositiveDecimal | None = None
+    spot_price: PositiveDecimal | None = None
+    close: PositiveDecimal | None = None
+    best_bid: PositiveDecimal | None = None
+    best_ask: PositiveDecimal | None = None
+    lower_price_limit: PositiveDecimal | None = None
+    upper_price_limit: PositiveDecimal | None = None
+
+    @model_validator(mode="after")
+    def validate_price_ordering(self) -> Self:
+        """Reject internally contradictory bid/ask and price-band snapshots."""
+        if (
+            self.best_bid is not None
+            and self.best_ask is not None
+            and self.best_bid > self.best_ask
+        ):
+            raise ValueError("best bid cannot exceed best ask")
+        if (
+            self.lower_price_limit is not None
+            and self.upper_price_limit is not None
+            and self.lower_price_limit > self.upper_price_limit
+        ):
+            raise ValueError("lower price limit cannot exceed upper price limit")
+        return self
+
+
+class Candle(DomainModel):
+    """An exact OHLCV candle anchored to a timezone-aware UTC timestamp."""
+
+    timestamp: UtcDateTime
+    open: PositiveDecimal
+    high: PositiveDecimal
+    low: PositiveDecimal
+    close: PositiveDecimal
+    volume: NonNegativeDecimal
+
+    @model_validator(mode="after")
+    def validate_ohlc_range(self) -> Self:
+        """Ensure the high/low bound both opening and closing prices."""
+        if self.high < self.low:
+            raise ValueError("candle high cannot be below low")
+        if self.high < max(self.open, self.close):
+            raise ValueError("candle high must bound open and close")
+        if self.low > min(self.open, self.close):
+            raise ValueError("candle low must bound open and close")
+        return self
+
+
+class RequestReference(DomainModel):
+    """Immutable local correlation and optional exchange request identifiers."""
+
+    correlation_id: UUID
+    exchange_request_id: NonEmptyText | None = None

@@ -1,0 +1,23 @@
+{
+  "success": true,
+  "result": [
+    {
+      "id": 202,
+      "symbol": "ETHUSD_TEST",
+      "contract_type": "future_family_added_later",
+      "notional_type": "future_model_added_later",
+      "contract_value": "0.01",
+      "contract_unit_currency": "ETH",
+      "tick_size": "0.05",
+      "state": "upcoming",
+      "trading_status": "disrupted_cancel_only",
+      "is_quanto": false,
+      "product_specs": {"only_reduce_only_orders_allowed": true},
+      "underlying_asset": {"id": 3, "symbol": "ETH", "precision": 8},
+      "quoting_asset": {"id": 2, "symbol": "USD", "precision": 8},
+      "settling_asset": {"id": 2, "symbol": "USD", "precision": 8},
+      "ignored_future_field": {"fixture_secret": "never-retained"}
+    }
+  ],
+  "meta": {"after": null, "before": "synthetic-prev"}
+}
