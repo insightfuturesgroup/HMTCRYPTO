@@ -18,7 +18,9 @@ jobs:
           python-version: "3.13"
           cache: pip
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e '.[dev]'
+      # Artifact tests invoke `python -m build --no-isolation`, so the PEP 517
+      # backend must remain installed in the runner environment.
+      - run: python -m pip install -e '.[dev]' 'hatchling>=1.26,<2'
       - run: python -m ruff format --check .
       - run: python -m ruff check .
       - run: python -m mypy src
