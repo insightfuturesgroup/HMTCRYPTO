@@ -1,0 +1,22 @@
+{
+	email {$HMT_TLS_EMAIL}
+	admin off
+}
+
+crypto.helpmetrade.club {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy ui:8080 {
+		health_uri /
+		health_interval 30s
+		health_timeout 3s
+	}
+}

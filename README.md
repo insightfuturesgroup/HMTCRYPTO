@@ -255,6 +255,13 @@ hmt-crypto account bootstrap --profile paper-primary
 See `docs/SUPABASE_DATABASE_OPERATIONS.md` for roles, TLS, retention, disposable acceptance, backup,
 restore, and downgrade policy.
 
+## Minimal EC2 deployment
+
+The approved initial production shape is one EC2 instance with an Elastic IP, GoDaddy DNS at
+`crypto.helpmetrade.club`, Caddy-managed HTTPS, and a separate Supabase project. It intentionally
+avoids CloudFront, NAT Gateway, a load balancer, Route 53, and Vercel while qualification remains
+PAPER/testnet-only. See `docs/EC2_MINIMAL_DEPLOYMENT.md` and `docker-compose.ec2.yml`.
+
 ## Docker Compose and Vercel
 
 Docker is optional. Keep Compose substitution values separate from the API process environment:

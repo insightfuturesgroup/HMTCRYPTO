@@ -1,5 +1,8 @@
 # Local secrets; retain the checked-in placeholder template.
 .env
+deploy/ec2/api.env
+deploy/ec2/worker.env
+deploy/ec2/migration.env
 .env.*
 !.env.example
 *.pem

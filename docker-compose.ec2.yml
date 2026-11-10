@@ -1,0 +1,118 @@
+name: hmt-crypto-ec2
+
+services:
+  migrate:
+    build:
+      context: .
+      target: migrate
+    restart: "no"
+    env_file:
+      - deploy/ec2/migration.env
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [application]
+
+  api:
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    init: true
+    env_file:
+      - deploy/ec2/api.env
+    environment:
+      HMT_API_BIND_HOST: 0.0.0.0
+      HMT_API_BIND_PORT: "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    expose: ["8000"]
+    networks: [application]
+
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    init: true
+    env_file:
+      - deploy/ec2/worker.env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [application]
+
+  ui:
+    build:
+      context: .
+      target: ui
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=16m,noexec,nosuid,nodev
+      - /var/run:size=1m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    expose: ["8080"]
+    networks: [application]
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on:
+      ui:
+        condition: service_started
+    environment:
+      HMT_TLS_EMAIL: ${HMT_TLS_EMAIL:?set HMT_TLS_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    networks: [application]
+
+networks:
+  application:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
