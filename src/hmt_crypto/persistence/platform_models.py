@@ -749,12 +749,71 @@ class LiveOrderRecoveryCheck(Base):
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class LiveOrderAction(Base):
+    """One durable cancel or non-risk-increasing modification request."""
+
+    __tablename__ = "live_order_actions"
+    __table_args__ = (
+        CheckConstraint("action IN ('CANCEL','MODIFY')", name="action_allowed"),
+        CheckConstraint(
+            "status IN ('PENDING','SENDING','UNCERTAIN','SUCCEEDED','REJECTED','BLOCKED')",
+            name="status_allowed",
+        ),
+        CheckConstraint("order_id > 0", name="order_id_positive"),
+        CheckConstraint("product_id > 0", name="product_id_positive"),
+        CheckConstraint("target_size IS NULL OR target_size > 0", name="target_size_positive"),
+        CheckConstraint(
+            "(action = 'CANCEL' AND target_size IS NULL AND target_limit_price IS NULL) OR "
+            "(action = 'MODIFY' AND target_size IS NOT NULL)",
+            name="action_shape",
+        ),
+        CheckConstraint("version >= 1", name="version_positive"),
+        CheckConstraint(
+            "(status = 'PENDING' AND worker_owner_id IS NULL AND worker_generation IS NULL "
+            "AND credential_version IS NULL) OR status <> 'PENDING'",
+            name="pending_unclaimed",
+        ),
+        UniqueConstraint("account_id", "idempotency_key", name="uq_live_actions_request"),
+        Index("ix_live_actions_account_status_created", "account_id", "status", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    idempotency_key: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    action: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
+    order_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    target_size: Mapped[int | None] = mapped_column(StrictBigInteger())
+    target_limit_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    request_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    request_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    worker_owner_id: Mapped[UUID | None] = mapped_column(Uuid)
+    worker_generation: Mapped[int | None] = mapped_column(StrictBigInteger())
+    credential_version: Mapped[int | None] = mapped_column(StrictBigInteger())
+    exchange_response_sha256: Mapped[str | None] = mapped_column(NulFreeString(64))
+    last_error_code: Mapped[str | None] = mapped_column(NulFreeString(64))
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
 __all__ = [
     "AccountAssignment",
     "AccountRiskPolicy",
     "ApplicationSetting",
     "GttOrder",
     "LiveOrderIntent",
+    "LiveOrderAction",
     "LiveOrderRecoveryCheck",
     "LiveOrderPreview",
     "LiveOrderSubmission",

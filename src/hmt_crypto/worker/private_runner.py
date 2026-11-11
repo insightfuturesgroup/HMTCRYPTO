@@ -41,6 +41,11 @@ from hmt_crypto.worker.live_execution import (
     LiveExecutionSettings,
     execute_one_live_submission,
 )
+from hmt_crypto.worker.live_order_actions import (
+    DeltaIndiaLiveOrderActionAdapter,
+    LiveOrderActionResult,
+    execute_one_live_order_action,
+)
 from hmt_crypto.worker.live_recovery import LiveRecoveryResult, recover_one_live_submission
 from hmt_crypto.worker.tradingview_runner import admit_one_tradingview_signal
 
@@ -323,6 +328,36 @@ async def _execute_qualified_live_submission(
         await adapter.aclose()
 
 
+async def _execute_qualified_live_action(
+    database: Database,
+    process: PrivateWorkerSettings,
+    claim: _Claim,
+    execution: LiveExecutionSettings,
+    *,
+    api_key: str,
+    api_secret: str,
+) -> LiveOrderActionResult:
+    if not execution.enabled:
+        return LiveOrderActionResult("DISABLED", None)
+    signer = DeltaSigner(
+        api_key=SecretStr(api_key),
+        api_secret=SecretStr(api_secret),
+        user_agent="hmt-crypto-live-action/1.0",
+        clock=lambda: int(time.time()),
+    )
+    adapter = DeltaIndiaLiveOrderActionAdapter(signer=signer)
+    try:
+        return await execute_one_live_order_action(
+            database,
+            settings=execution,
+            account_id=claim.account_id,
+            owner_id=process.owner_id,
+            adapter=adapter,
+        )
+    finally:
+        await adapter.aclose()
+
+
 async def _recover_live_submission(
     database: Database,
     process: PrivateWorkerSettings,
@@ -439,6 +474,25 @@ async def run_private_worker(
                                             else str(tradingview_result.submission_id)
                                         ),
                                         reason=tradingview_result.reason,
+                                    )
+                                action_result = await _execute_qualified_live_action(
+                                    database,
+                                    process,
+                                    claim,
+                                    execution,
+                                    api_key=api_key,
+                                    api_secret=api_secret,
+                                )
+                                if action_result.kind not in {"IDLE", "DISABLED"}:
+                                    logger.info(
+                                        "live_order_action_cycle",
+                                        account_id=str(account_id),
+                                        outcome=action_result.kind,
+                                        action_id=(
+                                            None
+                                            if action_result.action_id is None
+                                            else str(action_result.action_id)
+                                        ),
                                     )
                                 recovery = await _recover_live_submission(
                                     database,
