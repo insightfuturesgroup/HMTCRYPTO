@@ -157,11 +157,14 @@ def clock_check() -> None:
 @account_app.command("bootstrap")
 def account_bootstrap(
     profile_name: Annotated[str, typer.Option("--profile")] = "paper-primary",
+    confirm_locked_live: Annotated[bool, typer.Option("--confirm-locked-live")] = False,
 ) -> None:
-    """Create or recover a PAPER/BACKTEST database profile after migration."""
+    """Create a credential-free profile; LIVE must be explicitly confirmed locked."""
     _run_async(
         lambda: cli_runtime.account_bootstrap_payload(
-            cli_runtime.load_settings(), profile_name=profile_name
+            cli_runtime.load_settings(),
+            profile_name=profile_name,
+            confirm_locked_live=confirm_locked_live,
         )
     )
 

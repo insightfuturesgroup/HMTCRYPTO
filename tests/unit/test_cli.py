@@ -154,6 +154,45 @@ def test_help_exposes_public_reads_and_explicit_account_bootstrap_only() -> None
     assert "init-dev" in database.stdout
 
 
+def test_live_bootstrap_requires_and_forwards_explicit_locked_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_payload(
+        settings: object, *, profile_name: str, confirm_locked_live: bool = False
+    ) -> dict[str, object]:
+        captured.update(
+            settings=settings,
+            profile_name=profile_name,
+            confirm_locked_live=confirm_locked_live,
+        )
+        return {
+            "account_id": "00000000-0000-0000-0000-000000000001",
+            "entries_enabled": False,
+            "exits_enabled": False,
+        }
+
+    marker = object()
+    monkeypatch.setattr(_api().runtime, "load_settings", lambda: marker)
+    monkeypatch.setattr(_api().runtime, "account_bootstrap_payload", fake_payload)
+    result = _invoke(
+        "account",
+        "bootstrap",
+        "--profile",
+        "delta-india-primary",
+        "--confirm-locked-live",
+    )
+
+    assert result.exit_code == 0
+    assert captured == {
+        "settings": marker,
+        "profile_name": "delta-india-primary",
+        "confirm_locked_live": True,
+    }
+    assert _payload(result)["entries_enabled"] is False
+
+
 def test_config_check_is_local_safe_and_defaults_to_paper_india_testnet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

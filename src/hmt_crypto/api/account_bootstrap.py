@@ -1,4 +1,4 @@
-"""Explicit PAPER/BACKTEST account bootstrap for an already-migrated database."""
+"""Explicit credential-free account bootstrap for an already-migrated database."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from hmt_crypto.config import ExecutionMode, Settings
 from hmt_crypto.errors import ConfigurationError
 from hmt_crypto.persistence.db import Database
-from hmt_crypto.persistence.models import Account
+from hmt_crypto.persistence.models import Account, AccountLiveControl
 
 _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 
@@ -32,13 +32,17 @@ async def bootstrap_account(
     settings: Settings,
     *,
     profile_name: str,
+    confirm_locked_live: bool = False,
 ) -> AccountBootstrapResult:
-    """Create or recover one credential-free PAPER/BACKTEST account profile."""
+    """Create a credential-free profile; LIVE requires an explicit locked confirmation."""
+    live = settings.execution_mode is ExecutionMode.LIVE
     if (
         type(settings) is not Settings
         or type(profile_name) is not str
         or _PROFILE.fullmatch(profile_name) is None
-        or settings.execution_mode is ExecutionMode.LIVE
+        or type(confirm_locked_live) is not bool
+        or (live and (not confirm_locked_live or settings.delta_env.value != "prod"))
+        or (not live and confirm_locked_live)
     ):
         raise ConfigurationError(context={"operation": "account_bootstrap"}) from None
     database = Database(settings)
@@ -85,6 +89,22 @@ async def bootstrap_account(
                 if winner is None:
                     raise ConfigurationError(context={"operation": "account_bootstrap"}) from None
                 result = AccountBootstrapResult(winner.id, winner.profile_name, False)
+            if live:
+                control = insert(AccountLiveControl).values(
+                    id=uuid4(),
+                    account_id=result.account_id,
+                    credential_state="unconfigured",
+                    reconciliation_state="unknown",
+                    entries_enabled=False,
+                    exits_enabled=False,
+                    verified_at=None,
+                    reconciled_at=None,
+                    last_error_code=None,
+                    version=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+                await session.execute(control.on_conflict_do_nothing(index_elements=["account_id"]))
         return result
     finally:
         await database.aclose()

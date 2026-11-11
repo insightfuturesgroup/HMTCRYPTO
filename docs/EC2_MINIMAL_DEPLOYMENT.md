@@ -101,7 +101,7 @@ control. Bootstrap does not enable entries:
 
 ```bash
 docker compose -f docker-compose.ec2.yml run --rm api \
-  hmt-crypto account bootstrap --profile delta-india-primary
+  hmt-crypto account bootstrap --profile delta-india-primary --confirm-locked-live
 ```
 
 Start the services:

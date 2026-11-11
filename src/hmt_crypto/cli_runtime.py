@@ -236,9 +236,14 @@ async def account_bootstrap_payload(
     settings: Settings,
     *,
     profile_name: str,
+    confirm_locked_live: bool = False,
 ) -> dict[str, JsonValue]:
-    """Create or recover one credential-free development account profile."""
-    result = await bootstrap_account(settings, profile_name=profile_name)
+    """Create or recover one credential-free, fail-closed account profile."""
+    result = await bootstrap_account(
+        settings,
+        profile_name=profile_name,
+        confirm_locked_live=confirm_locked_live,
+    )
     return {
         "account_id": str(result.account_id),
         "profile_name": result.profile_name,
@@ -246,6 +251,8 @@ async def account_bootstrap_payload(
         "region": settings.delta_region.value,
         "environment": settings.delta_env.value,
         "execution_mode": settings.execution_mode.value,
+        "entries_enabled": False,
+        "exits_enabled": False,
     }
 
 
