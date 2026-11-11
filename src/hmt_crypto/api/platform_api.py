@@ -1730,6 +1730,31 @@ def install_platform_routes(
             )
             return {"id": str(row.id), "symbol": row.symbol, "productId": row.product_id}
 
+    @app.delete("/api/v1/market/watchlist/{item_id}")
+    async def remove_watchlist_item(item_id: UUID, request: Request) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        request_id = _request_id(request)
+        async with database.transaction() as session:
+            row = await session.scalar(
+                select(WatchlistItem).where(
+                    WatchlistItem.id == item_id,
+                    WatchlistItem.user_id == actor.profile_id,
+                )
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="watchlist_item_not_found")
+            row.active = False
+            await append_audit(
+                session,
+                actor=actor,
+                action="WATCHLIST_REMOVED",
+                target_type="product",
+                target_id=str(row.product_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+            )
+        return {"removed": True}
+
     @app.post("/api/v1/trading/previews")
     async def create_order_preview(body: OrderPreviewBody, request: Request) -> dict[str, object]:
         actor = await principal(request, mutation=True)

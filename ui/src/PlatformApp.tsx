@@ -71,6 +71,12 @@ interface Product {
   observedAt: string | null;
 }
 
+interface WatchlistRow {
+  id: string;
+  symbol: string;
+  productId: number;
+}
+
 interface UserRow extends SessionUser {
   status: "invited" | "active" | "disabled";
   createdAt: string;
@@ -307,15 +313,14 @@ function Panel({ title, children }: { readonly title: string; readonly children:
   return <section className="data-panel"><div className="data-panel__header"><h2>{title}</h2></div>{children}</section>;
 }
 
-function MarketPage() {
+function MarketPage({ csrf }: { readonly csrf: string }) {
   const [products, setProducts] = useState<Product[]>([]);
+  const [watchlist, setWatchlist] = useState<WatchlistRow[]>([]);
   const [fresh, setFresh] = useState<boolean | null>(null);
-  useEffect(() => {
-    void request<{ snapshot: { fresh: boolean } | null; products: Product[] }>("/api/v1/market/products")
-      .then((value) => { setProducts(value.products); setFresh(value.snapshot?.fresh ?? null); })
-      .catch(() => { setProducts([]); setFresh(false); });
-  }, []);
-  return <Panel title="Delta India futures market"><div className="p-4 text-sm">Feed: <strong>{fresh === true ? "Fresh" : fresh === false ? "Unavailable or stale" : "Not published"}</strong></div><div className="overflow-x-auto"><table><thead><tr><th>Symbol</th><th>Contract</th><th>Mark</th><th>Bid</th><th>Ask</th><th>Updated</th></tr></thead><tbody>{products.map((p) => <tr key={p.productId}><td><strong>{p.symbol}</strong></td><td>{p.contractType}</td><td>{p.markPrice ?? "—"}</td><td>{p.bestBid ?? "—"}</td><td>{p.bestAsk ?? "—"}</td><td>{p.observedAt ?? "No quote"}</td></tr>)}{products.length === 0 ? <tr><td colSpan={6}>No catalogue has been published by the market worker.</td></tr> : null}</tbody></table></div></Panel>;
+  const load = useCallback(() => { void Promise.all([request<{ snapshot: { fresh: boolean } | null; products: Product[] }>("/api/v1/market/products"), request<{ items: WatchlistRow[] }>("/api/v1/market/watchlist")]).then(([market, saved]) => { setProducts(market.products); setFresh(market.snapshot?.fresh ?? null); setWatchlist(saved.items); }).catch(() => { setProducts([]); setFresh(false); }); }, []);
+  useEffect(load, [load]);
+  async function toggle(product: Product) { const saved = watchlist.find((item) => item.productId === product.productId); if (saved) await request(`/api/v1/market/watchlist/${saved.id}`, { method: "DELETE" }, csrf); else await request("/api/v1/market/watchlist", { method: "PUT", body: JSON.stringify({ symbol: product.symbol, product_id: product.productId }) }, csrf); load(); }
+  return <Panel title="Delta India futures market"><div className="flex items-center justify-between p-4 text-sm"><span>Feed: <strong>{fresh === true ? "Fresh" : fresh === false ? "Unavailable or stale" : "Not published"}</strong></span><span>Watchlist: <strong>{watchlist.length}</strong></span></div><div className="overflow-x-auto"><table><thead><tr><th>Watch</th><th>Symbol</th><th>Contract</th><th>Mark</th><th>Bid</th><th>Ask</th><th>Updated</th></tr></thead><tbody>{products.map((p) => { const saved = watchlist.some((item) => item.productId === p.productId); return <tr key={p.productId}><td><button aria-label={`${saved ? "Remove" : "Add"} ${p.symbol} ${saved ? "from" : "to"} watchlist`} className={saved ? "text-amber-600" : "text-slate-400"} onClick={() => void toggle(p)} type="button">{saved ? "★" : "☆"}</button></td><td><strong>{p.symbol}</strong></td><td>{p.contractType}</td><td>{p.markPrice ?? "—"}</td><td>{p.bestBid ?? "—"}</td><td>{p.bestAsk ?? "—"}</td><td>{p.observedAt ?? "No quote"}</td></tr>; })}{products.length === 0 ? <tr><td colSpan={7}>No catalogue has been published by the market worker.</td></tr> : null}</tbody></table></div></Panel>;
 }
 
 function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {
@@ -606,7 +611,7 @@ function Shell({ session, onLogout }: { readonly session: Session; readonly onLo
   const user = session.user!;
   const csrf = session.csrfToken!;
   const visible = navigation.filter((item) => !item.admin || user.role === "admin");
-  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "trading" ? <TradingPage csrf={csrf} user={user}/> : null}{page === "orders" ? <AccountStatePage csrf={csrf} mode="orders" user={user}/> : null}{page === "positions" ? <AccountStatePage csrf={csrf} mode="positions" user={user}/> : null}{page === "gtt" ? <GttPage csrf={csrf} user={user}/> : null}{page === "strategies" ? <TradingViewPage csrf={csrf} user={user}/> : null}{page === "risk" ? <RiskPage csrf={csrf} user={user}/> : null}{page === "performance" ? <PerformancePage/> : null}{page === "notifications" ? <NotificationsPage/> : null}{page === "settings" ? <SettingsPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage csrf={csrf}/> : null}</div></main></div></div>;
+  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage csrf={csrf}/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "trading" ? <TradingPage csrf={csrf} user={user}/> : null}{page === "orders" ? <AccountStatePage csrf={csrf} mode="orders" user={user}/> : null}{page === "positions" ? <AccountStatePage csrf={csrf} mode="positions" user={user}/> : null}{page === "gtt" ? <GttPage csrf={csrf} user={user}/> : null}{page === "strategies" ? <TradingViewPage csrf={csrf} user={user}/> : null}{page === "risk" ? <RiskPage csrf={csrf} user={user}/> : null}{page === "performance" ? <PerformancePage/> : null}{page === "notifications" ? <NotificationsPage/> : null}{page === "settings" ? <SettingsPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage csrf={csrf}/> : null}</div></main></div></div>;
 }
 
 export default function PlatformApp() {
