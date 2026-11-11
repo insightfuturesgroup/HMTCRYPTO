@@ -84,8 +84,15 @@ def _literal_scope(account: Account) -> AccountScope:
         raise ControlPlaneUnavailable() from None
     if account.mode not in {"BACKTEST", "PAPER", "LIVE"}:
         raise ControlPlaneUnavailable() from None
+    try:
+        # asyncpg exposes UUID values through its own UUID subtype. Normalize
+        # that trusted database value before entering the exact-type domain
+        # model; all other scope fields remain fail-closed literals.
+        account_id = UUID(str(account.id))
+    except (TypeError, ValueError, AttributeError):
+        raise ControlPlaneUnavailable() from None
     return AccountScope(
-        account_id=account.id,
+        account_id=account_id,
         region=cast(Region, account.region),
         environment=cast(Environment, account.environment),
         mode=cast(Mode, account.mode),

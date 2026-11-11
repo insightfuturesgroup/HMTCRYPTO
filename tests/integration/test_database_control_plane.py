@@ -3,7 +3,7 @@
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import SecretStr
@@ -11,13 +11,41 @@ from sqlalchemy import select
 
 from hmt_crypto.api.account_bootstrap import bootstrap_account
 from hmt_crypto.api.control_plane import KillCommand
-from hmt_crypto.api.database_control_plane import DatabaseControlPlane
+from hmt_crypto.api.database_control_plane import DatabaseControlPlane, _literal_scope
 from hmt_crypto.api.operator_audit import DatabaseOperatorAuditSink, OperatorAuditRecord
 from hmt_crypto.config import Settings
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.dev_schema import initialize_development_schema
 from hmt_crypto.persistence.models import Account, OperatorAuditEvent, metadata
 from hmt_crypto.persistence.repository_contracts import AccountScope
+
+
+class _DriverUUID(UUID):
+    """Stand in for asyncpg's UUID subtype at the adapter boundary."""
+
+
+def test_database_scope_normalizes_driver_uuid_to_exact_domain_uuid() -> None:
+    now = datetime.now(UTC)
+    driver_id = _DriverUUID(str(uuid4()))
+    account = Account(
+        id=driver_id,
+        region="india",
+        environment="testnet",
+        mode="PAPER",
+        profile_name="paper-driver-uuid",
+        external_user_id=None,
+        external_account_id=None,
+        identity_verified_at=None,
+        current_credential_version=None,
+        version=1,
+        created_at=now,
+        updated_at=now,
+    )
+
+    scope = _literal_scope(account)
+
+    assert type(scope.account_id) is UUID
+    assert scope.account_id == driver_id
 
 
 @pytest.mark.asyncio
