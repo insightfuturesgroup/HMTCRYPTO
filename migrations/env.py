@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from logging.config import fileConfig
 
 from alembic import context
@@ -20,6 +21,23 @@ from hmt_crypto.persistence.migration_configuration import (
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
+
+
+def _safe_sqlstate(error: BaseException) -> str | None:
+    """Extract only a standards-bounded SQLSTATE; never retain server diagnostics."""
+
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        candidate = getattr(current, "sqlstate", None)
+        if isinstance(candidate, str) and re.fullmatch(r"[0-9A-Z]{5}", candidate):
+            return candidate
+        candidate = getattr(current, "pgcode", None)
+        if isinstance(candidate, str) and re.fullmatch(r"[0-9A-Z]{5}", candidate):
+            return candidate
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def run_migrations_offline() -> None:
@@ -68,6 +86,7 @@ async def _run_online() -> None:
     connection = None
     configuration_failed = False
     migration_failed = False
+    failure_sqlstate = None
     url = None
     try:
         url = load_migration_url()
@@ -82,8 +101,9 @@ async def _run_online() -> None:
             await connection.run_sync(_run_on_connection)
     except MigrationConfigurationError:
         configuration_failed = True
-    except BaseException:
+    except BaseException as error:
         migration_failed = True
+        failure_sqlstate = _safe_sqlstate(error)
     finally:
         connection = None
         if engine is not None:
@@ -97,6 +117,8 @@ async def _run_online() -> None:
         raise MigrationConfigurationError() from None
     if migration_failed:
         message = "Database migration failed without exposing server diagnostics"
+        if failure_sqlstate is not None:
+            message = f"{message} (SQLSTATE {failure_sqlstate})"
         raise RuntimeError(message) from None
 
 

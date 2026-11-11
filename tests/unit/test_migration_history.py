@@ -325,6 +325,50 @@ else:
     assert completed.returncode == 0, completed.stderr
 
 
+def test_online_failure_reports_only_bounded_sqlstate() -> None:
+    script = r"""import runpy
+from alembic import context
+from alembic.config import Config
+import sqlalchemy.ext.asyncio
+
+context.config = Config("alembic.ini")
+context.is_offline_mode = lambda: False
+
+class SafeDatabaseFailure(Exception):
+    sqlstate = "42501"
+
+def fail_engine(*args, **kwargs):
+    raise SafeDatabaseFailure("server-message-secret-canary")
+
+sqlalchemy.ext.asyncio.create_async_engine = fail_engine
+try:
+    runpy.run_path("migrations/env.py", run_name="migration_sqlstate_probe")
+except RuntimeError as error:
+    rendered = str(error)
+    assert "SQLSTATE 42501" in rendered
+    assert "server-message-secret-canary" not in rendered
+    assert error.__cause__ is None and error.__context__ is None
+else:
+    raise AssertionError("synthetic online failure was not sanitized")
+"""
+    environment = dict(os.environ)
+    environment["DATABASE_MIGRATION_URL"] = (
+        "postgresql+asyncpg://migration_owner:sqlstate-secret@db.example/hmt_crypto"
+    )
+    environment["DATABASE_URL"] = (
+        "postgresql+asyncpg://hmt_runtime:runtime-secret@db.example/hmt_crypto"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 @pytest.mark.parametrize("stage", ["create", "connect", "dispose"])
 def test_online_base_exception_paths_are_recursively_secret_safe(stage: str) -> None:
     script = f"""import asyncio
