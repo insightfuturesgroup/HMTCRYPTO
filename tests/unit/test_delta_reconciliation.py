@@ -3,7 +3,10 @@ import json
 import httpx
 import pytest
 
-from hmt_crypto.api.delta_reconciliation import read_private_reconciliation
+from hmt_crypto.api.delta_reconciliation import (
+    ReconciliationReadError,
+    read_private_reconciliation,
+)
 
 
 @pytest.mark.asyncio
@@ -50,7 +53,11 @@ async def test_private_reconciliation_reports_foreign_products_and_pagination() 
         if not request.url.path.endswith("balances"):
             result = [{"user_id": 71, "product_id": 99}]
         if request.url.path.endswith("orders"):
-            meta = {"after": "more"}
+            if request.url.params.get("after") is None:
+                meta = {"after": "page two"}
+            else:
+                result = [{"user_id": 71, "product_id": 99, "id": "second"}]
+                meta = {"after": None}
         elif request.url.path.endswith(("fills", "transactions")):
             meta = {"after": None}
         return httpx.Response(200, json={"success": True, "result": result, "meta": meta})
@@ -62,5 +69,25 @@ async def test_private_reconciliation_reports_foreign_products_and_pagination() 
         allowed_product_ids=frozenset({27}),
         transport=httpx.MockTransport(handler),
     )
-    assert not evidence.complete
+    assert evidence.complete
     assert evidence.foreign_product_ids == (99,)
+    assert evidence.open_order_count == 2
+
+
+@pytest.mark.asyncio
+async def test_private_reconciliation_rejects_cursor_cycles() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(("orders", "fills", "transactions")):
+            meta = {"after": "same-cursor"}
+        else:
+            meta = None
+        return httpx.Response(200, json={"success": True, "result": [], "meta": meta})
+
+    with pytest.raises(ReconciliationReadError):
+        await read_private_reconciliation(
+            api_key="key-12345678",
+            api_secret="secret-1234567890",
+            expected_user_id="71",
+            allowed_product_ids=frozenset({27}),
+            transport=httpx.MockTransport(handler),
+        )

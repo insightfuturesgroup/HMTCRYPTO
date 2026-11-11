@@ -6,6 +6,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
 from pydantic import SecretStr
@@ -15,6 +16,8 @@ from hmt_crypto.exchange.delta.signer import DeltaSigner
 _ORIGIN = "https://api.india.delta.exchange"
 _MAX_BODY = 4 * 1024 * 1024
 _MAX_PROJECTION = 1024 * 1024
+_MAX_PAGES = 20
+_MAX_ITEMS = 1_000
 _ROUTES = (
     ("balances", "/v2/wallet/balances", b""),
     ("positions", "/v2/positions/margined", b""),
@@ -150,6 +153,13 @@ def _items(payload: object) -> tuple[list[object], object]:
     return result, payload.get("meta")
 
 
+def _cursor_query(base: bytes, after: str) -> bytes:
+    if not after or len(after) > 2048:
+        raise ReconciliationReadError()
+    separator = b"&" if base else b"?"
+    return base + separator + b"after=" + quote(after, safe="").encode("ascii")
+
+
 async def read_private_reconciliation(
     *,
     api_key: str,
@@ -174,25 +184,50 @@ async def read_private_reconciliation(
             transport=transport,
         ) as client:
             for name, path, query in _ROUTES:
-                headers = signer.sign_now("GET", path, query_string=query).as_headers()
-                headers["Accept"] = "application/json"
-                try:
-                    response = await client.get(f"{_ORIGIN}{path}{query.decode()}", headers=headers)
-                finally:
-                    headers.clear()
-                body = await response.aread()
-                if response.status_code != 200 or len(body) > _MAX_BODY:
-                    raise ReconciliationReadError()
-                try:
-                    payload = json.loads(body)
-                except (UnicodeDecodeError, ValueError):
-                    raise ReconciliationReadError() from None
-                items, meta = _items(payload)
-                if name in {"orders", "fills", "transactions"} and (
-                    not isinstance(meta, dict) or meta.get("after") is not None
-                ):
-                    complete = False
-                resources[name] = items
+                paginated = name in {"orders", "fills", "transactions"}
+                collected: list[object] = []
+                current_query = query
+                seen: set[str] = set()
+                for page_number in range(1, _MAX_PAGES + 1):
+                    headers = signer.sign_now(
+                        "GET", path, query_string=current_query
+                    ).as_headers()
+                    headers["Accept"] = "application/json"
+                    try:
+                        response = await client.get(
+                            f"{_ORIGIN}{path}{current_query.decode()}", headers=headers
+                        )
+                    finally:
+                        headers.clear()
+                    body = await response.aread()
+                    if response.status_code != 200 or len(body) > _MAX_BODY:
+                        raise ReconciliationReadError()
+                    try:
+                        payload = json.loads(body)
+                    except (UnicodeDecodeError, ValueError):
+                        raise ReconciliationReadError() from None
+                    items, meta = _items(payload)
+                    if len(collected) + len(items) > _MAX_ITEMS:
+                        collected.extend(items[: _MAX_ITEMS - len(collected)])
+                        complete = False
+                        break
+                    collected.extend(items)
+                    if not paginated:
+                        break
+                    if not isinstance(meta, dict):
+                        complete = False
+                        break
+                    after = meta.get("after")
+                    if after is None:
+                        break
+                    if not isinstance(after, str) or after in seen:
+                        raise ReconciliationReadError()
+                    seen.add(after)
+                    if page_number == _MAX_PAGES:
+                        complete = False
+                        break
+                    current_query = _cursor_query(query, after)
+                resources[name] = collected
     except httpx.HTTPError:
         raise ReconciliationReadError() from None
 
