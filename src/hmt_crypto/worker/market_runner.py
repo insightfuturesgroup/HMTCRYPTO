@@ -137,6 +137,9 @@ async def run_market_worker(
                             CatalogueProduct.from_product(snapshot_id=snapshot_id, product=product)
                             for product in products
                         )
+                        stage = "catalogue_flush"
+                        await session.flush()
+                        stage = "catalogue_commit"
                     last_catalogue = now
                     if stream_task is not None:
                         stream_task.cancel()
