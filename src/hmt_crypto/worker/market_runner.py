@@ -92,6 +92,7 @@ async def run_market_worker(
     )
     last_catalogue = datetime.min.replace(tzinfo=UTC)
     stream_task: asyncio.Task[None] | None = None
+    quote_persistence_lock = asyncio.Lock()
     logger.info("market_worker_started", region="india", environment=runtime.delta_env.value)
     try:
         while not stop.is_set():
@@ -154,7 +155,13 @@ async def run_market_worker(
                         except asyncio.CancelledError:
                             pass
                     stream_task = asyncio.create_task(
-                        run_public_ticker_stream(runtime, snapshot, database, stop=stop)
+                        run_public_ticker_stream(
+                            runtime,
+                            snapshot,
+                            database,
+                            stop=stop,
+                            persistence_lock=quote_persistence_lock,
+                        )
                     )
                     logger.info(
                         "market_catalogue_published",
@@ -172,7 +179,13 @@ async def run_market_worker(
                     except Exception:
                         logger.error("market_websocket_supervisor_failed")
                     stream_task = asyncio.create_task(
-                        run_public_ticker_stream(runtime, snapshot, database, stop=stop)
+                        run_public_ticker_stream(
+                            runtime,
+                            snapshot,
+                            database,
+                            stop=stop,
+                            persistence_lock=quote_persistence_lock,
+                        )
                     )
                 allowed = {
                     product.id
@@ -186,38 +199,43 @@ async def run_market_worker(
                 )
                 observed = datetime.now(UTC)
                 stage = "quote_persist"
-                async with database.transaction() as session:
-                    insert = (
-                        pg_insert
-                        if session.get_bind().dialect.name == "postgresql"
-                        else sqlite_insert
-                    )
-                    for ticker in tickers:
-                        if ticker.product_id not in allowed:
-                            continue
-                        values = {
-                            "id": uuid4(),
-                            "region": "india",
-                            "environment": runtime.delta_env.value,
-                            "product_id": ticker.product_id,
-                            "symbol": ticker.symbol,
-                            "mark_price": None
-                            if ticker.mark_price is None
-                            else str(ticker.mark_price),
-                            "spot_price": None
-                            if ticker.spot_price is None
-                            else str(ticker.spot_price),
-                            "best_bid": None if ticker.best_bid is None else str(ticker.best_bid),
-                            "best_ask": None if ticker.best_ask is None else str(ticker.best_ask),
-                            "observed_at": ticker.timestamp,
-                            "updated_at": observed,
-                        }
-                        statement = insert(MarketQuote).values(**values)
-                        statement = statement.on_conflict_do_update(
-                            index_elements=["region", "environment", "product_id"],
-                            set_={key: value for key, value in values.items() if key != "id"},
+                async with quote_persistence_lock:
+                    async with database.transaction() as session:
+                        insert = (
+                            pg_insert
+                            if session.get_bind().dialect.name == "postgresql"
+                            else sqlite_insert
                         )
-                        await session.execute(statement)
+                        for ticker in sorted(tickers, key=lambda item: item.product_id):
+                            if ticker.product_id not in allowed:
+                                continue
+                            values = {
+                                "id": uuid4(),
+                                "region": "india",
+                                "environment": runtime.delta_env.value,
+                                "product_id": ticker.product_id,
+                                "symbol": ticker.symbol,
+                                "mark_price": None
+                                if ticker.mark_price is None
+                                else str(ticker.mark_price),
+                                "spot_price": None
+                                if ticker.spot_price is None
+                                else str(ticker.spot_price),
+                                "best_bid": None
+                                if ticker.best_bid is None
+                                else str(ticker.best_bid),
+                                "best_ask": None
+                                if ticker.best_ask is None
+                                else str(ticker.best_ask),
+                                "observed_at": ticker.timestamp,
+                                "updated_at": observed,
+                            }
+                            statement = insert(MarketQuote).values(**values)
+                            statement = statement.on_conflict_do_update(
+                                index_elements=["region", "environment", "product_id"],
+                                set_={key: value for key, value in values.items() if key != "id"},
+                            )
+                            await session.execute(statement)
                 logger.info("market_quotes_updated", quote_count=len(tickers))
             except asyncio.CancelledError:
                 raise

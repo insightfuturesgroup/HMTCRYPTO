@@ -52,6 +52,7 @@ async def _persist_batch(
     database: Database,
     runtime: ControlRuntimeSettings,
     rows: list[TickerObservation | CandleObservation],
+    persistence_lock: asyncio.Lock,
 ) -> None:
     latest = {row.product_id: row for row in rows if type(row) is TickerObservation}
     candles = {
@@ -60,70 +61,77 @@ async def _persist_batch(
         if type(row) is CandleObservation
     }
     updated = datetime.now(UTC)
-    async with database.transaction() as session:
-        insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
-        for ticker in latest.values():
-            values = {
-                "id": uuid4(),
-                "region": "india",
-                "environment": runtime.delta_env.value,
-                "product_id": ticker.product_id,
-                "symbol": ticker.symbol,
-                "mark_price": None if ticker.mark_price is None else str(ticker.mark_price),
-                "spot_price": None if ticker.spot_price is None else str(ticker.spot_price),
-                "best_bid": None if ticker.best_bid is None else str(ticker.best_bid),
-                "best_ask": None if ticker.best_ask is None else str(ticker.best_ask),
-                "observed_at": ticker.source.observed_at,
-                "updated_at": updated,
-            }
-            statement = insert(MarketQuote).values(**values)
-            statement = statement.on_conflict_do_update(
-                index_elements=["region", "environment", "product_id"],
-                set_={key: value for key, value in values.items() if key != "id"},
+    async with persistence_lock:
+        async with database.transaction() as session:
+            insert = (
+                pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
             )
-            await session.execute(statement)
-        for candle in candles.values():
-            values = {
-                "id": uuid4(),
-                "region": "india",
-                "environment": runtime.delta_env.value,
-                "product_id": candle.product_id,
-                "symbol": candle.symbol,
-                "resolution": candle.resolution,
-                "timestamp": candle.timestamp,
-                "open": candle.open,
-                "high": candle.high,
-                "low": candle.low,
-                "close": candle.close,
-                "volume": candle.volume,
-                "observed_at": candle.source.observed_at,
-            }
-            statement = insert(MarketCandle).values(**values)
-            statement = statement.on_conflict_do_update(
-                index_elements=[
-                    "region",
-                    "environment",
-                    "product_id",
-                    "resolution",
-                    "timestamp",
-                ],
-                set_={key: value for key, value in values.items() if key != "id"},
-            )
-            await session.execute(statement)
-        if candles:
-            await session.execute(
-                delete(MarketCandle).where(
-                    MarketCandle.region == "india",
-                    MarketCandle.environment == runtime.delta_env.value,
-                    MarketCandle.timestamp < updated - timedelta(hours=24),
+            for ticker in sorted(latest.values(), key=lambda item: item.product_id):
+                values = {
+                    "id": uuid4(),
+                    "region": "india",
+                    "environment": runtime.delta_env.value,
+                    "product_id": ticker.product_id,
+                    "symbol": ticker.symbol,
+                    "mark_price": None if ticker.mark_price is None else str(ticker.mark_price),
+                    "spot_price": None if ticker.spot_price is None else str(ticker.spot_price),
+                    "best_bid": None if ticker.best_bid is None else str(ticker.best_bid),
+                    "best_ask": None if ticker.best_ask is None else str(ticker.best_ask),
+                    "observed_at": ticker.source.observed_at,
+                    "updated_at": updated,
+                }
+                statement = insert(MarketQuote).values(**values)
+                statement = statement.on_conflict_do_update(
+                    index_elements=["region", "environment", "product_id"],
+                    set_={key: value for key, value in values.items() if key != "id"},
                 )
-            )
+                await session.execute(statement)
+            for candle in sorted(
+                candles.values(),
+                key=lambda item: (item.product_id, item.resolution, item.timestamp),
+            ):
+                values = {
+                    "id": uuid4(),
+                    "region": "india",
+                    "environment": runtime.delta_env.value,
+                    "product_id": candle.product_id,
+                    "symbol": candle.symbol,
+                    "resolution": candle.resolution,
+                    "timestamp": candle.timestamp,
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                    "observed_at": candle.source.observed_at,
+                }
+                statement = insert(MarketCandle).values(**values)
+                statement = statement.on_conflict_do_update(
+                    index_elements=[
+                        "region",
+                        "environment",
+                        "product_id",
+                        "resolution",
+                        "timestamp",
+                    ],
+                    set_={key: value for key, value in values.items() if key != "id"},
+                )
+                await session.execute(statement)
+            if candles:
+                await session.execute(
+                    delete(MarketCandle).where(
+                        MarketCandle.region == "india",
+                        MarketCandle.environment == runtime.delta_env.value,
+                        MarketCandle.timestamp < updated - timedelta(hours=24),
+                    )
+                )
 
 
 async def _consume(
     database: Database,
     runtime: ControlRuntimeSettings,
     queue: asyncio.Queue[TickerObservation | CandleObservation],
+    persistence_lock: asyncio.Lock,
     stop: asyncio.Event,
 ) -> None:
     logger = get_logger("worker.market.websocket")
@@ -139,7 +147,7 @@ async def _consume(
             except asyncio.QueueEmpty:
                 break
         try:
-            await _persist_batch(database, runtime, batch)
+            await _persist_batch(database, runtime, batch, persistence_lock)
             logger.info(
                 "public_market_batch_published",
                 observation_count=len(batch),
@@ -242,6 +250,7 @@ async def run_public_ticker_stream(
     database: Database,
     *,
     stop: asyncio.Event,
+    persistence_lock: asyncio.Lock,
     connect_factory: _ConnectFactory = websocket_connect,
 ) -> None:
     """Supervise chunked ticker subscriptions and durable quote publication."""
@@ -269,7 +278,7 @@ async def run_public_ticker_stream(
     )
     snapshot_id = uuid4()
     async with asyncio.TaskGroup() as tasks:
-        tasks.create_task(_consume(database, runtime, queue, stop))
+        tasks.create_task(_consume(database, runtime, queue, persistence_lock, stop))
         for chunk in chunks:
             tasks.create_task(
                 _connection(
