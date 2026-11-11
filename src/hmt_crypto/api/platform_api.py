@@ -34,6 +34,7 @@ from hmt_crypto.api.live_order_admission import (
     evaluate_order_sizing,
     position_notional,
 )
+from hmt_crypto.api.live_submission import make_live_client_order_id
 from hmt_crypto.api.platform_auth import (
     AuthenticationRejected,
     AuthenticationUnavailable,
@@ -54,6 +55,7 @@ from hmt_crypto.persistence.models import (
     GttOrder,
     LiveOrderIntent,
     LiveOrderPreview,
+    LiveOrderSubmission,
     MarketQuote,
     PlatformAuditEvent,
     PlatformLiveControl,
@@ -1584,6 +1586,32 @@ def install_platform_routes(
                     status="ADMITTED",
                     intent_sha256=digest,
                     created_at=now,
+                )
+            )
+            client_order_id = make_live_client_order_id(preview.account_id, intent_id)
+            request_sha256 = hashlib.sha256(
+                f"submission:v1:{intent_id}:{client_order_id}:{preview.evidence_sha256}".encode(
+                    "ascii"
+                )
+            ).hexdigest()
+            session.add(
+                LiveOrderSubmission(
+                    id=uuid4(),
+                    account_id=preview.account_id,
+                    intent_id=intent_id,
+                    client_order_id=client_order_id,
+                    status="PENDING",
+                    request_sha256=request_sha256,
+                    worker_owner_id=None,
+                    worker_generation=None,
+                    credential_version=None,
+                    claim_until=None,
+                    attempt_number=0,
+                    exchange_order_id=None,
+                    last_error_code=None,
+                    version=1,
+                    created_at=now,
+                    updated_at=now,
                 )
             )
             await append_audit(

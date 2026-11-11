@@ -482,6 +482,74 @@ class LiveOrderIntent(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class LiveOrderSubmission(Base):
+    """Durable lease-fenced submission state; transport remains separately qualified."""
+
+    __tablename__ = "live_order_submissions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING','CLAIMED','PREPARED','SENDING','UNCERTAIN',"
+            "'ACCEPTED','REJECTED','BLOCKED')",
+            name="status_allowed",
+        ),
+        CheckConstraint("attempt_number >= 0", name="attempt_nonnegative"),
+        CheckConstraint(
+            "status NOT IN ('PREPARED','SENDING','UNCERTAIN','ACCEPTED','REJECTED') "
+            "OR attempt_number >= 1",
+            name="attempt_required",
+        ),
+        CheckConstraint("version >= 1", name="version_positive"),
+        CheckConstraint(
+            "(status = 'PENDING' AND worker_owner_id IS NULL AND worker_generation IS NULL "
+            "AND credential_version IS NULL AND claim_until IS NULL) OR status <> 'PENDING'",
+            name="pending_unclaimed",
+        ),
+        CheckConstraint(
+            "status = 'PENDING' OR (worker_owner_id IS NOT NULL AND worker_generation IS NOT NULL "
+            "AND credential_version IS NOT NULL AND claim_until IS NOT NULL)",
+            name="claimed_fence_required",
+        ),
+        CheckConstraint(
+            "(status = 'ACCEPTED' AND exchange_order_id IS NOT NULL) OR "
+            "(status <> 'ACCEPTED' AND exchange_order_id IS NULL)",
+            name="accepted_exchange_order_required",
+        ),
+        CheckConstraint(
+            "status <> 'UNCERTAIN' OR last_error_code IS NOT NULL",
+            name="uncertain_error_required",
+        ),
+        UniqueConstraint("intent_id", name="uq_live_order_submissions_intent"),
+        UniqueConstraint(
+            "account_id", "client_order_id", name="uq_live_order_submissions_client_order"
+        ),
+        Index("ix_live_order_submissions_account_status", "account_id", "status", "created_at"),
+        Index("ix_live_order_submissions_claim", "status", "claim_until"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    intent_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.live_order_intents.id", ondelete="RESTRICT"), nullable=False
+    )
+    client_order_id: Mapped[str] = mapped_column(NulFreeString(32), nullable=False)
+    status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    worker_owner_id: Mapped[UUID | None] = mapped_column(Uuid)
+    worker_generation: Mapped[int | None] = mapped_column(StrictBigInteger())
+    credential_version: Mapped[int | None] = mapped_column(StrictBigInteger())
+    claim_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    attempt_number: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    exchange_order_id: Mapped[int | None] = mapped_column(StrictBigInteger())
+    last_error_code: Mapped[str | None] = mapped_column(NulFreeString(64))
+    version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
 __all__ = [
     "AccountAssignment",
     "AccountRiskPolicy",
@@ -489,6 +557,7 @@ __all__ = [
     "GttOrder",
     "LiveOrderIntent",
     "LiveOrderPreview",
+    "LiveOrderSubmission",
     "AccountLiveControl",
     "CredentialSecretReference",
     "MarketQuote",

@@ -33,6 +33,7 @@ from hmt_crypto.persistence.platform_models import (
     GttOrder,
     LiveOrderIntent,
     LiveOrderPreview,
+    LiveOrderSubmission,
     MarketQuote,
     PlatformAuditEvent,
     PlatformLiveControl,
@@ -123,5 +124,6 @@ __all__ = [
     "GttOrder",
     "LiveOrderIntent",
     "LiveOrderPreview",
+    "LiveOrderSubmission",
     "metadata",
 ]
