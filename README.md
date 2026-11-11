@@ -1,50 +1,42 @@
 # HMT-Crypto
 
-HMT-Crypto is a separate Python 3.11+ Delta Exchange trading system derived from the
-broker-independent parts of HMT. It does not import, migrate, or modify the original HMT project.
-The default is `PAPER` on Delta India testnet, all state is UTC, and production writes are disabled.
+HMT-Crypto is a separate Python 3.11+ Delta Exchange India futures/perpetual trading platform. It
+does not import, migrate, or modify the original HMT project. The deployed scope is production
+`LIVE`, all state is UTC, and all order dispatch is disabled by independent gates until qualified.
 
-This repository contains the Phase 0 audit/plan and the offline implementation work for Phases
-1–5: public market data, signed private-read boundaries, product sizing, persistence, OMS/risk
-kernels, reconciliation evidence, resilient public streams, PAPER simulation, deterministic
-backtesting, strategy parity fixtures, an authenticated control API, dashboard, durable kill-command
-admission, migrations, and deployment assets.
+The platform provides invitation-only Supabase Auth, Admin/Trader/Viewer authorization,
+assignment-scoped Delta accounts, AWS Secrets Manager credential isolation, public/private market
+state, manual Live trading, durable cancel/modify, GTT protected exits, TradingView automation,
+risk controls, reconciliation, audit evidence, and a React/FastAPI control application.
 
 ## Safety and activation status
 
 Do not treat a successful local test run as permission to trade. The following boundaries are
 intentional:
 
-- The current deliverable remains a PAPER/testnet release candidate. The comprehensive offline
-  campaign completed on 2026-11-07: 11,566 backend tests passed with 22 credential/infrastructure
-  skips, 50 UI tests passed, and backend/frontend lint, type-check, and production builds passed.
-  This evidence does not qualify any external account, testnet mutation, or production deployment.
+- The implementation is a Live release candidate. Current evidence is recorded in
+  `PHASE_STATUS.md`; it does not qualify an external account or authorize production dispatch.
 
 - No test or development command places a production order.
-- `PRODUCTION_WRITES_FORBIDDEN=true` remains the required setting.
-- Delta mutation routes have reviewed codecs, parsers, limiter/audit evidence and OMS/risk
-  contracts, but venue dispatch remains offline until the testnet contract checks and account,
-  clock, worker-leadership, reconciliation, and qualification authorities are issued.
-- Delta India signed private reads are implemented behind sealed account/clock/limiter admission.
-  Production composition is disabled until an authenticated account-binding probe and refreshable
-  trusted-clock provider can be proven with the supplied account.
-- Private WebSocket and Global WebSocket activation remain disabled until current testnet
-  authentication/channel fixtures are captured. Public stream behavior is fixture-tested.
-- The API queues a single durable global-kill command and records operator actions append-only.
-  Venue cancellation/flattening remains unavailable until the testnet-qualified worker authority
-  exists; the UI never reports queue admission as completed.
-- Supabase, Vercel, alerts, and Delta private integration are not connected without credentials.
+- `PRODUCTION_WRITES_FORBIDDEN=true`, `HMT_LIVE_ORDER_DISPATCH_ENABLED=false`, the database global
+  entry gate, and every account entry gate remain closed through deployment and qualification.
+- The private worker can sign production reads only for verified, assignment-scoped account records
+  whose secrets are fetched by ARN through the EC2 instance role.
+- A Live write additionally requires a recorded qualification digest, active fenced lease, fresh
+  reconciliation/catalogue/quote evidence, enabled risk policy, and explicit global/account gates.
+- No test or deployment command enables those gates or places a real order.
+- Global Delta, spot, options, copy trading, and portfolio margin are outside this release.
 
 These are deployment gates, not hidden fallbacks. Missing or stale evidence fails closed.
 
 ## Architecture
 
 ```text
-React dashboard -> FastAPI control API -> durable command/query repositories
+React application -> FastAPI identity/control API -> private Supabase PostgreSQL
                                               |
-                                 single fenced async worker
+                       public market + fenced private workers
                                               |
-     ProductCatalog -> market data -> strategy -> risk -> OMS -> reconciliation
+ catalogue -> quotes -> reconciliation -> risk -> durable order/action queues
                                               |
                                 Delta REST / WebSocket
 
@@ -52,9 +44,9 @@ Persistence: products, signals, commands, orders, attempts, transitions, fills,
 positions, balances, PnL, funding, risk halts, reconciliation, and redacted audit evidence.
 ```
 
-The API never signs or submits exchange orders. Exchange access belongs to one account-scoped
-worker. SQLite is restricted to single-process BACKTEST/PAPER; multi-process or LIVE deployments
-require PostgreSQL.
+The API never receives Delta secret values and never signs exchange orders. Exchange access belongs
+to the fenced private worker running from the EC2 Elastic IP. SQLite is restricted to local legacy
+BACKTEST/PAPER tooling; the multi-user Live deployment requires PostgreSQL.
 
 ## Install
 

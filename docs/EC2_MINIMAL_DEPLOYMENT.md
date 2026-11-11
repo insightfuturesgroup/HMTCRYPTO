@@ -77,13 +77,19 @@ docker run --rm -it python:3.13-slim sh -lc \
 
 ## First start
 
-Validate rendered Compose configuration without printing the populated environment files:
+Run the secret-safe locked-deployment preflight, then validate and build. The preflight prints no
+configuration values and refuses an enabled dispatcher, a preloaded qualification digest, an
+unreviewed checkout, unsafe file modes, or the wrong Supabase endpoint class:
 
 ```bash
+sudo python3 tools/ec2_release_preflight.py --expected-commit <reviewed-full-git-sha>
 docker compose -f docker-compose.ec2.yml config --quiet
 docker compose -f docker-compose.ec2.yml build
 docker compose -f docker-compose.ec2.yml run --rm migrate
 ```
+
+Expected preflight output includes `"status": "PASS"`, `"dispatchEnabled": false`, and
+`"productionWritesForbidden": true`. Do not continue on any failure.
 
 The migration service uses the EC2 host network so Supabase direct endpoints that resolve only
 to IPv6 can use the host's verified IPv6 route. API and worker services remain isolated on the
@@ -117,6 +123,7 @@ replace services:
 ```bash
 git fetch --prune
 git checkout <reviewed-commit>
+sudo python3 tools/ec2_release_preflight.py --expected-commit <reviewed-full-git-sha>
 docker compose -f docker-compose.ec2.yml build
 docker compose -f docker-compose.ec2.yml run --rm migrate
 docker compose -f docker-compose.ec2.yml up -d --no-build
