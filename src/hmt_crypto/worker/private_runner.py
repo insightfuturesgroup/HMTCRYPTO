@@ -35,6 +35,7 @@ from hmt_crypto.persistence.models import (
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
 )
+from hmt_crypto.worker.gtt_runner import evaluate_one_gtt
 from hmt_crypto.worker.live_execution import (
     LiveExecutionResult,
     LiveExecutionSettings,
@@ -395,6 +396,27 @@ async def run_private_worker(
                                     account_id=str(account_id),
                                     generation=claim.generation,
                                 )
+                                gtt_result = await evaluate_one_gtt(
+                                    database,
+                                    account_id=claim.account_id,
+                                    owner_id=process.owner_id,
+                                )
+                                if gtt_result.kind not in {"IDLE", "ARMED"}:
+                                    logger.info(
+                                        "gtt_cycle",
+                                        account_id=str(account_id),
+                                        outcome=gtt_result.kind,
+                                        gtt_id=(
+                                            None
+                                            if gtt_result.gtt_id is None
+                                            else str(gtt_result.gtt_id)
+                                        ),
+                                        submission_id=(
+                                            None
+                                            if gtt_result.submission_id is None
+                                            else str(gtt_result.submission_id)
+                                        ),
+                                    )
                                 recovery = await _recover_live_submission(
                                     database,
                                     process,

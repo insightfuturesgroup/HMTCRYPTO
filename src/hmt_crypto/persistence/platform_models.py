@@ -195,6 +195,15 @@ class GttOrder(Base):
             "(trigger_kind <> 'trailing_stop' AND trigger_price IS NOT NULL)",
             name="trigger_value_required",
         ),
+        CheckConstraint(
+            "trail_anchor IS NULL OR trigger_kind = 'trailing_stop'",
+            name="trail_anchor_only_for_trailing",
+        ),
+        CheckConstraint(
+            "(triggered_at IS NULL AND trigger_evidence_sha256 IS NULL) OR "
+            "(triggered_at IS NOT NULL AND trigger_evidence_sha256 IS NOT NULL)",
+            name="trigger_evidence_pair",
+        ),
         UniqueConstraint("account_id", "idempotency_key", name="uq_gtt_account_idempotency"),
         Index("ix_gtt_account_status", "account_id", "status"),
         Index("ix_gtt_product_status", "product_id", "status"),
@@ -215,10 +224,17 @@ class GttOrder(Base):
     trigger_price: Mapped[str | None] = mapped_column(NulFreeString(64))
     trail_offset: Mapped[str | None] = mapped_column(NulFreeString(64))
     limit_price: Mapped[str | None] = mapped_column(NulFreeString(64))
+    trail_anchor: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    last_quote_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.market_quotes.id", ondelete="RESTRICT")
+    )
     reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     status: Mapped[str] = mapped_column(NulFreeString(32), nullable=False)
     idempotency_key: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     triggered_order_id: Mapped[UUID | None] = mapped_column(Uuid)
+    triggered_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    trigger_evidence_sha256: Mapped[str | None] = mapped_column(NulFreeString(64))
+    last_error_code: Mapped[str | None] = mapped_column(NulFreeString(64))
     version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
