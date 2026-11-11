@@ -48,6 +48,13 @@ class ClaimedLiveSubmission:
     claim_until: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class SendingLiveSubmission:
+    prepared: PreparedLiveOrder
+    sending_evidence_sha256: str
+    permit_expires_at: datetime
+
+
 async def claim_next_live_submission(
     database: Database,
     *,
@@ -280,7 +287,7 @@ async def prepare_claimed_live_submission(
 
 async def mark_live_submission_sending(
     database: Database, claim: ClaimedLiveSubmission
-) -> PreparedLiveOrder:
+) -> SendingLiveSubmission:
     """Persist possible venue entry before a transport may send any bytes."""
     if type(claim) is not ClaimedLiveSubmission:
         raise ValueError("invalid live submission claim")
@@ -366,7 +373,8 @@ async def mark_live_submission_sending(
                 occurred_at=now,
             )
         )
-        return prepared
+        permit_expires_at = min(submission.claim_until, lease.lease_until)
+        return SendingLiveSubmission(prepared, event_hash, permit_expires_at)
 
 
 async def record_live_submission_outcome(
@@ -545,6 +553,7 @@ async def record_uncertain_recovery_lookup(
 
 __all__ = [
     "ClaimedLiveSubmission",
+    "SendingLiveSubmission",
     "claim_next_live_submission",
     "mark_live_submission_sending",
     "prepare_claimed_live_submission",
