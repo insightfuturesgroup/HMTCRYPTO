@@ -2,7 +2,7 @@
   "baseline_downgrade_sha256": "a6cd5a1a0fb008ebecbfbb9da8645026fc1b436ca462dc4b20f4122e8688d946",
   "baseline_source_sha256": "86a75e6a27e049861c9fab7096d2cbbc06076a44a2e42d55dd00465cdb749209",
   "format_version": 2,
-  "hardening_source_sha256": "26aa270c31f3aa8b8a857b2bd4308daefe81ca73c0cfbf7772a27517068f9354",
+  "hardening_source_sha256": "a75d38cfd0594435cb9ab1780a23c0b4fc5215a1543f24f1af6e3b61d4983179",
   "head_revision": "phase2_hardening_v1",
   "revision": "phase2_baseline_v1",
   "schema": "hmt_crypto",

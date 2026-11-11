@@ -15,6 +15,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -179,8 +180,19 @@ def test_manifest_freezes_baseline_downgrade_and_both_revision_sources() -> None
         "86a75e6a27e049861c9fab7096d2cbbc06076a44a2e42d55dd00465cdb749209"
     )
     assert manifest["hardening_source_sha256"] == (
-        "26aa270c31f3aa8b8a857b2bd4308daefe81ca73c0cfbf7772a27517068f9354"
+        "a75d38cfd0594435cb9ab1780a23c0b4fc5215a1543f24f1af6e3b61d4983179"
     )
+
+
+def test_hardening_function_sql_has_no_unintended_text_bind_parameters() -> None:
+    hardening = _load(HARDENING, "bind_safe_phase2_hardening")
+    for statement in (
+        hardening.REJECT_MUTATION_FUNCTION,
+        hardening.PAYLOAD_MUTATION_GUARD,
+        hardening.PURGE_PAYLOADS_FUNCTION,
+        hardening.REVOKE_BROWSER_ACCESS,
+    ):
+        assert not sa.text(statement).compile().params
 
 
 def test_frozen_history_verifier_has_no_rewrite_mode(tmp_path: Path) -> None:

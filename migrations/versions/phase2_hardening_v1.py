@@ -232,7 +232,7 @@ BEGIN
         || ',"event_key":' || to_jsonb(root_key)::text
         || ',"id":' || to_jsonb(root_id::text)::text
         || ',"maintenance_root_id":' || to_jsonb(root_id::text)::text
-        || ',"retention_mode":"SUMMARY_ONLY","sequence":1}}';
+        || ',"retention_mode":"SUMMARY_ONLY","sequence"\\:1}}';
     purge_evidence := '{"domain":"HMT_API_AUDIT_EVENT_V1","producer":{"context":'
         || context_array || ',"event_kind":"PAYLOAD_PURGED","facts":{},"identity":'
         || source_identity || '},"storage":{"actor_role_name":"hmt_audit_retention"'
@@ -241,7 +241,7 @@ BEGIN
         || ',"event_key":' || to_jsonb(purge_key)::text
         || ',"id":' || to_jsonb(purge_id::text)::text
         || ',"maintenance_root_id":' || to_jsonb(root_id::text)::text
-        || ',"retention_mode":"SUMMARY_ONLY","sequence":2}}';
+        || ',"retention_mode":"SUMMARY_ONLY","sequence"\\:2}}';
 
     INSERT INTO hmt_crypto.api_audit_events (
         id, event_kind, context_kind, region, environment, sequence, event_key,
