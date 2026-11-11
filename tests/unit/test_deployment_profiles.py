@@ -54,6 +54,9 @@ def test_ec2_migration_mounts_the_pinned_supabase_ca() -> None:
 
     assert "/etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro" in compose
     assert migration["DATABASE_MIGRATION_CA_FILE"] == "/run/secrets/supabase-prod-ca.crt"
+    migrate_service = compose.split("  migrate:\n", 1)[1].split("\n  api:\n", 1)[0]
+    assert "network_mode: host" in migrate_service
+    assert "networks:" not in migrate_service
 
 
 def test_ec2_runtime_services_mount_and_use_the_pinned_supabase_ca() -> None:

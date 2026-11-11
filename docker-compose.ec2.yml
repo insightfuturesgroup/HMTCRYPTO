@@ -5,6 +5,10 @@ services:
     build:
       context: .
       target: migrate
+    # Supabase direct database endpoints can be IPv6-only. Reuse the EC2
+    # host's verified IPv6 route for this one-off operator process; runtime
+    # API/worker traffic remains isolated on the application bridge.
+    network_mode: host
     restart: "no"
     env_file:
       - deploy/ec2/migration.env
@@ -16,8 +20,6 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    networks: [application]
-
   api:
     build:
       context: .

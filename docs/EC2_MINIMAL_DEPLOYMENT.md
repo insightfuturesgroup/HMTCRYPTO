@@ -76,6 +76,10 @@ docker compose -f docker-compose.ec2.yml build
 docker compose -f docker-compose.ec2.yml run --rm migrate
 ```
 
+The migration service uses the EC2 host network so Supabase direct endpoints that resolve only
+to IPv6 can use the host's verified IPv6 route. API and worker services remain isolated on the
+application bridge and use the persistent session pooler.
+
 Bootstrap the PAPER account through a one-off container, put the returned account UUID into both
 protected API/worker files, and only then enable database-backed API control:
 
