@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, desc, func, select
+from sqlalchemy import and_, desc, func, literal, select
 from sqlalchemy.exc import IntegrityError
 
 from hmt_crypto.api.delta_reconciliation import (
@@ -551,13 +551,19 @@ def install_platform_routes(
     async def list_accounts(request: Request) -> dict[str, object]:
         actor = await principal(request)
         async with database.transaction() as session:
-            query = (
-                select(Account, AccountAssignment.permission, AccountLiveControl)
-                .join(AccountAssignment, AccountAssignment.account_id == Account.id)
-                .outerjoin(AccountLiveControl, AccountLiveControl.account_id == Account.id)
-            )
-            if actor.role != "admin":
-                query = query.where(AccountAssignment.user_id == actor.profile_id)
+            if actor.role == "admin":
+                query = select(
+                    Account,
+                    literal("manage").label("permission"),
+                    AccountLiveControl,
+                ).outerjoin(AccountLiveControl, AccountLiveControl.account_id == Account.id)
+            else:
+                query = (
+                    select(Account, AccountAssignment.permission, AccountLiveControl)
+                    .join(AccountAssignment, AccountAssignment.account_id == Account.id)
+                    .outerjoin(AccountLiveControl, AccountLiveControl.account_id == Account.id)
+                    .where(AccountAssignment.user_id == actor.profile_id)
+                )
             rows = (await session.execute(query.order_by(Account.profile_name))).all()
             return {
                 "accounts": [
@@ -698,6 +704,73 @@ def install_platform_routes(
             "userId": str(body.user_id),
             "permission": body.permission,
         }
+
+    @app.get("/api/v1/admin/account-assignments")
+    async def list_account_assignments(request: Request) -> dict[str, object]:
+        await admin(request)
+        async with database.transaction() as session:
+            rows = (
+                await session.execute(
+                    select(AccountAssignment, Account.profile_name, PlatformUser.email)
+                    .join(Account, Account.id == AccountAssignment.account_id)
+                    .join(PlatformUser, PlatformUser.id == AccountAssignment.user_id)
+                    .order_by(Account.profile_name, PlatformUser.email)
+                )
+            ).all()
+            return {
+                "assignments": [
+                    {
+                        "id": str(row.id),
+                        "accountId": str(row.account_id),
+                        "accountName": account_name,
+                        "userId": str(row.user_id),
+                        "userEmail": email,
+                        "permission": row.permission,
+                        "updatedAt": _utc(row.updated_at),
+                    }
+                    for row, account_name, email in rows
+                ]
+            }
+
+    @app.delete("/api/v1/accounts/{account_id}/assignments/{user_id}")
+    async def remove_account_assignment(
+        account_id: UUID, user_id: UUID, request: Request
+    ) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            row = await session.scalar(
+                select(AccountAssignment)
+                .where(
+                    AccountAssignment.account_id == account_id,
+                    AccountAssignment.user_id == user_id,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="assignment_not_found")
+            if row.permission == "manage":
+                other_managers = await session.scalar(
+                    select(func.count(AccountAssignment.id)).where(
+                        AccountAssignment.account_id == account_id,
+                        AccountAssignment.permission == "manage",
+                        AccountAssignment.id != row.id,
+                    )
+                )
+                if int(other_managers or 0) == 0:
+                    raise HTTPException(status_code=409, detail="last_account_manager")
+            await session.delete(row)
+            await append_audit(
+                session,
+                actor=actor,
+                action="ACCOUNT_ASSIGNMENT_REMOVED",
+                target_type="account",
+                target_id=str(account_id),
+                outcome="SUCCEEDED",
+                request_id=_request_id(request),
+                details={"userId": str(user_id), "removedAt": _utc(now)},
+            )
+        return {"accountId": str(account_id), "userId": str(user_id), "removed": True}
 
     @app.post("/api/v1/accounts/{account_id}/credentials")
     async def replace_credentials(

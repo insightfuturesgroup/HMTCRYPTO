@@ -77,6 +77,16 @@ interface UserRow extends SessionUser {
   lastLoginAt: string | null;
 }
 
+interface AccountAssignmentRow {
+  id: string;
+  accountId: string;
+  accountName: string;
+  userId: string;
+  userEmail: string;
+  permission: "view" | "trade" | "manage";
+  updatedAt: string;
+}
+
 interface AuditRow {
   id: string;
   action: string;
@@ -492,12 +502,20 @@ function RiskPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: s
 
 function UsersPage({ csrf }: { readonly csrf: string }) {
   const [users, setUsers] = useState<UserRow[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [assignments, setAssignments] = useState<AccountAssignmentRow[]>([]);
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
-  const load = useCallback(() => { void request<{ users: UserRow[] }>("/api/v1/admin/users").then((v) => setUsers(v.users)); }, []);
+  const [assignmentUser, setAssignmentUser] = useState("");
+  const [assignmentAccount, setAssignmentAccount] = useState("");
+  const [permission, setPermission] = useState<AccountAssignmentRow["permission"]>("trade");
+  const [notice, setNotice] = useState<string | null>(null);
+  const load = useCallback(() => { void Promise.all([request<{ users: UserRow[] }>("/api/v1/admin/users"), request<{ accounts: Account[] }>("/api/v1/accounts"), request<{ assignments: AccountAssignmentRow[] }>("/api/v1/admin/account-assignments")]).then(([userRows, accountRows, assignmentRows]) => { setUsers(userRows.users); setAccounts(accountRows.accounts); setAssignments(assignmentRows.assignments); setAssignmentUser((current) => current || userRows.users[0]?.id || ""); setAssignmentAccount((current) => current || accountRows.accounts[0]?.id || ""); }); }, []);
   useEffect(load, [load]);
   async function invite(event: FormEvent) { event.preventDefault(); await request("/api/v1/admin/users/invite", { method: "POST", body: JSON.stringify({ email, full_name: name, role: "trader" }) }, csrf); setEmail(""); setName(""); load(); }
-  return <Panel title="User management"><form className="grid gap-2 p-4 md:grid-cols-[1fr_1fr_auto]" onSubmit={(e) => void invite(e)}><input className="rounded border px-3 py-2" onChange={(e) => setEmail(e.target.value)} placeholder="Email" required type="email" value={email}/><input className="rounded border px-3 py-2" onChange={(e) => setName(e.target.value)} placeholder="Full name" required value={name}/><button className="rounded bg-blue-600 px-4 py-2 text-white">Invite trader</button></form><div className="overflow-x-auto"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last login</th></tr></thead><tbody>{users.map((u) => <tr key={u.id}><td>{u.fullName}</td><td>{u.email}</td><td>{u.role}</td><td>{u.status}</td><td>{u.lastLoginAt ?? "Never"}</td></tr>)}</tbody></table></div></Panel>;
+  async function assign(event: FormEvent) { event.preventDefault(); setNotice(null); try { await request(`/api/v1/accounts/${assignmentAccount}/assignments`, { method: "PUT", body: JSON.stringify({ user_id: assignmentUser, permission }) }, csrf); setNotice("Account assignment saved."); load(); } catch { setNotice("Assignment was rejected."); } }
+  async function remove(row: AccountAssignmentRow) { setNotice(null); try { await request(`/api/v1/accounts/${row.accountId}/assignments/${row.userId}`, { method: "DELETE" }, csrf); setNotice("Assignment removed."); load(); } catch { setNotice("Assignment cannot be removed while it is the account's last manager."); } }
+  return <><Panel title="User management"><form className="grid gap-2 p-4 md:grid-cols-[1fr_1fr_auto]" onSubmit={(e) => void invite(e)}><input className="rounded border px-3 py-2" onChange={(e) => setEmail(e.target.value)} placeholder="Email" required type="email" value={email}/><input className="rounded border px-3 py-2" onChange={(e) => setName(e.target.value)} placeholder="Full name" required value={name}/><button className="rounded bg-blue-600 px-4 py-2 text-white">Invite trader</button></form><div className="overflow-x-auto"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last login</th></tr></thead><tbody>{users.map((u) => <tr key={u.id}><td>{u.fullName}</td><td>{u.email}</td><td>{u.role}</td><td>{u.status}</td><td>{u.lastLoginAt ?? "Never"}</td></tr>)}</tbody></table></div></Panel><Panel title="Delta account access"><form className="grid gap-3 p-4 md:grid-cols-4" onSubmit={(event) => void assign(event)}><select className="rounded border px-3 py-2" onChange={(event) => setAssignmentUser(event.target.value)} required value={assignmentUser}>{users.map((user) => <option key={user.id} value={user.id}>{user.email}</option>)}</select><select className="rounded border px-3 py-2" onChange={(event) => setAssignmentAccount(event.target.value)} required value={assignmentAccount}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><select className="rounded border px-3 py-2" onChange={(event) => setPermission(event.target.value as AccountAssignmentRow["permission"])} value={permission}><option value="view">Viewer</option><option value="trade">Trader</option><option value="manage">Manager</option></select><button className="rounded bg-blue-600 px-4 py-2 text-white" type="submit">Save assignment</button></form>{notice ? <p className="px-4 pb-4" role="status">{notice}</p> : null}<div className="overflow-x-auto"><table><thead><tr><th>Account</th><th>User</th><th>Permission</th><th>Updated</th><th>Action</th></tr></thead><tbody>{assignments.map((row) => <tr key={row.id}><td>{row.accountName}</td><td>{row.userEmail}</td><td>{row.permission}</td><td>{row.updatedAt}</td><td><button className="text-red-700" onClick={() => void remove(row)} type="button">Remove</button></td></tr>)}{assignments.length === 0 ? <tr><td colSpan={5}>No account assignments.</td></tr> : null}</tbody></table></div></Panel></>;
 }
 
 function AuditPage({ csrf }: { readonly csrf: string }) {
