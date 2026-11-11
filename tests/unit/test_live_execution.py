@@ -25,6 +25,7 @@ SUBMISSION_ID = UUID("30000000-0000-4000-8000-000000000001")
 def enabled_settings() -> LiveExecutionSettings:
     return LiveExecutionSettings(
         HMT_LIVE_ORDER_DISPATCH_ENABLED=True,
+        PRODUCTION_WRITES_FORBIDDEN=False,
         HMT_LIVE_ORDER_QUALIFICATION_SHA256=sha256(b"approved qualification").hexdigest(),
         _env_file=None,
     )
@@ -37,6 +38,7 @@ def test_live_dispatch_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -
     settings = LiveExecutionSettings(_env_file=None)
 
     assert settings.enabled is False
+    assert settings.production_writes_forbidden is True
     assert settings.qualification_sha256 is None
 
 
@@ -45,7 +47,18 @@ def test_enabled_dispatch_requires_real_lowercase_qualification(digest: str | No
     with pytest.raises(ValidationError):
         LiveExecutionSettings(
             HMT_LIVE_ORDER_DISPATCH_ENABLED=True,
+            PRODUCTION_WRITES_FORBIDDEN=False,
             HMT_LIVE_ORDER_QUALIFICATION_SHA256=digest,
+            _env_file=None,
+        )
+
+
+def test_production_write_prohibition_is_an_independent_gate() -> None:
+    with pytest.raises(ValidationError):
+        LiveExecutionSettings(
+            HMT_LIVE_ORDER_DISPATCH_ENABLED=True,
+            PRODUCTION_WRITES_FORBIDDEN=True,
+            HMT_LIVE_ORDER_QUALIFICATION_SHA256=sha256(b"approved qualification").hexdigest(),
             _env_file=None,
         )
 
@@ -94,6 +107,9 @@ async def test_transport_failure_is_persisted_uncertain_without_retry(
     async def claim_one(*_args, **_kwargs):
         return claim
 
+    async def no_recovery_debt(*_args, **_kwargs):
+        return False
+
     async def prepare(*_args, **_kwargs):
         return prepared
 
@@ -110,6 +126,7 @@ async def test_transport_failure_is_persisted_uncertain_without_retry(
             raise LiveOrderTransportUncertain
 
     monkeypatch.setattr(subject, "claim_next_live_submission", claim_one)
+    monkeypatch.setattr(subject, "has_live_submission_recovery_debt", no_recovery_debt)
     monkeypatch.setattr(subject, "prepare_claimed_live_submission", prepare)
     monkeypatch.setattr(subject, "mark_live_submission_sending", mark_sending)
     monkeypatch.setattr(subject, "record_live_submission_outcome", record)
@@ -127,3 +144,26 @@ async def test_transport_failure_is_persisted_uncertain_without_retry(
     assert result.submission_id == SUBMISSION_ID
     assert calls == 1
     assert outcomes == [LiveOrderResponseOutcome("UNCERTAIN", None)]
+
+
+@pytest.mark.asyncio
+async def test_recovery_debt_blocks_a_new_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def recovery_debt(*_args, **_kwargs):
+        return True
+
+    async def unexpected_claim(*_args, **_kwargs):
+        raise AssertionError("a new submission must not be claimed")
+
+    monkeypatch.setattr(subject, "has_live_submission_recovery_debt", recovery_debt)
+    monkeypatch.setattr(subject, "claim_next_live_submission", unexpected_claim)
+
+    result = await execute_one_live_submission(
+        object(),
+        settings=enabled_settings(),
+        account_id=ACCOUNT_ID,
+        owner_id=OWNER_ID,
+        external_user_id="delta-user",
+        adapter=object(),
+    )
+
+    assert result == subject.LiveExecutionResult("RECOVERY_REQUIRED", None)

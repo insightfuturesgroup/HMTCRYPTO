@@ -1,15 +1,16 @@
-"""Lease-fenced, read-only Delta private account supervisor."""
+"""Lease-fenced Delta private account supervisor with gated Live dispatch."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Self
 from uuid import UUID, uuid4
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import desc, select
 
@@ -17,9 +18,11 @@ from hmt_crypto.api.delta_reconciliation import (
     PrivateReconciliationEvidence,
     read_private_reconciliation,
 )
+from hmt_crypto.api.live_order_http import DeltaIndiaLiveOrderHttpAdapter
 from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion, ExecutionMode
+from hmt_crypto.exchange.delta.signer import DeltaSigner
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
@@ -30,6 +33,11 @@ from hmt_crypto.persistence.models import (
     CredentialSecretReference,
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
+)
+from hmt_crypto.worker.live_execution import (
+    LiveExecutionResult,
+    LiveExecutionSettings,
+    execute_one_live_submission,
 )
 
 
@@ -279,6 +287,38 @@ async def _degrade(database: Database, process: PrivateWorkerSettings, claim: _C
             control.updated_at = now
 
 
+async def _execute_qualified_live_submission(
+    database: Database,
+    process: PrivateWorkerSettings,
+    claim: _Claim,
+    execution: LiveExecutionSettings,
+    *,
+    api_key: str,
+    api_secret: str,
+) -> LiveExecutionResult:
+    """Bind one secret version and one lease owner to the one-shot adapter."""
+    if not execution.enabled:
+        return LiveExecutionResult("DISABLED", None)
+    signer = DeltaSigner(
+        api_key=SecretStr(api_key),
+        api_secret=SecretStr(api_secret),
+        user_agent="hmt-crypto-live-worker/1.0",
+        clock=lambda: int(time.time()),
+    )
+    adapter = DeltaIndiaLiveOrderHttpAdapter(signer=signer)
+    try:
+        return await execute_one_live_submission(
+            database,
+            settings=execution,
+            account_id=claim.account_id,
+            owner_id=process.owner_id,
+            external_user_id=claim.external_user_id,
+            adapter=adapter,
+        )
+    finally:
+        await adapter.aclose()
+
+
 async def run_private_worker(
     runtime: ControlRuntimeSettings,
     process: PrivateWorkerSettings,
@@ -293,6 +333,7 @@ async def run_private_worker(
         raise ValueError("private worker requires Delta India production Live scope")
     database = Database(runtime.database_runtime_config())
     secrets = AwsDeltaSecretStore(region=process.aws_region, prefix=process.secret_prefix)
+    execution = LiveExecutionSettings()
     logger = get_logger("worker.private")
     logger.info("private_worker_started", owner_id=str(process.owner_id))
     try:
@@ -319,20 +360,39 @@ async def run_private_worker(
                                 expected_user_id=claim.external_user_id,
                                 allowed_product_ids=claim.product_ids,
                             )
+                            if await _publish(database, process, claim, evidence):
+                                logger.info(
+                                    "private_reconciliation_published",
+                                    account_id=str(account_id),
+                                    generation=claim.generation,
+                                )
+                                result = await _execute_qualified_live_submission(
+                                    database,
+                                    process,
+                                    claim,
+                                    execution,
+                                    api_key=api_key,
+                                    api_secret=api_secret,
+                                )
+                                if result.kind != "DISABLED":
+                                    logger.info(
+                                        "live_submission_cycle",
+                                        account_id=str(account_id),
+                                        outcome=result.kind,
+                                        submission_id=(
+                                            None
+                                            if result.submission_id is None
+                                            else str(result.submission_id)
+                                        ),
+                                    )
                         finally:
                             api_key = ""
                             api_secret = ""
-                        if await _publish(database, process, claim, evidence):
-                            logger.info(
-                                "private_reconciliation_published",
-                                account_id=str(account_id),
-                                generation=claim.generation,
-                            )
                     except asyncio.CancelledError:
                         raise
                     except Exception:
                         await _degrade(database, process, claim)
-                        logger.error("private_reconciliation_failed", account_id=str(account_id))
+                        logger.error("private_account_cycle_failed", account_id=str(account_id))
             except asyncio.CancelledError:
                 raise
             except Exception:

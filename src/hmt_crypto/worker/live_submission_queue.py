@@ -55,6 +55,22 @@ class SendingLiveSubmission:
     permit_expires_at: datetime
 
 
+async def has_live_submission_recovery_debt(database: Database, *, account_id: UUID) -> bool:
+    """Block new venue writes while an earlier possible write is unresolved."""
+    if type(account_id) is not UUID or account_id.int == 0:
+        raise ValueError("invalid live recovery-debt scope")
+    async with database.transaction() as session:
+        submission_id = await session.scalar(
+            select(LiveOrderSubmission.id)
+            .where(
+                LiveOrderSubmission.account_id == account_id,
+                LiveOrderSubmission.status.in_(("SENDING", "UNCERTAIN")),
+            )
+            .limit(1)
+        )
+        return submission_id is not None
+
+
 async def claim_next_live_submission(
     database: Database,
     *,
@@ -555,6 +571,7 @@ __all__ = [
     "ClaimedLiveSubmission",
     "SendingLiveSubmission",
     "claim_next_live_submission",
+    "has_live_submission_recovery_debt",
     "mark_live_submission_sending",
     "prepare_claimed_live_submission",
     "record_live_submission_outcome",

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Self
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import Field, StrictBool, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from hmt_crypto.api.live_order_http import (
@@ -20,6 +20,7 @@ from hmt_crypto.api.live_order_transport import (
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.worker.live_submission_queue import (
     claim_next_live_submission,
+    has_live_submission_recovery_debt,
     mark_live_submission_sending,
     prepare_claimed_live_submission,
     record_live_submission_outcome,
@@ -37,16 +38,27 @@ class LiveExecutionSettings(BaseSettings):
         hide_input_in_errors=True,
     )
 
-    enabled: bool = Field(default=False, alias="HMT_LIVE_ORDER_DISPATCH_ENABLED")
+    enabled: StrictBool = Field(default=False, alias="HMT_LIVE_ORDER_DISPATCH_ENABLED")
+    production_writes_forbidden: StrictBool = Field(
+        default=True, alias="PRODUCTION_WRITES_FORBIDDEN"
+    )
     qualification_sha256: str | None = Field(
         default=None, alias="HMT_LIVE_ORDER_QUALIFICATION_SHA256"
     )
+
+    @field_validator("enabled", "production_writes_forbidden", mode="before")
+    @classmethod
+    def _strict_environment_boolean(cls, value: object) -> object:
+        if type(value) is str and value in {"true", "false"}:
+            return value == "true"
+        return value
 
     @model_validator(mode="after")
     def _require_explicit_qualification(self) -> Self:
         digest = self.qualification_sha256
         if self.enabled and (
-            type(digest) is not str
+            self.production_writes_forbidden
+            or type(digest) is not str
             or len(digest) != 64
             or digest == "0" * 64
             or any(character not in "0123456789abcdef" for character in digest)
@@ -82,6 +94,9 @@ async def execute_one_live_submission(
         or not 1 <= len(external_user_id) <= 128
     ):
         raise ValueError("live execution is not explicitly qualified")
+
+    if await has_live_submission_recovery_debt(database, account_id=account_id):
+        return LiveExecutionResult("RECOVERY_REQUIRED", None)
 
     claim = await claim_next_live_submission(database, account_id=account_id, owner_id=owner_id)
     if claim is None:
