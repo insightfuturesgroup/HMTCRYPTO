@@ -8,7 +8,12 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import desc, select
 
-from hmt_crypto.api.live_submission import SubmissionFence, submission_event_sha256
+from hmt_crypto.api.live_order_transport import PreparedLiveOrder, prepare_live_order
+from hmt_crypto.api.live_submission import (
+    SubmissionFence,
+    require_transition,
+    submission_event_sha256,
+)
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
     Account,
@@ -172,4 +177,102 @@ async def claim_next_live_submission(
         )
 
 
-__all__ = ["ClaimedLiveSubmission", "claim_next_live_submission"]
+async def prepare_claimed_live_submission(
+    database: Database, claim: ClaimedLiveSubmission
+) -> PreparedLiveOrder:
+    """Persist canonical wire evidence after revalidating the exact worker fence."""
+    if type(claim) is not ClaimedLiveSubmission:
+        raise ValueError("invalid live submission claim")
+    now = datetime.now(UTC)
+    async with database.transaction() as session:
+        submission = await session.scalar(
+            select(LiveOrderSubmission)
+            .where(LiveOrderSubmission.id == claim.submission_id)
+            .with_for_update()
+        )
+        lease = await session.scalar(
+            select(PrivateWorkerLease)
+            .where(PrivateWorkerLease.account_id == claim.account_id)
+            .with_for_update()
+        )
+        if (
+            submission is None
+            or lease is None
+            or submission.status != "CLAIMED"
+            or submission.account_id != claim.account_id
+            or submission.intent_id != claim.intent_id
+            or submission.client_order_id != claim.client_order_id
+            or submission.request_sha256 != claim.request_sha256
+            or submission.worker_owner_id is None
+            or submission.worker_generation is None
+            or submission.credential_version is None
+            or submission.claim_until is None
+            or submission.claim_until <= now
+            or lease.lease_until <= now
+        ):
+            raise ValueError("live submission claim is stale")
+        stored_fence = SubmissionFence(
+            submission.worker_owner_id,
+            submission.worker_generation,
+            submission.credential_version,
+        )
+        active_fence = SubmissionFence(
+            lease.owner_id,
+            lease.generation,
+            lease.credential_version,
+        )
+        require_transition(
+            current="CLAIMED",
+            target="PREPARED",
+            stored_fence=stored_fence,
+            actor_fence=active_fence,
+        )
+        intent = await session.get(LiveOrderIntent, submission.intent_id)
+        preview = None if intent is None else await session.get(LiveOrderPreview, intent.preview_id)
+        if intent is None or preview is None or preview.id != claim.preview_id:
+            raise ValueError("live submission evidence is unavailable")
+        prepared = prepare_live_order(
+            product_id=preview.product_id,
+            contracts=preview.contracts,
+            side=preview.side,
+            order_type=preview.order_type,
+            limit_price=preview.limit_price,
+            reduce_only=preview.reduce_only,
+            client_order_id=submission.client_order_id,
+        )
+        submission.status = "PREPARED"
+        submission.prepared_request_payload = prepared.body.decode("ascii")
+        submission.prepared_request_sha256 = prepared.body_sha256
+        submission.attempt_number = 1
+        submission.updated_at = now
+        event_hash = submission_event_sha256(
+            submission_id=submission.id,
+            sequence=2,
+            from_status="CLAIMED",
+            to_status="PREPARED",
+            fence=stored_fence,
+            occurred_at=now,
+        )
+        session.add(
+            LiveOrderSubmissionEvent(
+                id=uuid4(),
+                submission_id=submission.id,
+                account_id=submission.account_id,
+                sequence=2,
+                from_status="CLAIMED",
+                to_status="PREPARED",
+                worker_owner_id=stored_fence.owner_id,
+                worker_generation=stored_fence.generation,
+                credential_version=stored_fence.credential_version,
+                evidence_sha256=event_hash,
+                occurred_at=now,
+            )
+        )
+        return prepared
+
+
+__all__ = [
+    "ClaimedLiveSubmission",
+    "claim_next_live_submission",
+    "prepare_claimed_live_submission",
+]

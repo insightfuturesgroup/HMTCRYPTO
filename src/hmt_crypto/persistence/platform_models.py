@@ -518,6 +518,16 @@ class LiveOrderSubmission(Base):
             "status <> 'UNCERTAIN' OR last_error_code IS NOT NULL",
             name="uncertain_error_required",
         ),
+        CheckConstraint(
+            "(prepared_request_payload IS NULL AND prepared_request_sha256 IS NULL) OR "
+            "(prepared_request_payload IS NOT NULL AND prepared_request_sha256 IS NOT NULL)",
+            name="prepared_evidence_bundle",
+        ),
+        CheckConstraint(
+            "status NOT IN ('PREPARED','SENDING','UNCERTAIN','ACCEPTED','REJECTED') OR "
+            "prepared_request_sha256 IS NOT NULL",
+            name="prepared_evidence_required",
+        ),
         UniqueConstraint("intent_id", name="uq_live_order_submissions_intent"),
         UniqueConstraint(
             "account_id", "client_order_id", name="uq_live_order_submissions_client_order"
@@ -536,6 +546,8 @@ class LiveOrderSubmission(Base):
     client_order_id: Mapped[str] = mapped_column(NulFreeString(32), nullable=False)
     status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
     request_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    prepared_request_payload: Mapped[str | None] = mapped_column(Text)
+    prepared_request_sha256: Mapped[str | None] = mapped_column(NulFreeString(64))
     worker_owner_id: Mapped[UUID | None] = mapped_column(Uuid)
     worker_generation: Mapped[int | None] = mapped_column(StrictBigInteger())
     credential_version: Mapped[int | None] = mapped_column(StrictBigInteger())

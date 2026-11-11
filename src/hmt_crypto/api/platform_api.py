@@ -1602,6 +1602,8 @@ def install_platform_routes(
                     client_order_id=client_order_id,
                     status="PENDING",
                     request_sha256=request_sha256,
+                    prepared_request_payload=None,
+                    prepared_request_sha256=None,
                     worker_owner_id=None,
                     worker_generation=None,
                     credential_version=None,
