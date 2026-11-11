@@ -64,6 +64,7 @@ interface SessionUser {
 interface Session {
   authenticated: boolean;
   csrfToken: string | null;
+  readOnlyMode: boolean;
   user: SessionUser | null;
 }
 
@@ -91,6 +92,7 @@ interface Product {
   bestBid: string | null;
   bestAsk: string | null;
   observedAt: string | null;
+  quoteFresh: boolean;
 }
 
 interface WatchlistRow {
@@ -151,8 +153,14 @@ interface HealthAccount {
 interface AccountState {
   accountId: string;
   observedAt: string;
+  reconciledAt: string;
+  freshUntil: string;
   ageSeconds: number;
   fresh: boolean;
+  reconciliationState: string;
+  leaseActive: boolean;
+  leaseUntil: string | null;
+  credentialVersion: number;
   balances: Record<string, unknown>[];
   positions: Record<string, unknown>[];
   openOrders: Record<string, unknown>[];
@@ -608,6 +616,17 @@ function MarketPage({ csrf }: { readonly csrf: string }) {
   }, []);
   useEffect(load, [load]);
   useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    const timer = window.setInterval(refresh, 5_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [load]);
+  useEffect(() => {
     const selected = candleProduct || String(watchlist[0]?.productId ?? "");
     if (!selected) {
       setCandles([]);
@@ -699,7 +718,12 @@ function MarketPage({ csrf }: { readonly csrf: string }) {
                     <td>{p.markPrice ?? "—"}</td>
                     <td>{p.bestBid ?? "—"}</td>
                     <td>{p.bestAsk ?? "—"}</td>
-                    <td>{p.observedAt ?? "No quote"}</td>
+                    <td>
+                      <span className={p.quoteFresh ? "text-green-700" : "text-red-700"}>
+                        {p.quoteFresh ? "Fresh" : "Stale"}
+                      </span>{" "}
+                      · {p.observedAt ?? "No quote"}
+                    </td>
                   </tr>
                 );
               })}
@@ -1392,10 +1416,12 @@ function AccountStatePage({
   mode,
   user,
   csrf,
+  readOnlyMode,
 }: {
   readonly mode: "orders" | "positions";
   readonly user: SessionUser;
   readonly csrf: string;
+  readonly readOnlyMode: boolean;
 }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState("");
@@ -1435,12 +1461,25 @@ function AccountStatePage({
       load(first);
     });
   }, [load]);
+  useEffect(() => {
+    if (!accountId) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") load(accountId);
+    };
+    const timer = window.setInterval(refresh, 15_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [accountId, load]);
   const rows =
     mode === "orders"
-      ? [...(state?.openOrders ?? []), ...(state?.fills ?? [])]
+      ? (state?.openOrders ?? [])
       : (state?.positions ?? []);
   const selected = accounts.find((account) => account.id === accountId);
-  const canTrade = user.role !== "viewer" && selected?.permission !== "view";
+  const canTrade =
+    !readOnlyMode && user.role !== "viewer" && selected?.permission !== "view";
   async function queueAction(
     row: Record<string, unknown>,
     action: "cancel" | "modify",
@@ -1516,7 +1555,7 @@ function AccountStatePage({
           </button>
           <span className="self-center text-sm">
             {state
-              ? `${state.fresh ? "Fresh" : "Stale"} · ${state.ageSeconds}s`
+              ? `${state.fresh ? "Fresh" : "Stale"} · ${state.ageSeconds}s · reconciliation ${state.reconciliationState} · lease ${state.leaseActive ? "active" : "inactive"} · credential v${state.credentialVersion}`
               : "No state"}
           </span>
         </div>
@@ -1540,8 +1579,7 @@ function AccountStatePage({
             </thead>
             <tbody>
               {rows.map((row, index) => {
-                const open =
-                  mode === "orders" && index < (state?.openOrders.length ?? 0);
+                const open = mode === "orders";
                 return (
                   <tr key={`${String(row.id ?? index)}-${index}`}>
                     <td>
@@ -1606,7 +1644,7 @@ function AccountStatePage({
             </tbody>
           </table>
         </div>
-        {modifyOrder ? (
+        {!readOnlyMode && modifyOrder ? (
           <form
             className="grid gap-3 border-t p-4 md:grid-cols-3"
             onSubmit={(event) => {
@@ -1655,13 +1693,24 @@ function AccountStatePage({
           </form>
         ) : null}
         {mode === "positions" ? (
-          <RecordTable
-            empty="No reconciled balances."
-            rows={state?.balances ?? []}
-          />
+          <>
+            <h3 className="border-t px-4 pt-4">Balances</h3>
+            <RecordTable empty="No reconciled balances." rows={state?.balances ?? []} />
+            <h3 className="border-t px-4 pt-4">Funding, fees and wallet activity</h3>
+            <RecordTable
+              empty="No reconciled wallet activity."
+              rows={state?.walletTransactions ?? []}
+            />
+          </>
+        ) : null}
+        {mode === "orders" ? (
+          <>
+            <h3 className="border-t px-4 pt-4">Fills</h3>
+            <RecordTable empty="No reconciled fills." rows={state?.fills ?? []} />
+          </>
         ) : null}
       </Panel>
-      {mode === "orders" ? (
+      {mode === "orders" && !readOnlyMode ? (
         <Panel title="Cancel and modification lifecycle">
           <div className="overflow-x-auto">
             <table>
@@ -3490,9 +3539,11 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
 function DashboardPage({
   csrf,
   user,
+  readOnlyMode,
 }: {
   readonly csrf: string;
   readonly user: SessionUser;
+  readonly readOnlyMode?: boolean;
 }) {
   return (
     <>
@@ -3500,7 +3551,11 @@ function DashboardPage({
         <div className="grid gap-4 p-5 md:grid-cols-3">
           <div>
             <small>Trading mode</small>
-            <strong className="block">LIVE — entries locked</strong>
+            <strong className="block">
+              {readOnlyMode
+                ? "LIVE DATA — trading disabled"
+                : "LIVE — entries locked"}
+            </strong>
           </div>
           <div>
             <small>User role</small>
@@ -3530,7 +3585,10 @@ function Shell({
   const navigate = useNavigate();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const visible = navigation.filter(
-    (item) => !item.admin || user.role === "admin",
+    (item) =>
+      (!item.admin || user.role === "admin") &&
+      (!session.readOnlyMode ||
+        !["/trading", "/gtt", "/tradingview", "/risk"].includes(item.path)),
   );
   const open = (path: string) => {
     navigate(path);
@@ -3598,11 +3656,22 @@ function Shell({
           </nav>
         </aside>
         <main className="hmt-main">
+          {session.readOnlyMode ? (
+            <div className="mx-6 mt-5 rounded border border-blue-300 bg-blue-50 px-4 py-3 font-semibold text-blue-900">
+              Live account data — trading disabled
+            </div>
+          ) : null}
           <div className="hmt-main-content">
             <Routes>
               <Route
                 path="/dashboard"
-                element={<DashboardPage csrf={csrf} user={user} />}
+                element={
+                  <DashboardPage
+                    csrf={csrf}
+                    readOnlyMode={session.readOnlyMode}
+                    user={user}
+                  />
+                }
               />
               <Route path="/market" element={<MarketPage csrf={csrf} />} />
               <Route
@@ -3611,31 +3680,65 @@ function Shell({
               />
               <Route
                 path="/trading"
-                element={<TradingPage csrf={csrf} user={user} />}
+                element={
+                  session.readOnlyMode ? (
+                    <Navigate replace to="/dashboard" />
+                  ) : (
+                    <TradingPage csrf={csrf} user={user} />
+                  )
+                }
               />
               <Route
                 path="/orders"
                 element={
-                  <AccountStatePage csrf={csrf} mode="orders" user={user} />
+                  <AccountStatePage
+                    csrf={csrf}
+                    mode="orders"
+                    readOnlyMode={session.readOnlyMode}
+                    user={user}
+                  />
                 }
               />
               <Route
                 path="/positions"
                 element={
-                  <AccountStatePage csrf={csrf} mode="positions" user={user} />
+                  <AccountStatePage
+                    csrf={csrf}
+                    mode="positions"
+                    readOnlyMode={session.readOnlyMode}
+                    user={user}
+                  />
                 }
               />
               <Route
                 path="/gtt"
-                element={<GttPage csrf={csrf} user={user} />}
+                element={
+                  session.readOnlyMode ? (
+                    <Navigate replace to="/dashboard" />
+                  ) : (
+                    <GttPage csrf={csrf} user={user} />
+                  )
+                }
               />
               <Route
                 path="/tradingview"
-                element={<TradingViewPage csrf={csrf} user={user} />}
+                element={
+                  session.readOnlyMode ? (
+                    <Navigate replace to="/dashboard" />
+                  ) : (
+                    <TradingViewPage csrf={csrf} user={user} />
+                  )
+                }
               />
               <Route
                 path="/risk"
-                element={<RiskPage csrf={csrf} user={user} />}
+                element={
+                  session.readOnlyMode ? (
+                    <Navigate replace to="/dashboard" />
+                  ) : (
+                    <RiskPage csrf={csrf} user={user} />
+                  )
+                }
               />
               <Route path="/performance" element={<PerformancePage />} />
               <Route path="/notifications" element={<NotificationsPage />} />
@@ -3719,7 +3822,12 @@ export default function PlatformApp() {
         setSession(value);
       })
       .catch(() =>
-        setSession({ authenticated: false, csrfToken: null, user: null }),
+        setSession({
+          authenticated: false,
+          csrfToken: null,
+          readOnlyMode: true,
+          user: null,
+        }),
       );
   }, []);
   if (recoveryToken !== null)
@@ -3728,7 +3836,12 @@ export default function PlatformApp() {
         accessToken={recoveryToken}
         onComplete={() => {
           setRecoveryToken(null);
-          setSession({ authenticated: false, csrfToken: null, user: null });
+          setSession({
+            authenticated: false,
+            csrfToken: null,
+            readOnlyMode: true,
+            user: null,
+          });
         }}
       />
     );
@@ -3749,7 +3862,12 @@ export default function PlatformApp() {
           session.csrfToken ?? "",
         ).finally(() => {
           queryClient.clear();
-          setSession({ authenticated: false, csrfToken: null, user: null });
+          setSession({
+            authenticated: false,
+            csrfToken: null,
+            readOnlyMode: true,
+            user: null,
+          });
         });
       }}
     />

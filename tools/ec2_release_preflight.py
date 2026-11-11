@@ -88,6 +88,7 @@ def verify(repo: Path, config: Path, expected_commit: str, *, compose: bool) -> 
         _require(values, "DELTA_REGION", "india")
         _require(values, "DELTA_ENV", "prod")
         _require(values, "PRODUCTION_WRITES_FORBIDDEN", "true")
+        _require(values, "HMT_PRIVATE_READ_ONLY", "true")
         _database_url(_require(values, "DATABASE_URL"), direct=False)
     _require(api, "HMT_API_ALLOWED_ORIGIN", "https://crypto.helpmetrade.club")
     _require(api, "HMT_API_COOKIE_SECURE", "true")
@@ -141,6 +142,7 @@ def verify(repo: Path, config: Path, expected_commit: str, *, compose: bool) -> 
         "status": "PASS",
         "reviewedCommit": head,
         "dispatchEnabled": False,
+        "privateReadOnly": True,
         "productionWritesForbidden": True,
         "entryGatesExpected": "disabled",
         "secretsPrinted": False,

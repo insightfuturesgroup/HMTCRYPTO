@@ -60,6 +60,7 @@ class PrivateWorkerSettings(BaseSettings):
     secret_prefix: str = Field(default="hmt-crypto/delta", alias="HMT_DELTA_SECRET_PREFIX")
     interval_seconds: int = Field(default=15, ge=5, le=300, alias="HMT_PRIVATE_INTERVAL_SECONDS")
     lease_seconds: int = Field(default=45, ge=15, le=900, alias="HMT_PRIVATE_LEASE_SECONDS")
+    read_only: bool = Field(default=True, alias="HMT_PRIVATE_READ_ONLY")
 
     @model_validator(mode="after")
     def _safe_identity(self) -> Self:
@@ -263,7 +264,7 @@ async def _publish(
         if control is None:
             return False
         control.reconciliation_state = outcome
-        if outcome != "ready":
+        if process.read_only or outcome != "ready":
             control.entries_enabled = False
             control.exits_enabled = False
         control.reconciled_at = now
@@ -435,6 +436,8 @@ async def run_private_worker(
                                     account_id=str(account_id),
                                     generation=claim.generation,
                                 )
+                                if process.read_only:
+                                    continue
                                 gtt_result = await evaluate_one_gtt(
                                     database,
                                     account_id=claim.account_id,

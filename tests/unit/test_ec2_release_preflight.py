@@ -25,6 +25,7 @@ def _configuration(root: Path) -> None:
         "DATABASE_CA_FILE=/run/secrets/supabase-prod-ca.crt\n"
         "EXECUTION_MODE=LIVE\nDELTA_REGION=india\nDELTA_ENV=prod\n"
         "PRODUCTION_WRITES_FORBIDDEN=true\n"
+        "HMT_PRIVATE_READ_ONLY=true\n"
     )
     _write(
         root / "api.env",
@@ -79,6 +80,7 @@ def test_locked_production_configuration_passes_without_secret_output(
         "status": "PASS",
         "reviewedCommit": COMMIT,
         "dispatchEnabled": False,
+        "privateReadOnly": True,
         "productionWritesForbidden": True,
         "entryGatesExpected": "disabled",
         "secretsPrinted": False,
@@ -102,4 +104,22 @@ def test_preflight_rejects_dispatch_activation(
     _git(monkeypatch)
 
     with pytest.raises(PreflightError, match="HMT_LIVE_ORDER_DISPATCH_ENABLED"):
+        verify(tmp_path, tmp_path, COMMIT, compose=False)
+
+
+def test_preflight_rejects_disabled_private_read_only_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configuration(tmp_path)
+    api = tmp_path / "api.env"
+    api.write_text(
+        api.read_text(encoding="utf-8").replace(
+            "HMT_PRIVATE_READ_ONLY=true",
+            "HMT_PRIVATE_READ_ONLY=false",
+        ),
+        encoding="utf-8",
+    )
+    _git(monkeypatch)
+
+    with pytest.raises(PreflightError, match="HMT_PRIVATE_READ_ONLY"):
         verify(tmp_path, tmp_path, COMMIT, compose=False)

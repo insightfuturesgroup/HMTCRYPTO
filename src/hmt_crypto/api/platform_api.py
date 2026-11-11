@@ -311,6 +311,10 @@ def install_platform_routes(
         if cookie is None or header is None or not hmac.compare_digest(cookie, header):
             raise HTTPException(status_code=403, detail="csrf_rejected")
 
+    def require_trading_writes_allowed() -> None:
+        if settings.private_read_only:
+            raise HTTPException(status_code=409, detail="private_read_only")
+
     async def principal(request: Request, *, mutation: bool = False) -> Principal:
         if mutation:
             require_csrf(request)
@@ -561,6 +565,7 @@ def install_platform_routes(
             {
                 "authenticated": True,
                 "csrfToken": csrf,
+                "readOnlyMode": settings.private_read_only,
                 "user": {
                     "id": str(actor.profile_id),
                     "email": actor.email,
@@ -586,13 +591,21 @@ def install_platform_routes(
         except HTTPException as error:
             if error.status_code not in {401, 403}:
                 raise
-            response = JSONResponse({"authenticated": False, "csrfToken": None, "user": None})
+            response = JSONResponse(
+                {
+                    "authenticated": False,
+                    "csrfToken": None,
+                    "readOnlyMode": settings.private_read_only,
+                    "user": None,
+                }
+            )
             clear_auth_cookies(response)
             return response
         return JSONResponse(
             {
                 "authenticated": True,
                 "csrfToken": request.cookies.get(_CSRF_COOKIE),
+                "readOnlyMode": settings.private_read_only,
                 "user": {
                     "id": str(actor.profile_id),
                     "email": actor.email,
@@ -1569,13 +1582,6 @@ def install_platform_routes(
             if (
                 row is None
                 or control is None
-                or control.reconciliation_state != "ready"
-                or lease is None
-                or lease.lease_until <= datetime.now(UTC)
-                or lease.credential_version != row.credential_version
-                or row.worker_owner_id != lease.owner_id
-                or row.worker_generation != lease.generation
-                or row.outcome != "ready"
                 or row.balances_payload is None
                 or row.positions_payload is None
                 or row.open_orders_payload is None
@@ -1586,13 +1592,33 @@ def install_platform_routes(
             reconciled_at = control.reconciled_at
             if reconciled_at is None:
                 raise HTTPException(status_code=409, detail="account_state_not_ready")
-            age_seconds = max(0, int((datetime.now(UTC) - reconciled_at).total_seconds()))
+            now = datetime.now(UTC)
+            age_seconds = max(0, int((now - reconciled_at).total_seconds()))
+            fresh_until = reconciled_at + timedelta(seconds=60)
+            lease_active = lease is not None and lease.lease_until > now
+            fence_matches = bool(
+                lease is not None
+                and lease.credential_version == row.credential_version
+                and row.worker_owner_id == lease.owner_id
+                and row.worker_generation == lease.generation
+            )
+            fresh = bool(
+                age_seconds <= 60
+                and control.reconciliation_state == "ready"
+                and lease_active
+                and fence_matches
+                and row.outcome == "ready"
+            )
             return {
                 "accountId": str(account_id),
                 "observedAt": _utc(row.observed_at),
                 "reconciledAt": _utc(reconciled_at),
+                "freshUntil": _utc(fresh_until),
                 "ageSeconds": age_seconds,
-                "fresh": age_seconds <= 60,
+                "fresh": fresh,
+                "reconciliationState": control.reconciliation_state,
+                "leaseActive": lease_active,
+                "leaseUntil": None if lease is None else _utc(lease.lease_until),
                 "credentialVersion": row.credential_version,
                 "balances": json.loads(row.balances_payload),
                 "positions": json.loads(row.positions_payload),
@@ -1879,6 +1905,7 @@ def install_platform_routes(
     @app.get("/api/v1/market/products")
     async def market_products(request: Request) -> dict[str, object]:
         await principal(request)
+        now = datetime.now(UTC)
         async with database.transaction() as session:
             snapshot = (
                 await session.execute(
@@ -1919,6 +1946,10 @@ def install_platform_routes(
                         "bestBid": None if quote is None else quote.best_bid,
                         "bestAsk": None if quote is None else quote.best_ask,
                         "observedAt": None if quote is None else _utc(quote.observed_at),
+                        "quoteFresh": bool(
+                            quote is not None
+                            and quote.observed_at >= now - timedelta(seconds=15)
+                        ),
                     }
                 )
             return {
@@ -1927,7 +1958,7 @@ def install_platform_routes(
                     "environment": snapshot.environment,
                     "validatedAt": _utc(snapshot.validated_at),
                     "freshUntil": _utc(snapshot.fresh_until),
-                    "fresh": snapshot.fresh_until >= datetime.now(UTC),
+                    "fresh": snapshot.fresh_until >= now,
                 },
                 "products": products,
             }
@@ -2060,6 +2091,7 @@ def install_platform_routes(
 
     @app.post("/api/v1/trading/previews")
     async def create_order_preview(body: OrderPreviewBody, request: Request) -> dict[str, object]:
+        require_trading_writes_allowed()
         actor = await principal(request, mutation=True)
         request_id = UUID(_request_id(request))
         now = datetime.now(UTC)
@@ -2329,6 +2361,7 @@ def install_platform_routes(
 
     @app.post("/api/v1/trading/intents")
     async def admit_order_intent(body: OrderIntentBody, request: Request) -> dict[str, object]:
+        require_trading_writes_allowed()
         actor = await principal(request, mutation=True)
         request_id = UUID(_request_id(request))
         now = datetime.now(UTC)
@@ -2488,6 +2521,7 @@ def install_platform_routes(
 
     @app.post("/api/v1/trading/actions")
     async def create_order_action(body: OrderActionBody, request: Request) -> dict[str, object]:
+        require_trading_writes_allowed()
         actor = await principal(request, mutation=True)
         request_id = UUID(_request_id(request))
         now = datetime.now(UTC)
@@ -2784,6 +2818,8 @@ def install_platform_routes(
     async def set_global_live_control(
         body: GlobalEntryGateBody, request: Request
     ) -> dict[str, object]:
+        if body.entries_enabled:
+            require_trading_writes_allowed()
         actor = await admin(request, mutation=True)
         request_id = _request_id(request)
         if actor.last_login_at is None or datetime.now(UTC) - actor.last_login_at > timedelta(
@@ -2822,6 +2858,8 @@ def install_platform_routes(
     async def set_account_live_control(
         account_id: UUID, body: LiveGateBody, request: Request
     ) -> dict[str, object]:
+        if body.entries_enabled or body.exits_enabled:
+            require_trading_writes_allowed()
         actor = await admin(request, mutation=True)
         request_id = _request_id(request)
         now = datetime.now(UTC)
@@ -3305,6 +3343,7 @@ def install_platform_routes(
 
     @app.post("/api/v1/webhooks/tradingview/{key}")
     async def tradingview_webhook(key: str, body: TradingViewSignalBody) -> JSONResponse:
+        require_trading_writes_allowed()
         if len(key) < 32 or len(key) > 128 or re.fullmatch(r"[A-Za-z0-9_-]+", key) is None:
             raise HTTPException(status_code=404, detail="webhook_not_found")
         now = datetime.now(UTC)
@@ -3391,6 +3430,7 @@ def install_platform_routes(
 
     @app.post("/api/v1/gtt")
     async def create_gtt(body: GttBody, request: Request) -> dict[str, object]:
+        require_trading_writes_allowed()
         actor = await principal(request, mutation=True)
         request_id = _request_id(request)
         values = [
@@ -3524,6 +3564,7 @@ def install_platform_routes(
 
     @app.post("/api/v1/gtt/{gtt_id}/cancel")
     async def cancel_gtt(gtt_id: UUID, request: Request) -> dict[str, object]:
+        require_trading_writes_allowed()
         actor = await principal(request, mutation=True)
         request_id = _request_id(request)
         async with database.transaction() as session:

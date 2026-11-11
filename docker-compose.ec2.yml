@@ -33,6 +33,7 @@ services:
     environment:
       HMT_API_BIND_HOST: 0.0.0.0
       HMT_API_BIND_PORT: "8000"
+      HMT_PRIVATE_READ_ONLY: "true"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -89,6 +90,7 @@ services:
       - deploy/ec2/worker.env
     environment:
       HMT_WORKER_KIND: private
+      HMT_PRIVATE_READ_ONLY: "true"
     volumes:
       - /etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro
     depends_on:

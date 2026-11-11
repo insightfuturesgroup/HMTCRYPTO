@@ -108,6 +108,7 @@ class ControlApiSettings(BaseSettings):
     embed_paper_worker: StrictBool = Field(default=False, alias="HMT_API_EMBED_PAPER_WORKER")
     account_id: UUID | None = Field(default=None, alias="HMT_API_ACCOUNT_ID")
     multi_user_enabled: StrictBool = Field(default=False, alias="HMT_API_MULTI_USER_ENABLED")
+    private_read_only: StrictBool = Field(default=True, alias="HMT_PRIVATE_READ_ONLY")
     supabase_url: str | None = Field(default=None, alias="HMT_SUPABASE_URL")
     supabase_publishable_key: SecretStr | None = Field(
         default=None, alias="HMT_SUPABASE_PUBLISHABLE_KEY"
@@ -122,6 +123,7 @@ class ControlApiSettings(BaseSettings):
         "database_control_enabled",
         "embed_paper_worker",
         "multi_user_enabled",
+        "private_read_only",
         mode="before",
     )
     @classmethod

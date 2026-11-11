@@ -15,6 +15,7 @@ def test_private_worker_requires_lease_longer_than_two_cycles() -> None:
         HMT_PRIVATE_LEASE_SECONDS=45,
     )
     assert settings.owner_id == UUID(int=7)
+    assert settings.read_only is True
 
     with pytest.raises(ValidationError):
         PrivateWorkerSettings(
