@@ -47,6 +47,15 @@ def test_runtime_images_drop_root_before_entrypoint() -> None:
     assert "USER 101:101" in ui_runtime
 
 
+def test_non_root_nginx_owns_its_ephemeral_runtime_mounts() -> None:
+    root = Path(__file__).resolve().parents[2]
+    for name in ("docker-compose.yml", "docker-compose.ec2.yml"):
+        compose = (root / name).read_text(encoding="utf-8")
+        ui = compose.split("  ui:\n", 1)[1].split("\n  caddy:\n", 1)[0]
+        assert "/var/cache/nginx:size=16m,noexec,nosuid,nodev,uid=101,gid=101,mode=0750" in ui
+        assert "/var/run:size=1m,noexec,nosuid,nodev,uid=101,gid=101,mode=0750" in ui
+
+
 def test_ec2_migration_mounts_the_pinned_supabase_ca() -> None:
     root = Path(__file__).resolve().parents[2]
     compose = (root / "docker-compose.ec2.yml").read_text(encoding="utf-8")

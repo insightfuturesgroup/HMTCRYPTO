@@ -111,8 +111,8 @@ services:
       - "127.0.0.1:8080:8080"
     read_only: true
     tmpfs:
-      - /var/cache/nginx:size=16m,noexec,nosuid,nodev
-      - /var/run:size=1m,noexec,nosuid,nodev
+      - /var/cache/nginx:size=16m,noexec,nosuid,nodev,uid=101,gid=101,mode=0750
+      - /var/run:size=1m,noexec,nosuid,nodev,uid=101,gid=101,mode=0750
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
