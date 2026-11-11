@@ -133,11 +133,17 @@ async def run_market_worker(
                                 product_count=len(products),
                             )
                         )
+                        # These mappers intentionally have no ORM relationship. Flush the
+                        # parent explicitly so SQLAlchemy cannot schedule child inserts ahead
+                        # of the database foreign-key target. The surrounding transaction
+                        # still commits or rolls back the complete catalogue atomically.
+                        stage = "catalogue_snapshot_flush"
+                        await session.flush()
                         session.add_all(
                             CatalogueProduct.from_product(snapshot_id=snapshot_id, product=product)
                             for product in products
                         )
-                        stage = "catalogue_flush"
+                        stage = "catalogue_products_flush"
                         await session.flush()
                         stage = "catalogue_commit"
                     last_catalogue = now
