@@ -827,6 +827,11 @@ def install_platform_routes(
                     updated_at=now,
                 )
                 session.add(account)
+                # Materialize the account parent before inserting assignment and
+                # readiness rows.  The Account mapper also participates in the
+                # credential-version FK cycle, so relying on implicit unit-of-work
+                # ordering can send its dependants first on PostgreSQL.
+                await session.flush()
                 session.add(
                     AccountAssignment(
                         id=uuid4(),
@@ -853,6 +858,10 @@ def install_platform_routes(
                         updated_at=now,
                     )
                 )
+                # Keep the audit record after all account-owned FK rows.  This
+                # makes a failed child write roll back the whole operation while
+                # preserving deterministic insertion order.
+                await session.flush()
                 await append_audit(
                     session,
                     actor=actor,
