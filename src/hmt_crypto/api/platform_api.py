@@ -33,6 +33,7 @@ from hmt_crypto.api.live_order_admission import (
     LiveOrderAdmissionError,
     evaluate_order_sizing,
     position_notional,
+    projected_position_contracts,
 )
 from hmt_crypto.api.live_submission import make_live_client_order_id
 from hmt_crypto.api.platform_auth import (
@@ -1442,12 +1443,22 @@ def install_platform_routes(
                 or body.contracts > abs(signed_position)
             ):
                 raise HTTPException(status_code=409, detail="reduce_only_violation")
-            projected_contracts = signed_position + direction * body.contracts
+            try:
+                projected_contracts = projected_position_contracts(
+                    positions=positions,
+                    open_orders=open_orders,
+                    product_id=body.product_id,
+                    new_side=body.side,
+                    new_contracts=body.contracts,
+                    new_reduce_only=body.reduce_only,
+                )
+            except LiveOrderAdmissionError:
+                raise HTTPException(status_code=409, detail="account_state_not_ready") from None
             projected_notional = (
                 Decimal(0)
                 if projected_contracts == 0
                 else position_notional(
-                    product=product, contracts=abs(projected_contracts), price=sizing.price
+                    product=product, contracts=projected_contracts, price=sizing.price
                 )
             )
             if projected_notional > risk.max_position_notional:

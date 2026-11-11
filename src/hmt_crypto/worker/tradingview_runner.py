@@ -15,6 +15,7 @@ from hmt_crypto.api.live_order_admission import (
     LiveOrderAdmissionError,
     evaluate_order_sizing,
     position_notional,
+    projected_position_contracts,
 )
 from hmt_crypto.api.live_submission import make_live_client_order_id
 from hmt_crypto.persistence.db import Database
@@ -211,14 +212,21 @@ async def admit_one_tradingview_signal(
             or strategy.contracts > abs(signed_position)
         ):
             return _reject(signal, now=now, reason="reduce_only_violation")
-        projected = signed_position + direction * strategy.contracts
         try:
+            projected = projected_position_contracts(
+                positions=positions,
+                open_orders=open_orders,
+                product_id=strategy.product_id,
+                new_side=signal.side,
+                new_contracts=strategy.contracts,
+                new_reduce_only=strategy.reduce_only,
+            )
             projected_notional = (
                 Decimal(0)
                 if projected == 0
                 else position_notional(
                     product=product_row.to_product(),
-                    contracts=abs(projected),
+                    contracts=projected,
                     price=sizing.price,
                 )
             )

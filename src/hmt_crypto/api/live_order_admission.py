@@ -27,6 +27,67 @@ class OrderSizingEvidence:
     notional: Decimal
 
 
+def _integer(value: object, *, allow_zero: bool = False) -> int:
+    if type(value) is int and (value >= 0 if allow_zero else value > 0):
+        return value
+    if type(value) is str and value.isascii() and value.isdigit():
+        parsed = int(value)
+        if parsed >= (0 if allow_zero else 1):
+            return parsed
+    raise LiveOrderAdmissionError()
+
+
+def projected_position_contracts(
+    *,
+    positions: list[object],
+    open_orders: list[object],
+    product_id: int,
+    new_side: str,
+    new_contracts: int,
+    new_reduce_only: bool,
+) -> int:
+    """Return the worst same-product position after all risk-increasing orders fill."""
+    if (
+        type(product_id) is not int
+        or product_id <= 0
+        or new_side not in {"buy", "sell"}
+        or type(new_contracts) is not int
+        or new_contracts <= 0
+        or type(new_reduce_only) is not bool
+    ):
+        raise LiveOrderAdmissionError()
+    signed_position = 0
+    for row in positions:
+        if not isinstance(row, dict):
+            raise LiveOrderAdmissionError()
+        if row.get("product_id") == product_id:
+            value = row.get("size")
+            if type(value) is not int:
+                raise LiveOrderAdmissionError()
+            signed_position = value
+    pending_buy = 0
+    pending_sell = 0
+    for row in open_orders:
+        if not isinstance(row, dict):
+            raise LiveOrderAdmissionError()
+        if row.get("product_id") != product_id or row.get("reduce_only") is True:
+            continue
+        side = row.get("side")
+        if side not in {"buy", "sell"}:
+            raise LiveOrderAdmissionError()
+        remaining = _integer(row.get("unfilled_size"), allow_zero=True)
+        if side == "buy":
+            pending_buy += remaining
+        else:
+            pending_sell += remaining
+    if not new_reduce_only:
+        if new_side == "buy":
+            pending_buy += new_contracts
+        else:
+            pending_sell += new_contracts
+    return max(abs(signed_position + pending_buy), abs(signed_position - pending_sell))
+
+
 def position_notional(*, product: Product, contracts: int, price: Decimal) -> Decimal:
     """Return exact linear notional for one bounded absolute position size."""
     try:
@@ -78,4 +139,5 @@ __all__ = [
     "OrderSizingEvidence",
     "evaluate_order_sizing",
     "position_notional",
+    "projected_position_contracts",
 ]

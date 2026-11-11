@@ -8,6 +8,7 @@ from hmt_crypto.api.live_order_admission import (
     LiveOrderAdmissionError,
     evaluate_order_sizing,
     position_notional,
+    projected_position_contracts,
 )
 from hmt_crypto.domain import (
     Asset,
@@ -100,3 +101,47 @@ def test_position_notional_uses_bounded_exact_math() -> None:
     assert position_notional(product=product(), contracts=7, price=Decimal("50000.5")) == Decimal(
         "350.0035"
     )
+
+
+def test_position_envelope_includes_pending_same_product_entries() -> None:
+    projected = projected_position_contracts(
+        positions=[{"product_id": 27, "size": 2}],
+        open_orders=[
+            {"product_id": 27, "side": "buy", "unfilled_size": 3, "reduce_only": False},
+            {"product_id": 27, "side": "sell", "unfilled_size": 7, "reduce_only": False},
+            {"product_id": 27, "side": "sell", "unfilled_size": 99, "reduce_only": True},
+            {"product_id": 28, "side": "buy", "unfilled_size": 99, "reduce_only": False},
+        ],
+        product_id=27,
+        new_side="buy",
+        new_contracts=4,
+        new_reduce_only=False,
+    )
+
+    assert projected == 9
+
+
+def test_reduce_only_order_does_not_increase_position_envelope() -> None:
+    assert (
+        projected_position_contracts(
+            positions=[{"product_id": 27, "size": -5}],
+            open_orders=[],
+            product_id=27,
+            new_side="buy",
+            new_contracts=5,
+            new_reduce_only=True,
+        )
+        == 5
+    )
+
+
+def test_position_envelope_rejects_malformed_pending_order() -> None:
+    with pytest.raises(LiveOrderAdmissionError):
+        projected_position_contracts(
+            positions=[],
+            open_orders=[{"product_id": 27, "side": "buy", "unfilled_size": "bad"}],
+            product_id=27,
+            new_side="buy",
+            new_contracts=1,
+            new_reduce_only=False,
+        )
