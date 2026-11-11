@@ -1067,24 +1067,27 @@ def install_platform_routes(
                 if account is None:
                     raise HTTPException(status_code=404, detail="account_not_found")
                 now = datetime.now(UTC)
-                session.add(
-                    CredentialVersion(
-                        id=uuid4(),
-                        account_id=account.id,
-                        region=account.region,
-                        environment=account.environment,
-                        mode=account.mode,
-                        credential_version=version,
-                        credential_slot=f"DELTA_{account.region.upper()}_{account.environment.upper()}",
-                        fingerprint_hint=fingerprint,
-                        observed_external_user_id=None,
-                        observed_external_account_id=None,
-                        binding_ref=None,
-                        probe_ref=None,
-                        reconciliation_ref=None,
-                        recorded_at=now,
-                    )
+                credential = CredentialVersion(
+                    id=uuid4(),
+                    account_id=account.id,
+                    region=account.region,
+                    environment=account.environment,
+                    mode=account.mode,
+                    credential_version=version,
+                    credential_slot=f"DELTA_{account.region.upper()}_{account.environment.upper()}",
+                    fingerprint_hint=fingerprint,
+                    observed_external_user_id=None,
+                    observed_external_account_id=None,
+                    binding_ref=None,
+                    probe_ref=None,
+                    reconciliation_ref=None,
+                    recorded_at=now,
                 )
+                session.add(credential)
+                # The account's current-version FK points at this row. Materialize
+                # it before updating the account to avoid unit-of-work ordering
+                # through the existing account/credential cycle.
+                await session.flush()
                 session.add(
                     CredentialSecretReference(
                         id=uuid4(),

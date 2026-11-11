@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from botocore.exceptions import ClientError  # type: ignore[import-untyped]
+
 
 @dataclass(frozen=True, slots=True)
 class StoredSecret:
@@ -46,7 +48,26 @@ class AwsDeltaSecretStore:
                 raise RuntimeError("secret store returned an invalid receipt")
             return {str(key): value for key, value in result.items()}
 
-        result = await asyncio.to_thread(create)
+        try:
+            result = await asyncio.to_thread(create)
+        except ClientError as error:
+            detail = error.response.get("Error", {})
+            code = detail.get("Code")
+            message = detail.get("Message")
+            if (
+                code != "InvalidRequestException"
+                or type(message) is not str
+                or "scheduled for deletion" not in message.casefold()
+            ):
+                raise
+
+            def restore_and_replace() -> dict[str, Any]:
+                restored = self._client.restore_secret(SecretId=name)
+                replaced = self._client.put_secret_value(SecretId=name, SecretString=value)
+                arn = replaced.get("ARN") or restored.get("ARN")
+                return {"ARN": arn, "VersionId": replaced.get("VersionId")}
+
+            result = await asyncio.to_thread(restore_and_replace)
         arn, version_id = result.get("ARN"), result.get("VersionId")
         if type(arn) is not str or type(version_id) is not str:
             raise RuntimeError("secret store returned an invalid receipt")
