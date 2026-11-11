@@ -71,6 +71,89 @@ async def has_live_submission_recovery_debt(database: Database, *, account_id: U
         return submission_id is not None
 
 
+async def claim_live_submission_recovery(
+    database: Database, *, account_id: UUID, owner_id: UUID
+) -> ClaimedLiveSubmission | None:
+    """Claim the oldest possible prior write under the current private-worker lease."""
+    if (
+        type(account_id) is not UUID
+        or account_id.int == 0
+        or type(owner_id) is not UUID
+        or owner_id.int == 0
+    ):
+        raise ValueError("invalid live recovery claim scope")
+    now = datetime.now(UTC)
+    async with database.transaction() as session:
+        lease = await session.scalar(
+            select(PrivateWorkerLease)
+            .where(PrivateWorkerLease.account_id == account_id)
+            .with_for_update()
+        )
+        account = await session.get(Account, account_id)
+        if (
+            lease is None
+            or lease.owner_id != owner_id
+            or lease.lease_until <= now
+            or account is None
+            or account.current_credential_version != lease.credential_version
+        ):
+            return None
+        submission = await session.scalar(
+            select(LiveOrderSubmission)
+            .where(
+                LiveOrderSubmission.account_id == account_id,
+                LiveOrderSubmission.status.in_(("SENDING", "UNCERTAIN")),
+            )
+            .order_by(LiveOrderSubmission.created_at, LiveOrderSubmission.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        if submission is None:
+            return None
+        intent = await session.get(LiveOrderIntent, submission.intent_id)
+        preview = None if intent is None else await session.get(LiveOrderPreview, intent.preview_id)
+        if intent is None or preview is None:
+            raise ValueError("live recovery evidence is unavailable")
+        active = SubmissionFence(lease.owner_id, lease.generation, lease.credential_version)
+        if submission.status == "SENDING":
+            submission.status = "UNCERTAIN"
+            submission.last_error_code = "worker_recovery_required"
+            submission.updated_at = now
+            evidence = submission_event_sha256(
+                submission_id=submission.id,
+                sequence=4,
+                from_status="SENDING",
+                to_status="UNCERTAIN",
+                fence=active,
+                occurred_at=now,
+            )
+            session.add(
+                LiveOrderSubmissionEvent(
+                    id=uuid4(),
+                    submission_id=submission.id,
+                    account_id=submission.account_id,
+                    sequence=4,
+                    from_status="SENDING",
+                    to_status="UNCERTAIN",
+                    worker_owner_id=active.owner_id,
+                    worker_generation=active.generation,
+                    credential_version=active.credential_version,
+                    evidence_sha256=evidence,
+                    occurred_at=now,
+                )
+            )
+        return ClaimedLiveSubmission(
+            submission_id=submission.id,
+            account_id=submission.account_id,
+            intent_id=intent.id,
+            preview_id=preview.id,
+            client_order_id=submission.client_order_id,
+            request_sha256=submission.request_sha256,
+            fence=active,
+            claim_until=lease.lease_until,
+        )
+
+
 async def claim_next_live_submission(
     database: Database,
     *,
@@ -493,13 +576,8 @@ async def record_uncertain_recovery_lookup(
             or submission.client_order_id != claim.client_order_id
         ):
             raise ValueError("uncertain live submission is unavailable")
-        fence = SubmissionFence(
-            submission.worker_owner_id,
-            submission.worker_generation,
-            submission.credential_version,
-        )
         active = SubmissionFence(lease.owner_id, lease.generation, lease.credential_version)
-        if fence != claim.fence or active != claim.fence or lease.lease_until <= now:
+        if active != claim.fence or lease.lease_until <= now:
             raise ValueError("uncertain recovery fence is stale")
         prior = await session.scalar(
             select(func.max(LiveOrderRecoveryCheck.attempt)).where(
@@ -513,7 +591,7 @@ async def record_uncertain_recovery_lookup(
             result=observation.result,
             client_order_id=submission.client_order_id,
             exchange_order_id=observation.exchange_order_id,
-            fence=fence,
+            fence=active,
             occurred_at=now,
         )
         session.add(
@@ -525,18 +603,15 @@ async def record_uncertain_recovery_lookup(
                 result=observation.result,
                 client_order_id=submission.client_order_id,
                 exchange_order_id=observation.exchange_order_id,
-                worker_owner_id=fence.owner_id,
-                worker_generation=fence.generation,
-                credential_version=fence.credential_version,
+                worker_owner_id=active.owner_id,
+                worker_generation=active.generation,
+                credential_version=active.credential_version,
                 evidence_sha256=evidence,
                 occurred_at=now,
             )
         )
         if observation.result != "FOUND":
             return
-        require_transition(
-            current="UNCERTAIN", target="ACCEPTED", stored_fence=fence, actor_fence=claim.fence
-        )
         submission.status = "ACCEPTED"
         submission.exchange_order_id = observation.exchange_order_id
         submission.last_error_code = None
@@ -547,7 +622,7 @@ async def record_uncertain_recovery_lookup(
             sequence=5,
             from_status="UNCERTAIN",
             to_status="ACCEPTED",
-            fence=fence,
+            fence=active,
             occurred_at=now,
         )
         session.add(
@@ -558,9 +633,9 @@ async def record_uncertain_recovery_lookup(
                 sequence=5,
                 from_status="UNCERTAIN",
                 to_status="ACCEPTED",
-                worker_owner_id=fence.owner_id,
-                worker_generation=fence.generation,
-                credential_version=fence.credential_version,
+                worker_owner_id=active.owner_id,
+                worker_generation=active.generation,
+                credential_version=active.credential_version,
                 evidence_sha256=event_hash,
                 occurred_at=now,
             )
@@ -570,6 +645,7 @@ async def record_uncertain_recovery_lookup(
 __all__ = [
     "ClaimedLiveSubmission",
     "SendingLiveSubmission",
+    "claim_live_submission_recovery",
     "claim_next_live_submission",
     "has_live_submission_recovery_debt",
     "mark_live_submission_sending",

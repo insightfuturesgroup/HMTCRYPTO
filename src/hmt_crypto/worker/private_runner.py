@@ -19,6 +19,7 @@ from hmt_crypto.api.delta_reconciliation import (
     read_private_reconciliation,
 )
 from hmt_crypto.api.live_order_http import DeltaIndiaLiveOrderHttpAdapter
+from hmt_crypto.api.live_order_recovery_http import DeltaIndiaLiveOrderRecoveryAdapter
 from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion, ExecutionMode
@@ -39,6 +40,7 @@ from hmt_crypto.worker.live_execution import (
     LiveExecutionSettings,
     execute_one_live_submission,
 )
+from hmt_crypto.worker.live_recovery import LiveRecoveryResult, recover_one_live_submission
 
 
 class PrivateWorkerSettings(BaseSettings):
@@ -319,6 +321,33 @@ async def _execute_qualified_live_submission(
         await adapter.aclose()
 
 
+async def _recover_live_submission(
+    database: Database,
+    process: PrivateWorkerSettings,
+    claim: _Claim,
+    *,
+    api_key: str,
+    api_secret: str,
+) -> LiveRecoveryResult:
+    signer = DeltaSigner(
+        api_key=SecretStr(api_key),
+        api_secret=SecretStr(api_secret),
+        user_agent="hmt-crypto-live-recovery/1.0",
+        clock=lambda: int(time.time()),
+    )
+    adapter = DeltaIndiaLiveOrderRecoveryAdapter(signer=signer)
+    try:
+        return await recover_one_live_submission(
+            database,
+            account_id=claim.account_id,
+            owner_id=process.owner_id,
+            external_user_id=claim.external_user_id,
+            adapter=adapter,
+        )
+    finally:
+        await adapter.aclose()
+
+
 async def run_private_worker(
     runtime: ControlRuntimeSettings,
     process: PrivateWorkerSettings,
@@ -366,6 +395,24 @@ async def run_private_worker(
                                     account_id=str(account_id),
                                     generation=claim.generation,
                                 )
+                                recovery = await _recover_live_submission(
+                                    database,
+                                    process,
+                                    claim,
+                                    api_key=api_key,
+                                    api_secret=api_secret,
+                                )
+                                if recovery.kind != "IDLE":
+                                    logger.info(
+                                        "live_recovery_cycle",
+                                        account_id=str(account_id),
+                                        outcome=recovery.kind,
+                                        submission_id=(
+                                            None
+                                            if recovery.submission_id is None
+                                            else str(recovery.submission_id)
+                                        ),
+                                    )
                                 result = await _execute_qualified_live_submission(
                                     database,
                                     process,
