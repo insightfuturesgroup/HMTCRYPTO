@@ -23,6 +23,7 @@ from hmt_crypto.exchange.delta.rate_limiter import RateLimitScope, ScopeKind, We
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import CatalogueProduct, CatalogueSnapshot, MarketQuote
+from hmt_crypto.worker.public_ticker_stream import run_public_ticker_stream
 
 
 class MarketWorkerSettings(BaseSettings):
@@ -82,6 +83,7 @@ async def run_market_worker(
         clock=lambda: datetime.now(UTC),
     )
     last_catalogue = datetime.min.replace(tzinfo=UTC)
+    stream_task: asyncio.Task[None] | None = None
     logger.info("market_worker_started", region="india", environment=runtime.delta_env.value)
     try:
         while not stop.is_set():
@@ -124,6 +126,15 @@ async def run_market_worker(
                             for product in products
                         )
                     last_catalogue = now
+                    if stream_task is not None:
+                        stream_task.cancel()
+                        try:
+                            await stream_task
+                        except asyncio.CancelledError:
+                            pass
+                    stream_task = asyncio.create_task(
+                        run_public_ticker_stream(runtime, snapshot, database, stop=stop)
+                    )
                     logger.info(
                         "market_catalogue_published",
                         revision=revision,
@@ -131,6 +142,16 @@ async def run_market_worker(
                         refresh_status=result.status.value,
                     )
                 snapshot = catalog.require_snapshot(at=datetime.now(UTC))
+                if stream_task is not None and stream_task.done():
+                    try:
+                        stream_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        logger.error("market_websocket_supervisor_failed")
+                    stream_task = asyncio.create_task(
+                        run_public_ticker_stream(runtime, snapshot, database, stop=stop)
+                    )
                 allowed = {
                     product.id
                     for product in snapshot.products
@@ -181,6 +202,12 @@ async def run_market_worker(
             except TimeoutError:
                 pass
     finally:
+        if stream_task is not None:
+            stream_task.cancel()
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
         await client.aclose()
         await database.aclose()
         logger.info("market_worker_stopped")
