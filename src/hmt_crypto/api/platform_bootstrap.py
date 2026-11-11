@@ -51,6 +51,10 @@ async def bootstrap_first_admin(
                     last_login_at=None,
                 )
             )
+            # PlatformUser and PlatformAuditEvent deliberately have no ORM
+            # relationship. Materialize the parent before its FK-dependent audit
+            # evidence while retaining one atomic transaction.
+            await session.flush()
             session.add(
                 PlatformAuditEvent(
                     id=uuid4(),
