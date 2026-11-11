@@ -62,6 +62,7 @@ from hmt_crypto.persistence.models import (
     MarketQuote,
     PlatformAuditEvent,
     PlatformLiveControl,
+    PlatformSession,
     PlatformUser,
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
@@ -74,6 +75,7 @@ from hmt_crypto.persistence.models import (
 _ACCESS_COOKIE = "__Host-hmt_auth_access"
 _REFRESH_COOKIE = "__Host-hmt_auth_refresh"
 _CSRF_COOKIE = "__Host-hmt_auth_csrf"
+_SESSION_COOKIE = "__Host-hmt_platform_session"
 _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 
 
@@ -86,6 +88,11 @@ class LoginBody(_Body):
     password: str = Field(min_length=8, max_length=1024)
 
 
+class PasswordRecoveryBody(_Body):
+    access_token: str = Field(min_length=32, max_length=8192)
+    new_password: str = Field(min_length=12, max_length=1024)
+
+
 class InviteBody(_Body):
     email: str = Field(min_length=3, max_length=320)
     full_name: str = Field(min_length=1, max_length=128)
@@ -94,7 +101,7 @@ class InviteBody(_Body):
 
 class UpdateUserBody(_Body):
     role: Literal["admin", "trader", "viewer"]
-    status: Literal["active", "disabled"]
+    status: Literal["invited", "active", "disabled"]
 
 
 class CreateAccountBody(_Body):
@@ -290,7 +297,8 @@ def install_platform_routes(
         if mutation:
             require_csrf(request)
         access = request.cookies.get(_ACCESS_COOKIE)
-        if access is None:
+        platform_token = request.cookies.get(_SESSION_COOKIE)
+        if access is None or platform_token is None:
             raise HTTPException(status_code=401, detail="authentication_required")
         try:
             identity = await auth.user(access)
@@ -298,14 +306,32 @@ def install_platform_routes(
             raise HTTPException(status_code=401, detail="authentication_required") from None
         except AuthenticationUnavailable:
             raise HTTPException(status_code=503, detail="authentication_unavailable") from None
+        now = datetime.now(UTC)
+        token_sha256 = hashlib.sha256(platform_token.encode("utf-8")).hexdigest()
         async with database.transaction() as session:
-            row = (
+            result = (
                 await session.execute(
-                    select(PlatformUser).where(PlatformUser.auth_user_id == identity.auth_user_id)
+                    select(PlatformUser, PlatformSession)
+                    .join(PlatformSession, PlatformSession.user_id == PlatformUser.id)
+                    .where(
+                        PlatformUser.auth_user_id == identity.auth_user_id,
+                        PlatformSession.token_sha256 == token_sha256,
+                    )
                 )
-            ).scalar_one_or_none()
-            if row is None or row.status != "active" or row.email.casefold() != identity.email:
+            ).one_or_none()
+            if result is None:
+                raise HTTPException(status_code=401, detail="authentication_required")
+            row, platform_session = result
+            if (
+                row.status != "active"
+                or row.email.casefold() != identity.email
+                or platform_session.revoked_at is not None
+                or platform_session.expires_at <= now
+                or platform_session.last_seen_at
+                <= now - timedelta(seconds=settings.session_idle_seconds)
+            ):
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
+            platform_session.last_seen_at = now
             return Principal(
                 row.id,
                 row.auth_user_id,
@@ -319,6 +345,11 @@ def install_platform_routes(
         actor = await principal(request, mutation=mutation)
         if actor.role != "admin":
             raise HTTPException(status_code=403, detail="admin_required")
+        if mutation and (
+            actor.last_login_at is None
+            or actor.last_login_at < datetime.now(UTC) - timedelta(minutes=15)
+        ):
+            raise HTTPException(status_code=401, detail="fresh_authentication_required")
         return actor
 
     async def append_audit(
@@ -360,12 +391,18 @@ def install_platform_routes(
         return str(permission)
 
     def set_auth_cookies(
-        response: JSONResponse, access: str, refresh: str, csrf: str, age: int
+        response: JSONResponse,
+        access: str,
+        refresh: str,
+        csrf: str,
+        platform_token: str,
+        age: int,
     ) -> None:
         for name, value, httponly in (
             (_ACCESS_COOKIE, access, True),
             (_REFRESH_COOKIE, refresh, True),
             (_CSRF_COOKIE, csrf, False),
+            (_SESSION_COOKIE, platform_token, True),
         ):
             response.set_cookie(
                 name,
@@ -374,12 +411,58 @@ def install_platform_routes(
                 secure=True,
                 samesite="strict",
                 path="/",
-                max_age=age if name == _ACCESS_COOKIE else settings.session_absolute_seconds,
+                max_age=(age if name == _ACCESS_COOKIE else settings.session_absolute_seconds),
             )
 
     def clear_auth_cookies(response: JSONResponse) -> None:
-        for name in (_ACCESS_COOKIE, _REFRESH_COOKIE, _CSRF_COOKIE):
+        for name in (_ACCESS_COOKIE, _REFRESH_COOKIE, _CSRF_COOKIE, _SESSION_COOKIE):
             response.delete_cookie(name, path="/", secure=True, samesite="strict")
+
+    @app.post("/api/v1/auth/password")
+    async def complete_password_recovery(
+        body: PasswordRecoveryBody, request: Request
+    ) -> dict[str, object]:
+        require_origin(request)
+        try:
+            identity = await auth.update_password(body.access_token, body.new_password)
+        except AuthenticationRejected:
+            raise HTTPException(status_code=401, detail="password_recovery_rejected") from None
+        except AuthenticationUnavailable:
+            raise HTTPException(status_code=503, detail="authentication_unavailable") from None
+        async with database.transaction() as session:
+            row = await session.scalar(
+                select(PlatformUser).where(PlatformUser.auth_user_id == identity.auth_user_id)
+            )
+            if row is None or row.status == "disabled":
+                raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
+            sessions = (
+                await session.execute(
+                    select(PlatformSession).where(
+                        PlatformSession.user_id == row.id,
+                        PlatformSession.revoked_at.is_(None),
+                    )
+                )
+            ).scalars()
+            now = datetime.now(UTC)
+            for platform_session in sessions:
+                platform_session.revoked_at = now
+            await append_audit(
+                session,
+                actor=Principal(
+                    row.id,
+                    row.auth_user_id,
+                    row.email,
+                    row.full_name,
+                    row.role,
+                    row.last_login_at,
+                ),
+                action="USER_PASSWORD_RECOVERED",
+                target_type="user",
+                target_id=str(row.id),
+                outcome="SUCCEEDED",
+                request_id=str(uuid4()),
+            )
+        return {"updated": True}
 
     @app.post("/api/v1/auth/login")
     async def platform_login(body: LoginBody, request: Request) -> JSONResponse:
@@ -391,6 +474,8 @@ def install_platform_routes(
         except AuthenticationUnavailable:
             raise HTTPException(status_code=503, detail="authentication_unavailable") from None
         now = datetime.now(UTC)
+        platform_token = secrets.token_urlsafe(32)
+        platform_token_sha256 = hashlib.sha256(platform_token.encode("utf-8")).hexdigest()
         async with database.transaction() as session:
             row = (
                 await session.execute(
@@ -409,6 +494,36 @@ def install_platform_routes(
             row.last_login_at = now
             row.updated_at = now
             actor = Principal(row.id, row.auth_user_id, row.email, row.full_name, row.role, now)
+            active_sessions = list(
+                (
+                    await session.execute(
+                        select(PlatformSession)
+                        .where(
+                            PlatformSession.user_id == row.id,
+                            PlatformSession.revoked_at.is_(None),
+                            PlatformSession.expires_at > now,
+                        )
+                        .order_by(PlatformSession.created_at)
+                    )
+                ).scalars()
+            )
+            overflow = max(0, len(active_sessions) - settings.max_sessions + 1)
+            for old_session in active_sessions[:overflow]:
+                old_session.revoked_at = now
+            session.add(
+                PlatformSession(
+                    id=uuid4(),
+                    user_id=row.id,
+                    token_sha256=platform_token_sha256,
+                    created_at=now,
+                    expires_at=now + timedelta(seconds=settings.session_absolute_seconds),
+                    last_seen_at=now,
+                    revoked_at=None,
+                    user_agent_sha256=hashlib.sha256(
+                        request.headers.get("user-agent", "").encode("utf-8")
+                    ).hexdigest(),
+                )
+            )
             await append_audit(
                 session,
                 actor=actor,
@@ -432,7 +547,12 @@ def install_platform_routes(
             }
         )
         set_auth_cookies(
-            response, tokens.access_token, tokens.refresh_token, csrf, tokens.expires_in
+            response,
+            tokens.access_token,
+            tokens.refresh_token,
+            csrf,
+            platform_token,
+            tokens.expires_in,
         )
         return response
 
@@ -463,9 +583,20 @@ def install_platform_routes(
     async def platform_logout(request: Request) -> JSONResponse:
         actor = await principal(request, mutation=True)
         access = request.cookies.get(_ACCESS_COOKIE)
+        platform_token = request.cookies.get(_SESSION_COOKIE)
         if access is not None:
             await auth.logout(access)
         async with database.transaction() as session:
+            if platform_token is not None:
+                token_sha256 = hashlib.sha256(platform_token.encode("utf-8")).hexdigest()
+                platform_session = await session.scalar(
+                    select(PlatformSession).where(
+                        PlatformSession.user_id == actor.profile_id,
+                        PlatformSession.token_sha256 == token_sha256,
+                    )
+                )
+                if platform_session is not None and platform_session.revoked_at is None:
+                    platform_session.revoked_at = datetime.now(UTC)
             await append_audit(
                 session,
                 actor=actor,
@@ -541,6 +672,18 @@ def install_platform_routes(
             if row is None:
                 raise HTTPException(status_code=404, detail="user_not_found")
             row.role, row.status, row.updated_at = body.role, body.status, datetime.now(UTC)
+            if body.status == "disabled":
+                now = datetime.now(UTC)
+                sessions = (
+                    await session.execute(
+                        select(PlatformSession).where(
+                            PlatformSession.user_id == row.id,
+                            PlatformSession.revoked_at.is_(None),
+                        )
+                    )
+                ).scalars()
+                for platform_session in sessions:
+                    platform_session.revoked_at = now
             await append_audit(
                 session,
                 actor=actor,
@@ -552,6 +695,66 @@ def install_platform_routes(
                 details={"role": body.role, "status": body.status},
             )
             return _user_view(row)
+
+    @app.post("/api/v1/admin/users/{user_id}/revoke-sessions")
+    async def revoke_user_sessions(user_id: UUID, request: Request) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        request_id = _request_id(request)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            row = await session.get(PlatformUser, user_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="user_not_found")
+            sessions = list(
+                (
+                    await session.execute(
+                        select(PlatformSession).where(
+                            PlatformSession.user_id == user_id,
+                            PlatformSession.revoked_at.is_(None),
+                        )
+                    )
+                ).scalars()
+            )
+            for platform_session in sessions:
+                platform_session.revoked_at = now
+            await append_audit(
+                session,
+                actor=actor,
+                action="USER_SESSIONS_REVOKED",
+                target_type="user",
+                target_id=str(user_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={"sessionCount": len(sessions)},
+            )
+        return {"revoked": len(sessions)}
+
+    @app.post("/api/v1/admin/users/{user_id}/password-reset")
+    async def send_user_password_reset(user_id: UUID, request: Request) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        request_id = _request_id(request)
+        async with database.transaction() as session:
+            row = await session.get(PlatformUser, user_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="user_not_found")
+            email = row.email
+        try:
+            await auth.send_password_reset(email, redirect_to=settings.allowed_origin)
+        except AuthenticationRejected:
+            raise HTTPException(status_code=409, detail="password_reset_rejected") from None
+        except AuthenticationUnavailable:
+            raise HTTPException(status_code=503, detail="authentication_unavailable") from None
+        async with database.transaction() as session:
+            await append_audit(
+                session,
+                actor=actor,
+                action="USER_PASSWORD_RESET_SENT",
+                target_type="user",
+                target_id=str(user_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+            )
+        return {"sent": True}
 
     @app.get("/api/v1/accounts")
     async def list_accounts(request: Request) -> dict[str, object]:

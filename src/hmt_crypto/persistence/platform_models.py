@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -42,6 +43,32 @@ class PlatformUser(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class PlatformSession(Base):
+    __tablename__ = "platform_sessions"
+    __table_args__ = (
+        CheckConstraint("expires_at > created_at", name="expiry_order"),
+        CheckConstraint("last_seen_at >= created_at", name="last_seen_order"),
+        UniqueConstraint("token_sha256", name="uq_platform_sessions_token_sha256"),
+        Index(
+            "ix_platform_sessions_user_active",
+            "user_id",
+            "expires_at",
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    token_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    user_agent_sha256: Mapped[str | None] = mapped_column(NulFreeString(64))
 
 
 class AccountAssignment(Base):

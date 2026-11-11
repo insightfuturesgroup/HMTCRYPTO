@@ -132,15 +132,26 @@ class SupabaseAuthGateway:
             raise AuthenticationRejected()
         return _identity(response.json())
 
-    async def revoke_user_sessions(self, auth_user_id: UUID) -> None:
+    async def send_password_reset(self, email: str, *, redirect_to: str) -> None:
         response = await self._request(
-            "DELETE", f"/admin/users/{auth_user_id}/factors", privileged=True
+            "POST",
+            "/recover",
+            params={"redirect_to": redirect_to},
+            json={"email": email},
         )
-        # Factor deletion is deliberately not used as session revocation. Supabase's
-        # admin logout endpoint is not universally available, so disabled users are
-        # denied by the local profile on every request; access tokens remain harmless.
-        if response.status_code not in {200, 404, 405}:
-            return
+        if response.status_code not in {200, 204}:
+            raise AuthenticationRejected()
+
+    async def update_password(self, access_token: str, password: str) -> AuthenticatedIdentity:
+        response = await self._request(
+            "PUT",
+            "/user",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={"password": password},
+        )
+        if response.status_code != 200:
+            raise AuthenticationRejected()
+        return _identity(response.json())
 
     async def aclose(self) -> None:
         await self._client.aclose()

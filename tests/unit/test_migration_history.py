@@ -88,6 +88,7 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions(base="base", head="heads"))
     assert [(revision.revision, revision.down_revision) for revision in revisions] == [
+        ("phase17_platform_sessions_v1", "phase16_live_order_actions_v1"),
         ("phase16_live_order_actions_v1", "phase15_tradingview_v1"),
         ("phase15_tradingview_v1", "phase14_gtt_trigger_state_v1"),
         ("phase14_gtt_trigger_state_v1", "phase13e_uncertain_recovery_v1"),
@@ -109,7 +110,7 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
         ("phase2_hardening_v1", "phase2_baseline_v1"),
         ("phase2_baseline_v1", None),
     ]
-    assert script.get_current_head() == "phase16_live_order_actions_v1"
+    assert script.get_current_head() == "phase17_platform_sessions_v1"
 
 
 def test_runtime_grants_are_data_only_and_reversible() -> None:
@@ -530,13 +531,14 @@ def test_offline_upgrade_renders_without_importing_models_or_leaking_dsn(
     assert "CREATE TABLE public.hmt_crypto_alembic_version" in rendered
     assert "CREATE TABLE hmt_crypto_alembic_version" not in rendered
     assert "CREATE SCHEMA hmt_crypto" in rendered
-    assert rendered.count("CREATE TABLE hmt_crypto.") == 65
+    assert rendered.count("CREATE TABLE hmt_crypto.") == 66
     assert "CREATE TABLE hmt_crypto.kill_workflows" in rendered
     assert "CREATE TABLE hmt_crypto.kill_workflow_events" in rendered
     assert "CREATE TABLE hmt_crypto.paper_execution_heads" in rendered
     assert "CREATE TABLE hmt_crypto.paper_execution_events" in rendered
     assert "CREATE TABLE hmt_crypto.account_reconciliation_checkpoints" in rendered
     assert "CREATE TABLE hmt_crypto.live_order_actions" in rendered
+    assert "CREATE TABLE hmt_crypto.platform_sessions" in rendered
     assert "CREATE TABLE hmt_crypto.tradingview_signals" in rendered
     assert "CONSTRAINT ck_kill_workflows_identity_matches_command" in rendered
     assert "ON hmt_crypto.kill_workflow_events" in rendered
