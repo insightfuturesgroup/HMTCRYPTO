@@ -136,6 +136,34 @@ interface GttRow {
   updatedAt: string;
 }
 
+interface TradingViewStrategyRow {
+  id: string;
+  accountId: string;
+  name: string;
+  productId: number;
+  symbol: string;
+  contracts: number;
+  orderType: "market" | "limit";
+  reduceOnly: boolean;
+  enabled: boolean;
+  webhookConfigured: boolean;
+  webhookFingerprint: string | null;
+  updatedAt: string;
+}
+
+interface TradingViewSignalRow {
+  id: string;
+  strategyName: string;
+  externalSignalId: string;
+  side: "buy" | "sell";
+  limitPrice: string | null;
+  status: string;
+  rejectionCode: string | null;
+  intentId: string | null;
+  receivedAt: string;
+  processedAt: string | null;
+}
+
 async function request<T>(path: string, init?: RequestInit, csrf?: string): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
@@ -336,6 +364,81 @@ function GttPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: st
   return <Panel title="Application-managed GTT protected exits"><form className="grid gap-3 p-4 md:grid-cols-3" onSubmit={(event) => void create(event)}><select className="rounded border px-3 py-2" onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} value={accountId}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><select className="rounded border px-3 py-2" onChange={(event) => setProductId(event.target.value)} value={productId}>{products.map((product) => <option key={product.productId} value={product.productId}>{product.symbol}</option>)}</select><select className="rounded border px-3 py-2" onChange={(event) => setSide(event.target.value as "buy" | "sell")} value={side}><option value="sell">Sell to close long</option><option value="buy">Buy to close short</option></select><input className="rounded border px-3 py-2" min="1" onChange={(event) => setContracts(event.target.value)} type="number" value={contracts}/><select className="rounded border px-3 py-2" onChange={(event) => setKind(event.target.value as GttRow["triggerKind"])} value={kind}><option value="stop_loss">Stop loss</option><option value="target">Target</option><option value="trailing_stop">Trailing stop</option></select>{kind === "trailing_stop" ? <input className="rounded border px-3 py-2" onChange={(event) => setTrail(event.target.value)} placeholder="Trail offset" required value={trail}/> : <input className="rounded border px-3 py-2" onChange={(event) => setTrigger(event.target.value)} placeholder="Trigger price" required value={trigger}/>}<input className="rounded border px-3 py-2" onChange={(event) => setLimit(event.target.value)} placeholder="Optional limit price" value={limit}/><button className="rounded bg-blue-600 px-4 py-2 text-white disabled:bg-slate-400" disabled={!canTrade} type="submit">Arm protected exit</button>{notice ? <p className="self-center" role="status">{notice}</p> : null}</form><div className="overflow-x-auto"><table><thead><tr><th>Symbol</th><th>Exit</th><th>Trigger</th><th>Status</th><th>Updated</th><th>Action</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.symbol}</td><td>{row.side} {row.contracts}</td><td>{row.triggerKind} · {row.triggerPrice ?? row.trailOffset}</td><td>{row.status}</td><td>{row.updatedAt}</td><td>{["armed", "triggered"].includes(row.status) ? <button className="text-red-700" onClick={() => void cancel(row.id)} type="button">Cancel</button> : "—"}</td></tr>)}{rows.length === 0 ? <tr><td colSpan={6}>No protected exits.</td></tr> : null}</tbody></table></div></Panel>;
 }
 
+function TradingViewPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [accountId, setAccountId] = useState("");
+  const [name, setName] = useState("");
+  const [productId, setProductId] = useState("");
+  const [contracts, setContracts] = useState("1");
+  const [orderType, setOrderType] = useState<"market" | "limit">("market");
+  const [reduceOnly, setReduceOnly] = useState(false);
+  const [strategies, setStrategies] = useState<TradingViewStrategyRow[]>([]);
+  const [signals, setSignals] = useState<TradingViewSignalRow[]>([]);
+  const [shownOnceUrl, setShownOnceUrl] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const load = useCallback((selected: string) => {
+    if (!selected) {
+      setStrategies([]);
+      setSignals([]);
+      return;
+    }
+    void Promise.all([
+      request<{ strategies: TradingViewStrategyRow[] }>(`/api/v1/strategies?account_id=${encodeURIComponent(selected)}`),
+      request<{ signals: TradingViewSignalRow[] }>(`/api/v1/strategies/signals?account_id=${encodeURIComponent(selected)}`),
+    ]).then(([strategyRows, signalRows]) => {
+      setStrategies(strategyRows.strategies);
+      setSignals(signalRows.signals);
+    }).catch(() => setNotice("TradingView configuration or logs could not be loaded."));
+  }, []);
+  useEffect(() => {
+    void Promise.all([
+      request<{ accounts: Account[] }>("/api/v1/accounts"),
+      request<{ products: Product[] }>("/api/v1/market/products"),
+    ]).then(([accountRows, productRows]) => {
+      const firstAccount = accountRows.accounts[0]?.id ?? "";
+      const firstProduct = productRows.products[0];
+      setAccounts(accountRows.accounts);
+      setProducts(productRows.products);
+      setAccountId(firstAccount);
+      setProductId(String(firstProduct?.productId ?? ""));
+      load(firstAccount);
+    });
+  }, [load]);
+  async function create(event: FormEvent) {
+    event.preventDefault();
+    const product = products.find((row) => row.productId === Number(productId));
+    if (!product) return;
+    setNotice(null);
+    try {
+      await request("/api/v1/strategies", {
+        method: "POST",
+        body: JSON.stringify({ account_id: accountId, name, product_id: product.productId, symbol: product.symbol, contracts: Number(contracts), order_type: orderType, reduce_only: reduceOnly, enabled: true }),
+      }, csrf);
+      setName("");
+      setNotice("Strategy created. Generate its webhook URL and copy it immediately.");
+      load(accountId);
+    } catch {
+      setNotice("Strategy creation was rejected. Confirm permissions, product freshness, and account assignment.");
+    }
+  }
+  async function rotateKey(strategyId: string) {
+    setShownOnceUrl(null);
+    setNotice(null);
+    try {
+      const value = await request<{ webhookPath: string; shownOnce: boolean }>(`/api/v1/strategies/${strategyId}/webhook-key`, { method: "POST" }, csrf);
+      setShownOnceUrl(`${window.location.origin}${value.webhookPath}`);
+      setNotice("Webhook URL generated. It is shown once; store it securely in TradingView now.");
+      load(accountId);
+    } catch {
+      setNotice("Webhook rotation requires trading permission and a login within the last 15 minutes.");
+    }
+  }
+  const selected = accounts.find((row) => row.id === accountId);
+  const canManage = user.role !== "viewer" && selected?.permission !== "view";
+  return <><Panel title="TradingView Live automation"><div className="border-b p-4 text-sm"><strong>Webhook JSON</strong><pre className="mt-2 overflow-x-auto rounded bg-slate-950 p-3 text-slate-100">{`{"signal_id":"unique-id","side":"buy","timestamp":{{timenow}},"limit_price":null}`}</pre><p className="mt-2 text-slate-600">Signals expire after 60 seconds and are deduplicated. Market strategies require null limit_price; limit strategies require a positive price.</p></div><form className="grid gap-3 p-4 md:grid-cols-2" onSubmit={(event) => void create(event)}><select className="rounded border px-3 py-2" onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} required value={accountId}><option value="">Select account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><input className="rounded border px-3 py-2" maxLength={128} onChange={(event) => setName(event.target.value)} placeholder="Strategy name" required value={name}/><select className="rounded border px-3 py-2" onChange={(event) => setProductId(event.target.value)} required value={productId}>{products.map((product) => <option key={product.productId} value={product.productId}>{product.symbol}</option>)}</select><input className="rounded border px-3 py-2" min="1" onChange={(event) => setContracts(event.target.value)} required type="number" value={contracts}/><select className="rounded border px-3 py-2" onChange={(event) => setOrderType(event.target.value as "market" | "limit")} value={orderType}><option value="market">Market</option><option value="limit">Limit</option></select><label className="flex items-center gap-2"><input checked={reduceOnly} onChange={(event) => setReduceOnly(event.target.checked)} type="checkbox"/>Reduce-only exit strategy</label><button className="rounded bg-blue-600 px-4 py-2 text-white disabled:bg-slate-400 md:col-span-2" disabled={!canManage || !accountId || !productId} type="submit">Create enabled strategy</button></form>{notice ? <p className="px-4 pb-4 text-sm" role="status">{notice}</p> : null}{shownOnceUrl ? <div className="m-4 rounded border border-amber-400 bg-amber-50 p-4"><strong>Shown once — TradingView webhook URL</strong><code className="mt-2 block break-all">{shownOnceUrl}</code><button className="mt-3 rounded border bg-white px-3 py-2" onClick={() => void navigator.clipboard.writeText(shownOnceUrl)} type="button">Copy URL</button></div> : null}<div className="overflow-x-auto"><table><thead><tr><th>Strategy</th><th>Contract</th><th>Order</th><th>Mode</th><th>Webhook</th><th>Action</th></tr></thead><tbody>{strategies.map((strategy) => <tr key={strategy.id}><td><strong>{strategy.name}</strong><br/><small>{strategy.enabled ? "Enabled" : "Disabled"}</small></td><td>{strategy.symbol} · {strategy.contracts}</td><td>{strategy.orderType}</td><td>{strategy.reduceOnly ? "Reduce only" : "Entry allowed"}</td><td>{strategy.webhookConfigured ? `Configured · ${strategy.webhookFingerprint ?? ""}` : "Not configured"}</td><td><button className="text-blue-700 disabled:text-slate-400" disabled={!canManage} onClick={() => void rotateKey(strategy.id)} type="button">{strategy.webhookConfigured ? "Rotate URL" : "Generate URL"}</button></td></tr>)}{strategies.length === 0 ? <tr><td colSpan={6}>No TradingView strategies for this account.</td></tr> : null}</tbody></table></div></Panel><Panel title="TradingView signal log"><div className="overflow-x-auto"><table><thead><tr><th>Received</th><th>Strategy</th><th>Signal</th><th>Side / Price</th><th>Status</th><th>Reason / Intent</th></tr></thead><tbody>{signals.map((signal) => <tr key={signal.id}><td>{signal.receivedAt}</td><td>{signal.strategyName}</td><td>{signal.externalSignalId}</td><td>{signal.side} · {signal.limitPrice ?? "market"}</td><td>{signal.status}</td><td>{signal.rejectionCode ?? signal.intentId ?? "Awaiting worker"}</td></tr>)}{signals.length === 0 ? <tr><td colSpan={6}>No signals received.</td></tr> : null}</tbody></table></div></Panel></>;
+}
+
 function RiskPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState("");
@@ -381,7 +484,7 @@ function Shell({ session, onLogout }: { readonly session: Session; readonly onLo
   const user = session.user!;
   const csrf = session.csrfToken!;
   const visible = navigation.filter((item) => !item.admin || user.role === "admin");
-  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "trading" ? <TradingPage csrf={csrf} user={user}/> : null}{page === "orders" ? <AccountStatePage mode="orders"/> : null}{page === "positions" ? <AccountStatePage mode="positions"/> : null}{page === "gtt" ? <GttPage csrf={csrf} user={user}/> : null}{page === "risk" ? <RiskPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage csrf={csrf}/> : null}{["strategies","performance","notifications","settings"].includes(page) ? <Deferred name={navigation.find((item) => item.page === page)?.label ?? page}/> : null}</div></main></div></div>;
+  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "trading" ? <TradingPage csrf={csrf} user={user}/> : null}{page === "orders" ? <AccountStatePage mode="orders"/> : null}{page === "positions" ? <AccountStatePage mode="positions"/> : null}{page === "gtt" ? <GttPage csrf={csrf} user={user}/> : null}{page === "strategies" ? <TradingViewPage csrf={csrf} user={user}/> : null}{page === "risk" ? <RiskPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage csrf={csrf}/> : null}{["performance","notifications","settings"].includes(page) ? <Deferred name={navigation.find((item) => item.page === page)?.label ?? page}/> : null}</div></main></div></div>;
 }
 
 export default function PlatformApp() {

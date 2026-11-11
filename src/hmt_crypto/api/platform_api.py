@@ -2010,13 +2010,32 @@ def install_platform_routes(
         actor = await principal(request)
         async with database.transaction() as session:
             await account_permission(session, actor, account_id)
-            rows = (
-                await session.execute(
-                    select(TradingViewStrategy)
-                    .where(TradingViewStrategy.account_id == account_id)
-                    .order_by(desc(TradingViewStrategy.created_at))
-                )
-            ).scalars()
+            rows = list(
+                (
+                    await session.execute(
+                        select(TradingViewStrategy)
+                        .where(TradingViewStrategy.account_id == account_id)
+                        .order_by(desc(TradingViewStrategy.created_at))
+                        .limit(500)
+                    )
+                ).scalars()
+            )
+            active_keys = {
+                row.strategy_id: row.key_fingerprint
+                for row in (
+                    await session.execute(
+                        select(TradingViewWebhookKey)
+                        .join(
+                            TradingViewStrategy,
+                            TradingViewStrategy.id == TradingViewWebhookKey.strategy_id,
+                        )
+                        .where(
+                            TradingViewStrategy.account_id == account_id,
+                            TradingViewWebhookKey.revoked_at.is_(None),
+                        )
+                    )
+                ).scalars()
+            }
             return {
                 "strategies": [
                     {
@@ -2030,9 +2049,49 @@ def install_platform_routes(
                         "reduceOnly": row.reduce_only,
                         "enabled": row.enabled,
                         "version": row.version,
+                        "webhookConfigured": row.id in active_keys,
+                        "webhookFingerprint": active_keys.get(row.id),
                         "updatedAt": _utc(row.updated_at),
                     }
                     for row in rows
+                ]
+            }
+
+    @app.get("/api/v1/strategies/signals")
+    async def list_strategy_signals(request: Request, account_id: UUID) -> dict[str, object]:
+        actor = await principal(request)
+        async with database.transaction() as session:
+            await account_permission(session, actor, account_id)
+            rows = (
+                await session.execute(
+                    select(TradingViewSignal, TradingViewStrategy.name)
+                    .join(
+                        TradingViewStrategy,
+                        TradingViewStrategy.id == TradingViewSignal.strategy_id,
+                    )
+                    .where(TradingViewSignal.account_id == account_id)
+                    .order_by(desc(TradingViewSignal.received_at))
+                    .limit(500)
+                )
+            ).all()
+            return {
+                "signals": [
+                    {
+                        "id": str(signal.id),
+                        "strategyId": str(signal.strategy_id),
+                        "strategyName": strategy_name,
+                        "externalSignalId": signal.external_signal_id,
+                        "side": signal.side,
+                        "limitPrice": signal.limit_price,
+                        "status": signal.status,
+                        "rejectionCode": signal.rejection_code,
+                        "intentId": None if signal.intent_id is None else str(signal.intent_id),
+                        "receivedAt": _utc(signal.received_at),
+                        "processedAt": (
+                            None if signal.processed_at is None else _utc(signal.processed_at)
+                        ),
+                    }
+                    for signal, strategy_name in rows
                 ]
             }
 
