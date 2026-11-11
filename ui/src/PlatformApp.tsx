@@ -5,14 +5,21 @@ import {
   Bell,
   BookOpen,
   BriefcaseBusiness,
+  Copy,
+  Info,
   KeyRound,
   LayoutDashboard,
   ListChecks,
   LogOut,
+  Pause,
+  Play,
+  Plus,
   Radio,
+  RefreshCw,
   Settings,
   ShieldCheck,
   Target,
+  Trash2,
   Users,
 } from "lucide-react";
 import { invalidateApplicationQueries, queryClient, queryStaleTime } from "./queryClient";
@@ -384,7 +391,7 @@ function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csr
     setCreating(true);
     setNotice(null);
     try {
-      await request("/api/v1/accounts", { method: "POST", body: JSON.stringify({ profile_name: profileName, environment: "prod", owner_user_id: user.id }) }, csrf);
+      await request("/api/v1/accounts", { method: "POST", body: JSON.stringify({ profile_name: profileName, environment: "prod" }) }, csrf);
       setProfileName("");
       setNotice("Live account profile created. Configure its Delta credentials next.");
       load();
@@ -530,6 +537,8 @@ function TradingViewPage({ user, csrf }: { readonly user: SessionUser; readonly 
   const [signals, setSignals] = useState<TradingViewSignalRow[]>([]);
   const [shownOnceUrl, setShownOnceUrl] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [busy, setBusy] = useState(false);
   const load = useCallback((selected: string) => {
     if (!selected) {
       setStrategies([]);
@@ -562,17 +571,24 @@ function TradingViewPage({ user, csrf }: { readonly user: SessionUser; readonly 
     event.preventDefault();
     const product = products.find((row) => row.productId === Number(productId));
     if (!product) return;
+    setBusy(true);
     setNotice(null);
     try {
-      await request("/api/v1/strategies", {
+      const strategy = await request<{ id: string }>("/api/v1/strategies", {
         method: "POST",
         body: JSON.stringify({ account_id: accountId, name, product_id: product.productId, symbol: product.symbol, contracts: Number(contracts), order_type: orderType, reduce_only: reduceOnly, enabled: true }),
       }, csrf);
+      const key = await request<{ webhookPath: string }>(`/api/v1/strategies/${strategy.id}/webhook-key`, { method: "POST" }, csrf);
+      setShownOnceUrl(`${window.location.origin}${key.webhookPath}`);
       setName("");
-      setNotice("Strategy created. Generate its webhook URL and copy it immediately.");
+      setShowCreate(false);
+      setNotice("Webhook configuration created. Copy the one-time URL into TradingView now.");
       load(accountId);
-    } catch {
-      setNotice("Strategy creation was rejected. Confirm permissions, product freshness, and account assignment.");
+    } catch (error) {
+      setNotice(error instanceof RequestError && error.code === "fresh_session_required" ? "The configuration was created, but generating its secret requires a fresh login. Sign out, sign in, then select Generate URL." : "Webhook creation was rejected. Confirm the Delta account, product feed, permissions, and a recent login.");
+      load(accountId);
+    } finally {
+      setBusy(false);
     }
   }
   async function rotateKey(strategyId: string) {
@@ -587,9 +603,26 @@ function TradingViewPage({ user, csrf }: { readonly user: SessionUser; readonly 
       setNotice("Webhook rotation requires trading permission and a login within the last 15 minutes.");
     }
   }
+  async function toggleStrategy(strategy: TradingViewStrategyRow) {
+    setNotice(null);
+    try {
+      await request(`/api/v1/strategies/${strategy.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !strategy.enabled }) }, csrf);
+      setNotice(`Webhook configuration ${strategy.enabled ? "paused" : "enabled"}.`);
+      load(accountId);
+    } catch { setNotice("The webhook configuration could not be updated."); }
+  }
+  async function revokeKey(strategy: TradingViewStrategyRow) {
+    if (!window.confirm(`Revoke the webhook secret for ${strategy.name}? TradingView alerts using it will stop.`)) return;
+    setNotice(null);
+    try {
+      await request(`/api/v1/strategies/${strategy.id}/webhook-key`, { method: "DELETE" }, csrf);
+      setNotice("Webhook secret revoked. No signal can use the old URL.");
+      load(accountId);
+    } catch { setNotice("The webhook secret could not be revoked."); }
+  }
   const selected = accounts.find((row) => row.id === accountId);
   const canManage = user.role !== "viewer" && selected?.permission !== "view";
-  return <><Panel title="TradingView Live automation"><div className="border-b p-4 text-sm"><strong>Webhook JSON</strong><pre className="mt-2 overflow-x-auto rounded bg-slate-950 p-3 text-slate-100">{`{"signal_id":"unique-id","side":"buy","timestamp":{{timenow}},"limit_price":null}`}</pre><p className="mt-2 text-slate-600">Signals expire after 60 seconds and are deduplicated. Market strategies require null limit_price; limit strategies require a positive price.</p></div><form className="grid gap-3 p-4 md:grid-cols-2" onSubmit={(event) => void create(event)}><select className="rounded border px-3 py-2" onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} required value={accountId}><option value="">Select account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><input className="rounded border px-3 py-2" maxLength={128} onChange={(event) => setName(event.target.value)} placeholder="Strategy name" required value={name}/><select className="rounded border px-3 py-2" onChange={(event) => setProductId(event.target.value)} required value={productId}>{products.map((product) => <option key={product.productId} value={product.productId}>{product.symbol}</option>)}</select><input className="rounded border px-3 py-2" min="1" onChange={(event) => setContracts(event.target.value)} required type="number" value={contracts}/><select className="rounded border px-3 py-2" onChange={(event) => setOrderType(event.target.value as "market" | "limit")} value={orderType}><option value="market">Market</option><option value="limit">Limit</option></select><label className="flex items-center gap-2"><input checked={reduceOnly} onChange={(event) => setReduceOnly(event.target.checked)} type="checkbox"/>Reduce-only exit strategy</label><button className="rounded bg-blue-600 px-4 py-2 text-white disabled:bg-slate-400 md:col-span-2" disabled={!canManage || !accountId || !productId} type="submit">Create enabled strategy</button></form>{notice ? <p className="px-4 pb-4 text-sm" role="status">{notice}</p> : null}{shownOnceUrl ? <div className="m-4 rounded border border-amber-400 bg-amber-50 p-4"><strong>Shown once — TradingView webhook URL</strong><code className="mt-2 block break-all">{shownOnceUrl}</code><button className="mt-3 rounded border bg-white px-3 py-2" onClick={() => void navigator.clipboard.writeText(shownOnceUrl)} type="button">Copy URL</button></div> : null}<div className="overflow-x-auto"><table><thead><tr><th>Strategy</th><th>Contract</th><th>Order</th><th>Mode</th><th>Webhook</th><th>Action</th></tr></thead><tbody>{strategies.map((strategy) => <tr key={strategy.id}><td><strong>{strategy.name}</strong><br/><small>{strategy.enabled ? "Enabled" : "Disabled"}</small></td><td>{strategy.symbol} · {strategy.contracts}</td><td>{strategy.orderType}</td><td>{strategy.reduceOnly ? "Reduce only" : "Entry allowed"}</td><td>{strategy.webhookConfigured ? `Configured · ${strategy.webhookFingerprint ?? ""}` : "Not configured"}</td><td><button className="text-blue-700 disabled:text-slate-400" disabled={!canManage} onClick={() => void rotateKey(strategy.id)} type="button">{strategy.webhookConfigured ? "Rotate URL" : "Generate URL"}</button></td></tr>)}{strategies.length === 0 ? <tr><td colSpan={6}>No TradingView strategies for this account.</td></tr> : null}</tbody></table></div></Panel><Panel title="TradingView signal log"><div className="overflow-x-auto"><table><thead><tr><th>Received</th><th>Strategy</th><th>Signal</th><th>Side / Price</th><th>Status</th><th>Reason / Intent</th></tr></thead><tbody>{signals.map((signal) => <tr key={signal.id}><td>{signal.receivedAt}</td><td>{signal.strategyName}</td><td>{signal.externalSignalId}</td><td>{signal.side} · {signal.limitPrice ?? "market"}</td><td>{signal.status}</td><td>{signal.rejectionCode ?? signal.intentId ?? "Awaiting worker"}</td></tr>)}{signals.length === 0 ? <tr><td colSpan={6}>No signals received.</td></tr> : null}</tbody></table></div></Panel></>;
+  return <div className="tv-page"><div className="tv-page__title"><div><h1>TradingView Integration</h1><p>Manage secure webhook configurations for Delta Exchange India</p></div><button className="tv-primary-button" disabled={!canManage || accounts.length === 0} onClick={() => setShowCreate((value) => !value)} type="button"><Plus size={18}/>{showCreate ? "Close" : "Create Webhook"}</button></div><section className="tv-guide"><div className="tv-guide__title"><Info size={20}/><strong>How it works</strong></div><div className="tv-guide__body"><p>TradingView owns the signal logic. HMT Crypto validates each alert, applies account and risk controls, and queues eligible Live execution.</p><ol><li>Add and verify a Delta India account.</li><li>Create a webhook configuration for an account, symbol, size, and order type.</li><li>Copy the one-time URL and JSON message into the TradingView alert.</li></ol><div className="tv-endpoint"><strong>Webhook endpoint format</strong><code>{window.location.origin}/api/v1/webhooks/tradingview/&lt;secret&gt;</code><button aria-label="Copy webhook endpoint format" onClick={() => void navigator.clipboard.writeText(`${window.location.origin}/api/v1/webhooks/tradingview/<secret>`)} type="button"><Copy size={17}/></button></div><p className="tv-guide__note"><strong>Security:</strong> the full secret URL is displayed only when generated or rotated. HMT Crypto stores only its hash.</p></div></section>{accounts.length === 0 ? <section className="tv-empty"><KeyRound size={22}/><div><strong>Add a Delta account first</strong><p>A webhook must be bound to an assigned production account. Open Delta Accounts, create the profile, and configure its API credentials.</p></div></section> : null}{showCreate ? <section className="tv-create"><h2>Create webhook configuration</h2><form className="grid gap-3 md:grid-cols-2" onSubmit={(event) => void create(event)}><label>Delta account<select onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} required value={accountId}><option value="">Select account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select></label><label>Configuration name<input maxLength={128} onChange={(event) => setName(event.target.value)} placeholder="BTC TradingView" required value={name}/></label><label>Contract<select onChange={(event) => setProductId(event.target.value)} required value={productId}>{products.map((product) => <option key={product.productId} value={product.productId}>{product.symbol}</option>)}</select></label><label>Contracts<input min="1" onChange={(event) => setContracts(event.target.value)} required type="number" value={contracts}/></label><label>Order type<select onChange={(event) => setOrderType(event.target.value as "market" | "limit")} value={orderType}><option value="market">Market</option><option value="limit">Limit</option></select></label><label className="tv-checkbox"><input checked={reduceOnly} onChange={(event) => setReduceOnly(event.target.checked)} type="checkbox"/>Reduce-only exit configuration</label><button className="tv-primary-button md:col-span-2" disabled={busy || !canManage || !accountId || !productId} type="submit">{busy ? "Creating…" : "Create and generate URL"}</button></form></section> : null}{notice ? <p className="tv-notice" role="status">{notice}</p> : null}{shownOnceUrl ? <section className="tv-secret"><div><strong>Copy this URL now — it will not be shown again</strong><code>{shownOnceUrl}</code></div><button onClick={() => void navigator.clipboard.writeText(shownOnceUrl)} type="button"><Copy size={17}/>Copy URL</button></section> : null}<div className="tv-account-filter"><label>Delta account<select onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} value={accountId}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select></label></div><div className="tv-cards">{strategies.map((strategy) => <article className="tv-card" key={strategy.id}><div className="tv-card__header"><div><span className="tv-card__key"><KeyRound size={18}/></span><strong>{strategy.name}</strong><span className={`tv-status ${strategy.enabled ? "is-active" : ""}`}>{strategy.enabled ? "Active" : "Paused"}</span><p>{strategy.symbol} · {strategy.contracts} contract{strategy.contracts === 1 ? "" : "s"} · {strategy.orderType} · {strategy.reduceOnly ? "Reduce only" : "Entry permitted"}</p></div><div className="tv-card__actions"><button disabled={!canManage} onClick={() => void rotateKey(strategy.id)} title={strategy.webhookConfigured ? "Regenerate webhook URL" : "Generate webhook URL"} type="button"><RefreshCw size={17}/></button><button disabled={!canManage} onClick={() => void toggleStrategy(strategy)} title={strategy.enabled ? "Pause" : "Enable"} type="button">{strategy.enabled ? <Pause size={17}/> : <Play size={17}/>}</button><button className="is-danger" disabled={!canManage || !strategy.webhookConfigured} onClick={() => void revokeKey(strategy)} title="Revoke webhook secret" type="button"><Trash2 size={17}/></button></div></div><div className="tv-card__secret"><span>Webhook secret</span><strong>{strategy.webhookConfigured ? `Configured · fingerprint ${strategy.webhookFingerprint ?? "unavailable"}` : "Not generated"}</strong><small>The secret itself is never returned after creation.</small></div></article>)}{strategies.length === 0 && accounts.length > 0 ? <section className="tv-empty"><KeyRound size={22}/><div><strong>No webhook configurations</strong><p>Select Create Webhook to bind a TradingView alert to this Delta account.</p></div></section> : null}</div><Panel title="TradingView signal log"><div className="overflow-x-auto"><table><thead><tr><th>Received</th><th>Strategy</th><th>Signal</th><th>Side / Price</th><th>Status</th><th>Reason / Intent</th></tr></thead><tbody>{signals.map((signal) => <tr key={signal.id}><td>{signal.receivedAt}</td><td>{signal.strategyName}</td><td>{signal.externalSignalId}</td><td>{signal.side} · {signal.limitPrice ?? "market"}</td><td>{signal.status}</td><td>{signal.rejectionCode ?? signal.intentId ?? "Awaiting worker"}</td></tr>)}{signals.length === 0 ? <tr><td colSpan={6}>No signals received.</td></tr> : null}</tbody></table></div></Panel><section className="tv-payload"><strong>TradingView alert JSON</strong><pre>{`{"signal_id":"{{strategy.order.id}}-{{timenow}}","side":"buy","timestamp":{{timenow}},"limit_price":null}`}</pre><p>Signals expire after 60 seconds and duplicate signal IDs are rejected. Use <code>null</code> for market-order limit_price.</p></section></div>;
 }
 
 function RiskPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {

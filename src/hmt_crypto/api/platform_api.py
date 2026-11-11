@@ -112,7 +112,6 @@ class UpdateUserBody(_Body):
 class CreateAccountBody(_Body):
     profile_name: str = Field(min_length=1, max_length=128)
     environment: Literal["prod"]
-    owner_user_id: UUID
 
 
 class AssignmentBody(_Body):
@@ -201,10 +200,14 @@ class TradingViewStrategyBody(_Body):
     enabled: bool = False
 
 
+class TradingViewStrategyStateBody(_Body):
+    enabled: bool
+
+
 class TradingViewSignalBody(_Body):
     signal_id: str = Field(min_length=1, max_length=128)
     side: Literal["buy", "sell"]
-    timestamp: int = Field(gt=0)
+    timestamp: int | str
     limit_price: str | None = Field(default=None, max_length=64)
 
 
@@ -826,7 +829,7 @@ def install_platform_routes(
         stage = "owner_lookup"
         try:
             async with database.transaction() as session:
-                owner = await session.get(PlatformUser, body.owner_user_id)
+                owner = await session.get(PlatformUser, actor.profile_id)
                 if owner is None or owner.status == "disabled":
                     raise HTTPException(status_code=404, detail="owner_not_found")
                 existing = await session.scalar(
@@ -3054,6 +3057,35 @@ def install_platform_routes(
             )
         return {"id": str(strategy_id), "enabled": body.enabled}
 
+    @app.patch("/api/v1/strategies/{strategy_id}")
+    async def update_strategy_state(
+        strategy_id: UUID, body: TradingViewStrategyStateBody, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            strategy = await session.get(TradingViewStrategy, strategy_id)
+            if strategy is None:
+                raise HTTPException(status_code=404, detail="strategy_not_found")
+            permission = await account_permission(session, actor, strategy.account_id)
+            if actor.role == "viewer" or permission == "view":
+                raise HTTPException(status_code=403, detail="trading_permission_required")
+            strategy.enabled = body.enabled
+            strategy.version += 1
+            strategy.updated_at = now
+            await append_audit(
+                session,
+                actor=actor,
+                action="TRADINGVIEW_STRATEGY_ENABLED"
+                if body.enabled
+                else "TRADINGVIEW_STRATEGY_DISABLED",
+                target_type="strategy",
+                target_id=str(strategy.id),
+                outcome="SUCCEEDED",
+                request_id=_request_id(request),
+            )
+        return {"id": str(strategy_id), "enabled": body.enabled}
+
     @app.post("/api/v1/strategies/{strategy_id}/webhook-key")
     async def rotate_strategy_key(strategy_id: UUID, request: Request) -> dict[str, object]:
         actor = await principal(request, mutation=True)
@@ -3108,12 +3140,62 @@ def install_platform_routes(
             "shownOnce": True,
         }
 
+    @app.delete("/api/v1/strategies/{strategy_id}/webhook-key")
+    async def revoke_strategy_key(strategy_id: UUID, request: Request) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        if actor.last_login_at is None or datetime.now(UTC) - actor.last_login_at > timedelta(
+            minutes=15
+        ):
+            raise HTTPException(status_code=403, detail="fresh_session_required")
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            strategy = await session.get(TradingViewStrategy, strategy_id)
+            if strategy is None:
+                raise HTTPException(status_code=404, detail="strategy_not_found")
+            permission = await account_permission(session, actor, strategy.account_id)
+            if actor.role == "viewer" or permission == "view":
+                raise HTTPException(status_code=403, detail="trading_permission_required")
+            active = list(
+                (
+                    await session.execute(
+                        select(TradingViewWebhookKey).where(
+                            TradingViewWebhookKey.strategy_id == strategy_id,
+                            TradingViewWebhookKey.revoked_at.is_(None),
+                        )
+                    )
+                ).scalars()
+            )
+            for row in active:
+                row.revoked_at = now
+            await append_audit(
+                session,
+                actor=actor,
+                action="TRADINGVIEW_KEY_REVOKED",
+                target_type="strategy",
+                target_id=str(strategy.id),
+                outcome="SUCCEEDED",
+                request_id=_request_id(request),
+                details={"revokedCount": len(active)},
+            )
+        return {"id": str(strategy_id), "revoked": len(active)}
+
     @app.post("/api/v1/webhooks/tradingview/{key}")
     async def tradingview_webhook(key: str, body: TradingViewSignalBody) -> JSONResponse:
         if len(key) < 32 or len(key) > 128 or re.fullmatch(r"[A-Za-z0-9_-]+", key) is None:
             raise HTTPException(status_code=404, detail="webhook_not_found")
         now = datetime.now(UTC)
-        if abs(int(now.timestamp()) - body.timestamp) > 60:
+        try:
+            signal_time = (
+                datetime.fromtimestamp(body.timestamp, tz=UTC)
+                if isinstance(body.timestamp, int)
+                else datetime.fromisoformat(body.timestamp.replace("Z", "+00:00"))
+            )
+            if signal_time.tzinfo is None:
+                raise ValueError
+            signal_time = signal_time.astimezone(UTC)
+        except (OSError, OverflowError, ValueError):
+            raise HTTPException(status_code=400, detail="invalid_signal_timestamp") from None
+        if abs((now - signal_time).total_seconds()) > 60:
             raise HTTPException(status_code=409, detail="stale_signal")
         if re.fullmatch(r"[A-Za-z0-9_.:-]+", body.signal_id) is None:
             raise HTTPException(status_code=400, detail="invalid_signal_id")
