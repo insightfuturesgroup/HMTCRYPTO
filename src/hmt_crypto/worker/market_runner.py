@@ -20,10 +20,18 @@ from hmt_crypto.exchange.delta.catalog import CatalogProductLoad, CatalogSource,
 from hmt_crypto.exchange.delta.client import DeltaPublicClient
 from hmt_crypto.exchange.delta.endpoints import get_delta_endpoints
 from hmt_crypto.exchange.delta.rate_limiter import RateLimitScope, ScopeKind, WeightedRateLimiter
+from hmt_crypto.errors import HmtCryptoError
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import CatalogueProduct, CatalogueSnapshot, MarketQuote
 from hmt_crypto.worker.public_ticker_stream import run_public_ticker_stream
+
+
+def _safe_failure_code(error: Exception) -> str:
+    """Return an operator-safe category without retaining exception diagnostics."""
+    if isinstance(error, HmtCryptoError):
+        return error.code
+    return "unexpected_error"
 
 
 class MarketWorkerSettings(BaseSettings):
@@ -88,9 +96,12 @@ async def run_market_worker(
     try:
         while not stop.is_set():
             now = datetime.now(UTC)
+            stage = "catalogue_due_check"
             try:
                 if now - last_catalogue >= timedelta(seconds=process.catalogue_seconds):
+                    stage = "catalogue_fetch"
                     result = await catalog.refresh()
+                    stage = "catalogue_validate"
                     snapshot = catalog.require_snapshot(at=datetime.now(UTC))
                     products = tuple(
                         product
@@ -98,6 +109,7 @@ async def run_market_worker(
                         if product.contract_type
                         in {ContractType.PERPETUAL_FUTURES, ContractType.FUTURES}
                     )
+                    stage = "catalogue_persist"
                     async with database.transaction() as session:
                         latest = await session.scalar(
                             select(func.max(CatalogueSnapshot.revision)).where(
@@ -141,6 +153,7 @@ async def run_market_worker(
                         product_count=len(products),
                         refresh_status=result.status.value,
                     )
+                stage = "catalogue_read"
                 snapshot = catalog.require_snapshot(at=datetime.now(UTC))
                 if stream_task is not None and stream_task.done():
                     try:
@@ -158,8 +171,10 @@ async def run_market_worker(
                     if product.contract_type
                     in {ContractType.PERPETUAL_FUTURES, ContractType.FUTURES}
                 }
+                stage = "ticker_fetch"
                 tickers = await client.get_tickers()
                 observed = datetime.now(UTC)
+                stage = "quote_persist"
                 async with database.transaction() as session:
                     insert = (
                         pg_insert
@@ -195,8 +210,12 @@ async def run_market_worker(
                 logger.info("market_quotes_updated", quote_count=len(tickers))
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.error("market_refresh_failed")
+            except Exception as error:
+                logger.error(
+                    "market_refresh_failed",
+                    stage=stage,
+                    error_code=_safe_failure_code(error),
+                )
             try:
                 await asyncio.wait_for(stop.wait(), timeout=process.refresh_seconds)
             except TimeoutError:
