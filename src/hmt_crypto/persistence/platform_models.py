@@ -252,6 +252,36 @@ class AccountLiveControl(Base):
     __mapper_args__ = {"version_id_col": version}
 
 
+class PrivateReconciliationSnapshot(Base):
+    """Bounded evidence from one read-only Delta private-state acquisition."""
+
+    __tablename__ = "private_reconciliation_snapshots"
+    __table_args__ = (
+        CheckConstraint("credential_version >= 1", name="credential_version_pos"),
+        CheckConstraint("balance_count >= 0", name="balance_count_nonneg"),
+        CheckConstraint("position_count >= 0", name="position_count_nonneg"),
+        CheckConstraint("open_order_count >= 0", name="open_order_count_nonneg"),
+        CheckConstraint("outcome IN ('ready','blocked','unavailable')", name="outcome_allowed"),
+        UniqueConstraint("account_id", "request_id", name="uq_private_reconciliation_request"),
+        Index("ix_private_reconciliation_account_observed", "account_id", "observed_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    credential_version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    request_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    balance_count: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    position_count: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    open_order_count: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    foreign_product_ids: Mapped[str] = mapped_column(Text, nullable=False)
+    complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    outcome: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 __all__ = [
     "AccountAssignment",
     "ApplicationSetting",
@@ -261,5 +291,6 @@ __all__ = [
     "MarketQuote",
     "PlatformAuditEvent",
     "PlatformUser",
+    "PrivateReconciliationSnapshot",
     "WatchlistItem",
 ]

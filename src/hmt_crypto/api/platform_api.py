@@ -19,6 +19,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.exc import IntegrityError
 
+from hmt_crypto.api.delta_reconciliation import (
+    ReconciliationReadError,
+    read_private_reconciliation,
+)
 from hmt_crypto.api.delta_verification import (
     DeltaIdentityEvidence,
     DeltaVerificationRejected,
@@ -45,6 +49,7 @@ from hmt_crypto.persistence.models import (
     MarketQuote,
     PlatformAuditEvent,
     PlatformUser,
+    PrivateReconciliationSnapshot,
     WatchlistItem,
 )
 
@@ -828,6 +833,180 @@ def install_platform_routes(
         if failure_code is not None:
             raise HTTPException(status_code=422, detail=failure_code)
         return result
+
+    @app.post("/api/v1/accounts/{account_id}/reconcile")
+    async def reconcile_account(account_id: UUID, request: Request) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        request_id = UUID(_request_id(request))
+        if actor.last_login_at is None or datetime.now(UTC) - actor.last_login_at > timedelta(
+            minutes=15
+        ):
+            raise HTTPException(status_code=403, detail="fresh_authentication_required")
+        async with database.transaction() as session:
+            previous = (
+                await session.execute(
+                    select(PrivateReconciliationSnapshot).where(
+                        PrivateReconciliationSnapshot.account_id == account_id,
+                        PrivateReconciliationSnapshot.request_id == request_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if previous is not None:
+                return {
+                    "accountId": str(account_id),
+                    "outcome": previous.outcome,
+                    "complete": previous.complete,
+                    "foreignProductIds": json.loads(previous.foreign_product_ids),
+                    "balanceCount": previous.balance_count,
+                    "positionCount": previous.position_count,
+                    "openOrderCount": previous.open_order_count,
+                    "observedAt": _utc(previous.observed_at),
+                }
+            account = await session.get(Account, account_id)
+            if account is None or account.current_credential_version is None:
+                raise HTTPException(status_code=409, detail="credentials_not_configured")
+            control = (
+                await session.execute(
+                    select(AccountLiveControl).where(AccountLiveControl.account_id == account.id)
+                )
+            ).scalar_one()
+            if control.credential_state != "verified" or account.external_user_id is None:
+                raise HTTPException(status_code=409, detail="credentials_not_verified")
+            reference = (
+                await session.execute(
+                    select(CredentialSecretReference).where(
+                        CredentialSecretReference.account_id == account.id,
+                        CredentialSecretReference.credential_version
+                        == account.current_credential_version,
+                        CredentialSecretReference.status == "verified",
+                    )
+                )
+            ).scalar_one_or_none()
+            snapshot = await session.scalar(
+                select(CatalogueSnapshot)
+                .where(
+                    CatalogueSnapshot.region == "india",
+                    CatalogueSnapshot.environment == "prod",
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            if reference is None or snapshot is None:
+                raise HTTPException(status_code=409, detail="reconciliation_prerequisite_missing")
+            allowed_ids = frozenset(
+                int(value)
+                for value in (
+                    await session.scalars(
+                        select(CatalogueProduct.product_id).where(
+                            CatalogueProduct.snapshot_id == snapshot.id
+                        )
+                    )
+                ).all()
+            )
+            if not allowed_ids:
+                raise HTTPException(status_code=409, detail="catalogue_not_ready")
+            credential_version = account.current_credential_version
+            secret_arn = reference.secret_arn
+            external_user_id = account.external_user_id
+            control.reconciliation_state = "running"
+            control.entries_enabled = False
+            control.exits_enabled = False
+            control.last_error_code = None
+            control.updated_at = datetime.now(UTC)
+        try:
+            api_key, api_secret = await secret_store.read(secret_arn)
+            try:
+                evidence = await read_private_reconciliation(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    expected_user_id=external_user_id,
+                    allowed_product_ids=allowed_ids,
+                )
+            finally:
+                api_key = ""
+                api_secret = ""
+        except (ReconciliationReadError, RuntimeError):
+            async with database.transaction() as session:
+                control = (
+                    await session.execute(
+                        select(AccountLiveControl).where(
+                            AccountLiveControl.account_id == account_id
+                        )
+                    )
+                ).scalar_one()
+                control.reconciliation_state = "degraded"
+                control.entries_enabled = False
+                control.exits_enabled = False
+                control.last_error_code = "reconciliation_unavailable"
+                control.updated_at = datetime.now(UTC)
+                await append_audit(
+                    session,
+                    actor=actor,
+                    action="PRIVATE_RECONCILIATION",
+                    target_type="account",
+                    target_id=str(account_id),
+                    outcome="UNAVAILABLE",
+                    request_id=str(request_id),
+                    details={"errorCode": "reconciliation_unavailable"},
+                )
+            raise HTTPException(status_code=503, detail="reconciliation_unavailable") from None
+        outcome = "ready" if evidence.complete and not evidence.foreign_product_ids else "blocked"
+        observed_at = datetime.now(UTC)
+        async with database.transaction() as session:
+            account = await session.get(Account, account_id)
+            if account is None or account.current_credential_version != credential_version:
+                raise HTTPException(status_code=409, detail="credential_revision_changed")
+            control = (
+                await session.execute(
+                    select(AccountLiveControl).where(AccountLiveControl.account_id == account.id)
+                )
+            ).scalar_one()
+            session.add(
+                PrivateReconciliationSnapshot(
+                    id=uuid4(),
+                    account_id=account.id,
+                    credential_version=credential_version,
+                    request_id=request_id,
+                    balance_count=evidence.balance_count,
+                    position_count=evidence.position_count,
+                    open_order_count=evidence.open_order_count,
+                    foreign_product_ids=json.dumps(evidence.foreign_product_ids),
+                    complete=evidence.complete,
+                    content_sha256=evidence.content_sha256,
+                    outcome=outcome,
+                    observed_at=observed_at,
+                )
+            )
+            control.reconciliation_state = outcome
+            control.entries_enabled = False
+            control.exits_enabled = False
+            control.reconciled_at = observed_at
+            control.last_error_code = None if outcome == "ready" else "foreign_or_incomplete_state"
+            control.updated_at = observed_at
+            await append_audit(
+                session,
+                actor=actor,
+                action="PRIVATE_RECONCILIATION",
+                target_type="account",
+                target_id=str(account.id),
+                outcome=outcome.upper(),
+                request_id=str(request_id),
+                details={
+                    "credentialVersion": credential_version,
+                    "complete": evidence.complete,
+                    "foreignProductCount": len(evidence.foreign_product_ids),
+                },
+            )
+        return {
+            "accountId": str(account_id),
+            "outcome": outcome,
+            "complete": evidence.complete,
+            "foreignProductIds": list(evidence.foreign_product_ids),
+            "balanceCount": evidence.balance_count,
+            "positionCount": evidence.position_count,
+            "openOrderCount": evidence.open_order_count,
+            "observedAt": _utc(observed_at),
+        }
 
     @app.get("/api/v1/market/products")
     async def market_products(request: Request) -> dict[str, object]:
