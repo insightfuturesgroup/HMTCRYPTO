@@ -80,6 +80,17 @@ def test_ec2_runtime_services_mount_and_use_the_pinned_supabase_ca() -> None:
     assert worker["DATABASE_CA_FILE"] == "/run/secrets/supabase-prod-ca.crt"
 
 
+def test_ec2_workers_select_credential_free_market_and_private_processes() -> None:
+    root = Path(__file__).resolve().parents[2]
+    compose = (root / "docker-compose.ec2.yml").read_text(encoding="utf-8")
+    market = compose.split("  worker:\n", 1)[1].split("\n  private-worker:\n", 1)[0]
+    private = compose.split("  private-worker:\n", 1)[1].split("\n  ui:\n", 1)[0]
+
+    assert "HMT_WORKER_KIND: market" in market
+    assert "HMT_WORKER_KIND: private" in private
+    assert "HMT_WORKER_KIND: paper" not in compose
+
+
 def test_api_compose_service_receives_no_exchange_credentials() -> None:
     """The browser/control process must not inherit the worker secret environment."""
     root = Path(__file__).resolve().parents[2]

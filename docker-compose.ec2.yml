@@ -64,6 +64,8 @@ services:
     init: true
     env_file:
       - deploy/ec2/worker.env
+    environment:
+      HMT_WORKER_KIND: market
     volumes:
       - /etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro
     depends_on:
