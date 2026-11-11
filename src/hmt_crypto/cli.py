@@ -18,6 +18,7 @@ from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.errors import HmtCryptoError
 from hmt_crypto.logging import configure_logging
 from hmt_crypto.persistence.redaction import JsonValue
+from hmt_crypto.qualification import qualify_live_account
 
 
 class _JsonBoundaryGroup(TyperGroup):
@@ -189,6 +190,24 @@ def platform_bootstrap_admin(
             auth_user_id=auth_user_id,
             email=email,
             full_name=full_name,
+        )
+    )
+
+
+@platform_app.command("qualify-live")
+def platform_qualify_live(
+    profile_name: Annotated[str, typer.Option("--profile")],
+    release_commit: Annotated[str, typer.Option("--release-commit")],
+    approver_email: Annotated[str, typer.Option("--approver-email")],
+    failure_drills_sha256: Annotated[str, typer.Option("--failure-drills-sha256")],
+) -> None:
+    """Derive and persist approval only from a complete 24-hour evidence window."""
+    _run_async(
+        lambda: qualify_live_account(
+            profile_name=profile_name,
+            release_commit=release_commit,
+            approver_email=approver_email,
+            failure_drills_sha256=failure_drills_sha256,
         )
     )
 

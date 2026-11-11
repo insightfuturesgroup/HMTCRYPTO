@@ -92,7 +92,7 @@ approval after every preceding mandatory item is complete.
       writing by the risk owner.
 - [ ] Global and account entry gates are confirmed disabled immediately before activation.
 - [ ] Operator explicitly approves enabling only one account and the first restricted product.
-- [ ] Global gate is enabled, then the approved account gate; all others remain disabled.
+- [ ] The approved account entry/exit gate is staged first; the global entry gate is enabled last.
 - [ ] The operator separately authorizes one minimum-supported-size order from the normal UI.
 - [ ] Order, fill, fee, position, and protection are reconciled; emergency disable is immediately
       available.

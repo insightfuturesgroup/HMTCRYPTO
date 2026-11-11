@@ -61,6 +61,7 @@ from hmt_crypto.persistence.models import (
     LiveOrderIntent,
     LiveOrderPreview,
     LiveOrderSubmission,
+    LiveQualificationEvidence,
     MarketCandle,
     MarketQuote,
     PlatformAuditEvent,
@@ -69,6 +70,7 @@ from hmt_crypto.persistence.models import (
     PlatformSession,
     PlatformUser,
     PrivateReconciliationSnapshot,
+    PrivateStreamEvidence,
     PrivateWorkerLease,
     TradingViewSignal,
     TradingViewStrategy,
@@ -150,6 +152,8 @@ class RiskPolicyBody(_Body):
     max_position_notional: str = Field(min_length=1, max_length=64)
     max_daily_loss: str = Field(min_length=1, max_length=64)
     max_open_orders: int = Field(ge=1, le=10_000)
+    max_inflight_signals: int = Field(default=5, ge=1, le=100)
+    usd_inr_rate: str = Field(default="100", min_length=1, max_length=64)
     allowed_product_ids: list[int] = Field(min_length=1, max_length=500)
     enabled: bool
 
@@ -201,6 +205,10 @@ class TradingViewStrategyBody(_Body):
     contracts: int = Field(gt=0, lt=2**63)
     order_type: Literal["market", "limit"]
     reduce_only: bool
+    stop_loss_pct: str = Field(default="2", min_length=1, max_length=32)
+    target_pct: str = Field(default="4", min_length=1, max_length=32)
+    trailing_offset_pct: str = Field(default="1", min_length=1, max_length=32)
+    protection_required: bool = True
     enabled: bool = False
 
 
@@ -212,6 +220,10 @@ class TradingViewStrategyStateBody(_Body):
     order_type: Literal["market", "limit"] | None = None
     reduce_only: bool | None = None
     enabled: bool | None = None
+    stop_loss_pct: str | None = Field(default=None, min_length=1, max_length=32)
+    target_pct: str | None = Field(default=None, min_length=1, max_length=32)
+    trailing_offset_pct: str | None = Field(default=None, min_length=1, max_length=32)
+    protection_required: bool | None = None
 
 
 class TradingViewSignalBody(_Body):
@@ -373,6 +385,38 @@ def install_platform_routes(
         ):
             raise HTTPException(status_code=401, detail="fresh_authentication_required")
         return actor
+
+    async def qualification_status(
+        session: object,
+        *,
+        account_id: UUID,
+        now: datetime,
+    ) -> tuple[bool, str, LiveQualificationEvidence | None, list[PrivateStreamEvidence]]:
+        evidence = await session.scalar(  # type: ignore[attr-defined]
+            select(LiveQualificationEvidence)
+            .where(LiveQualificationEvidence.account_id == account_id)
+            .order_by(desc(LiveQualificationEvidence.created_at))
+            .limit(1)
+        )
+        streams = list(
+            await session.scalars(  # type: ignore[attr-defined]
+                select(PrivateStreamEvidence).where(
+                    PrivateStreamEvidence.account_id == account_id,
+                    PrivateStreamEvidence.observed_at >= now - timedelta(seconds=45),
+                    PrivateStreamEvidence.state.in_(("snapshot", "live")),
+                )
+            )
+        )
+        required_channels = {"orders", "positions", "margins", "v2/user_trades"}
+        if {row.channel for row in streams} != required_channels:
+            return False, "private_stream_stale", evidence, streams
+        if evidence is None or evidence.status != "qualified":
+            return False, "qualification_missing", evidence, streams
+        if evidence.window_completed_at is None:
+            return False, "qualification_missing", evidence, streams
+        if evidence.window_completed_at - evidence.window_started_at < timedelta(hours=24):
+            return False, "qualification_window_incomplete", evidence, streams
+        return True, "qualified", evidence, streams
 
     async def append_audit(
         session: object,
@@ -1007,9 +1051,7 @@ def install_platform_routes(
                 raise HTTPException(status_code=409, detail="account_worker_active")
             strategies = (
                 await session.execute(
-                    select(TradingViewStrategy).where(
-                        TradingViewStrategy.account_id == account_id
-                    )
+                    select(TradingViewStrategy).where(TradingViewStrategy.account_id == account_id)
                 )
             ).scalars()
             for strategy in strategies:
@@ -1947,8 +1989,7 @@ def install_platform_routes(
                         "bestAsk": None if quote is None else quote.best_ask,
                         "observedAt": None if quote is None else _utc(quote.observed_at),
                         "quoteFresh": bool(
-                            quote is not None
-                            and quote.observed_at >= now - timedelta(seconds=15)
+                            quote is not None and quote.observed_at >= now - timedelta(seconds=15)
                         ),
                     }
                 )
@@ -2129,7 +2170,7 @@ def install_platform_routes(
                     "priceBasis": replay.price_basis,
                     "notional": str(replay.notional),
                     "expiresAt": _utc(replay.expires_at),
-                    "dispatchable": False,
+                    "dispatchable": True,
                 }
             account = await session.get(Account, body.account_id)
             control = await session.scalar(
@@ -2177,6 +2218,16 @@ def install_platform_routes(
                 )
             )
             allowed = set() if risk is None else set(json.loads(risk.allowed_product_ids))
+            (
+                qualification_ready,
+                qualification_reason,
+                qualification,
+                stream_rows,
+            ) = await qualification_status(
+                session,
+                account_id=body.account_id,
+                now=now,
+            )
             gate_open = bool(
                 control and (control.exits_enabled if body.reduce_only else control.entries_enabled)
             )
@@ -2206,7 +2257,16 @@ def install_platform_routes(
                 and product_row is not None
                 and quote is not None
                 and (body.reduce_only or bool(global_control and global_control.entries_enabled))
+                and qualification_ready
+                and all(
+                    row.credential_version == lease.credential_version
+                    and row.worker_owner_id == lease.owner_id
+                    and row.worker_generation == lease.generation
+                    for row in stream_rows
+                )
             )
+            if not qualification_ready:
+                raise HTTPException(status_code=409, detail=qualification_reason)
             if not ready:
                 raise HTTPException(status_code=409, detail="order_preview_prerequisites_failed")
             assert risk is not None
@@ -2214,6 +2274,7 @@ def install_platform_routes(
             assert catalogue is not None
             assert product_row is not None
             assert quote is not None
+            assert qualification is not None
             try:
                 positions = json.loads(reconciliation.positions_payload or "")
                 open_orders = json.loads(reconciliation.open_orders_payload or "")
@@ -2274,7 +2335,43 @@ def install_platform_routes(
                     product=product, contracts=projected_contracts, price=sizing.price
                 )
             )
-            if projected_notional > risk.max_position_notional:
+            aggregate_exposure = projected_notional
+            for item in positions:
+                if not isinstance(item, dict):
+                    raise HTTPException(status_code=409, detail="account_state_not_ready")
+                other_id = item.get("product_id")
+                other_size = item.get("size")
+                if (
+                    type(other_id) is not int
+                    or type(other_size) is not int
+                    or other_id == body.product_id
+                    or other_size == 0
+                ):
+                    continue
+                other_product = await session.scalar(
+                    select(CatalogueProduct).where(
+                        CatalogueProduct.snapshot_id == catalogue.id,
+                        CatalogueProduct.product_id == other_id,
+                    )
+                )
+                other_quote = await session.scalar(
+                    select(MarketQuote).where(
+                        MarketQuote.region == "india",
+                        MarketQuote.environment == "prod",
+                        MarketQuote.product_id == other_id,
+                        MarketQuote.observed_at >= now - timedelta(seconds=15),
+                    )
+                )
+                if other_product is None or other_quote is None:
+                    raise HTTPException(status_code=409, detail="quote_stale")
+                if other_quote.mark_price is None:
+                    raise HTTPException(status_code=409, detail="quote_stale")
+                aggregate_exposure += position_notional(
+                    product=other_product.to_product(),
+                    contracts=abs(other_size),
+                    price=Decimal(other_quote.mark_price),
+                )
+            if aggregate_exposure > risk.max_position_notional:
                 raise HTTPException(status_code=409, detail="position_limit_exceeded")
             daily_net = Decimal(0)
             for item in wallet:
@@ -2309,6 +2406,8 @@ def install_platform_routes(
                 "reconciliation": str(reconciliation.id),
                 "reduceOnly": body.reduce_only,
                 "riskVersion": risk.version,
+                "qualification": str(qualification.id),
+                "protection": {"stopLossPct": "2", "targetPct": "4", "trailingPct": "1"},
                 "side": body.side,
             }
             digest = hashlib.sha256(
@@ -2355,8 +2454,19 @@ def install_platform_routes(
                 "price": str(sizing.price),
                 "priceBasis": sizing.price_basis,
                 "notional": str(sizing.notional),
+                "projectedExposure": str(aggregate_exposure),
+                "riskHeadroom": str(risk.max_position_notional - aggregate_exposure),
+                "quoteAgeSeconds": max(0, int((now - quote.observed_at).total_seconds())),
+                "reconciliationAgeSeconds": max(
+                    0, int((now - reconciliation.observed_at).total_seconds())
+                ),
+                "requiredProtection": {
+                    "stopLossPct": "2",
+                    "targetPct": "4",
+                    "trailingOffsetPct": "1",
+                },
                 "expiresAt": _utc(preview.expires_at),
-                "dispatchable": False,
+                "dispatchable": True,
             }
 
     @app.post("/api/v1/trading/intents")
@@ -2381,7 +2491,7 @@ def install_platform_routes(
             if replay is not None:
                 if replay.preview_id != preview.id:
                     raise HTTPException(status_code=409, detail="idempotency_conflict")
-                return {"intentId": str(replay.id), "status": replay.status, "dispatchable": False}
+                return {"intentId": str(replay.id), "status": replay.status, "dispatchable": True}
             used = await session.scalar(
                 select(LiveOrderIntent.id).where(LiveOrderIntent.preview_id == preview.id)
             )
@@ -2484,7 +2594,7 @@ def install_platform_routes(
                 request_id=str(request_id),
                 details={"previewId": str(preview.id)},
             )
-            return {"intentId": str(intent_id), "status": "ADMITTED", "dispatchable": False}
+            return {"intentId": str(intent_id), "status": "ADMITTED", "dispatchable": True}
 
     @app.get("/api/v1/trading/actions")
     async def list_order_actions(request: Request, account_id: UUID) -> dict[str, object]:
@@ -2714,6 +2824,12 @@ def install_platform_routes(
                     "maxPositionNotional": str(row.max_position_notional),
                     "maxDailyLoss": str(row.max_daily_loss),
                     "maxOpenOrders": row.max_open_orders,
+                    "maxInflightSignals": row.max_inflight_signals,
+                    "limitCurrency": row.limit_currency,
+                    "usdInrRate": str(row.usd_inr_rate),
+                    "maxOrderLimitInr": str(row.max_order_limit_inr),
+                    "maxPositionLimitInr": str(row.max_position_limit_inr),
+                    "maxDailyLossLimitInr": str(row.max_daily_loss_limit_inr),
                     "allowedProductIds": json.loads(row.allowed_product_ids),
                     "enabled": row.enabled,
                     "updatedAt": _utc(row.updated_at),
@@ -2735,11 +2851,20 @@ def install_platform_routes(
             value <= 0 for value in product_ids
         ):
             raise HTTPException(status_code=400, detail="invalid_product_scope")
-        limits = (
+        inr_limits = (
             _positive_decimal(body.max_order_notional),
             _positive_decimal(body.max_position_notional),
             _positive_decimal(body.max_daily_loss),
         )
+        usd_inr_rate = _positive_decimal(body.usd_inr_rate)
+        if (
+            inr_limits != (Decimal("5000"), Decimal("10000"), Decimal("2000"))
+            or usd_inr_rate != Decimal("100")
+            or body.max_open_orders != 5
+            or body.max_inflight_signals != 5
+        ):
+            raise HTTPException(status_code=409, detail="risk_scope_requires_requalification")
+        limits = tuple(value / usd_inr_rate for value in inr_limits)
         now = datetime.now(UTC)
         async with database.transaction() as session:
             account = await session.get(Account, account_id)
@@ -2767,6 +2892,16 @@ def install_platform_routes(
             )
             if known != set(product_ids):
                 raise HTTPException(status_code=400, detail="invalid_product_scope")
+            product_symbols = set(
+                await session.scalars(
+                    select(CatalogueProduct.symbol).where(
+                        CatalogueProduct.snapshot_id == catalogue.id,
+                        CatalogueProduct.product_id.in_(product_ids),
+                    )
+                )
+            )
+            if product_symbols != {"BTCUSD", "ETHUSD"}:
+                raise HTTPException(status_code=409, detail="symbol_not_allowed")
             row = await session.scalar(
                 select(AccountRiskPolicy)
                 .where(AccountRiskPolicy.account_id == account_id)
@@ -2780,6 +2915,12 @@ def install_platform_routes(
                     max_position_notional=limits[1],
                     max_daily_loss=limits[2],
                     max_open_orders=body.max_open_orders,
+                    max_inflight_signals=body.max_inflight_signals,
+                    limit_currency="INR",
+                    usd_inr_rate=usd_inr_rate,
+                    max_order_limit_inr=inr_limits[0],
+                    max_position_limit_inr=inr_limits[1],
+                    max_daily_loss_limit_inr=inr_limits[2],
                     allowed_product_ids=json.dumps(product_ids),
                     enabled=body.enabled,
                     updated_by_user_id=actor.profile_id,
@@ -2791,6 +2932,14 @@ def install_platform_routes(
             else:
                 row.max_order_notional, row.max_position_notional, row.max_daily_loss = limits
                 row.max_open_orders = body.max_open_orders
+                row.max_inflight_signals = body.max_inflight_signals
+                row.limit_currency = "INR"
+                row.usd_inr_rate = usd_inr_rate
+                (
+                    row.max_order_limit_inr,
+                    row.max_position_limit_inr,
+                    row.max_daily_loss_limit_inr,
+                ) = inr_limits
                 row.allowed_product_ids = json.dumps(product_ids)
                 row.enabled = body.enabled
                 row.updated_by_user_id = actor.profile_id
@@ -2887,7 +3036,16 @@ def install_platform_routes(
                     .order_by(desc(PrivateReconciliationSnapshot.observed_at))
                     .limit(1)
                 )
-                global_control = await session.get(PlatformLiveControl, "global")
+                (
+                    qualification_ready,
+                    qualification_reason,
+                    _,
+                    stream_rows,
+                ) = await qualification_status(
+                    session,
+                    account_id=account_id,
+                    now=now,
+                )
                 product_ids = () if risk is None else tuple(json.loads(risk.allowed_product_ids))
                 fresh_quotes = 0
                 if product_ids:
@@ -2922,11 +3080,19 @@ def install_platform_routes(
                     and snapshot.worker_owner_id == lease.owner_id
                     and snapshot.worker_generation == lease.generation
                     and snapshot.credential_version == lease.credential_version
+                    and qualification_ready
+                    and all(
+                        row.credential_version == lease.credential_version
+                        and row.worker_owner_id == lease.owner_id
+                        and row.worker_generation == lease.generation
+                        for row in stream_rows
+                    )
                 )
-                if not ready or (
-                    body.entries_enabled
-                    and (global_control is None or not global_control.entries_enabled)
-                ):
+                if not qualification_ready:
+                    raise HTTPException(status_code=409, detail=qualification_reason)
+                # Stage the qualified account gate first. Order admission still
+                # requires the independently locked global gate, enabled last.
+                if not ready:
                     raise HTTPException(status_code=409, detail="live_gate_prerequisites_failed")
             control.entries_enabled = body.entries_enabled
             control.exits_enabled = body.exits_enabled
@@ -2995,6 +3161,57 @@ def install_platform_routes(
                 "accounts": accounts,
             }
 
+    @app.get("/api/v1/admin/accounts/{account_id}/qualification")
+    async def account_qualification(account_id: UUID, request: Request) -> dict[str, object]:
+        await admin(request)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            account = await session.get(Account, account_id)
+            if account is None or account.archived_at is not None:
+                raise HTTPException(status_code=404, detail="account_not_found")
+            ready, reason, evidence, streams = await qualification_status(
+                session,
+                account_id=account_id,
+                now=now,
+            )
+            by_channel = {row.channel: row for row in streams}
+            return {
+                "accountId": str(account_id),
+                "qualified": ready,
+                "reason": reason,
+                "observedAt": _utc(now),
+                "requiredWindowHours": 24,
+                "evidence": None
+                if evidence is None
+                else {
+                    "releaseCommit": evidence.release_commit,
+                    "evidenceSha256": evidence.evidence_sha256,
+                    "status": evidence.status,
+                    "windowStartedAt": _utc(evidence.window_started_at),
+                    "windowCompletedAt": None
+                    if evidence.window_completed_at is None
+                    else _utc(evidence.window_completed_at),
+                    "approvedAt": None
+                    if evidence.approved_at is None
+                    else _utc(evidence.approved_at),
+                },
+                "privateChannels": [
+                    {
+                        "channel": channel,
+                        "state": "missing"
+                        if channel not in by_channel
+                        else by_channel[channel].state,
+                        "sequence": None
+                        if channel not in by_channel
+                        else by_channel[channel].sequence_number,
+                        "observedAt": None
+                        if channel not in by_channel
+                        else _utc(by_channel[channel].observed_at),
+                    }
+                    for channel in ("orders", "positions", "margins", "v2/user_trades")
+                ],
+            }
+
     @app.get("/api/v1/admin/audit")
     async def audit_log(request: Request) -> dict[str, object]:
         await admin(request)
@@ -3043,6 +3260,9 @@ def install_platform_routes(
                         "side": row.side,
                         "contracts": row.contracts,
                         "triggerKind": row.trigger_kind,
+                        "protectionGroupId": None
+                        if row.protection_group_id is None
+                        else str(row.protection_group_id),
                         "triggerPrice": row.trigger_price,
                         "trailOffset": row.trail_offset,
                         "limitPrice": row.limit_price,
@@ -3097,6 +3317,10 @@ def install_platform_routes(
                         "contracts": row.contracts,
                         "orderType": row.order_type,
                         "reduceOnly": row.reduce_only,
+                        "stopLossPct": str(row.stop_loss_pct),
+                        "targetPct": str(row.target_pct),
+                        "trailingOffsetPct": str(row.trailing_offset_pct),
+                        "protectionRequired": row.protection_required,
                         "enabled": row.enabled,
                         "version": row.version,
                         "webhookConfigured": row.id in active_keys,
@@ -3150,10 +3374,21 @@ def install_platform_routes(
         actor = await principal(request, mutation=True)
         request_id = _request_id(request)
         now, strategy_id = datetime.now(UTC), uuid4()
+        protection_values = (
+            _positive_decimal(body.stop_loss_pct),
+            _positive_decimal(body.target_pct),
+            _positive_decimal(body.trailing_offset_pct),
+        )
+        if any(value > 100 for value in protection_values):
+            raise HTTPException(status_code=400, detail="invalid_protection")
         async with database.transaction() as session:
             permission = await account_permission(session, actor, body.account_id)
-            if actor.role == "viewer" or permission == "view":
-                raise HTTPException(status_code=403, detail="trading_permission_required")
+            if actor.role != "admin" and permission != "manage":
+                raise HTTPException(status_code=403, detail="permission_denied")
+            if not body.protection_required:
+                raise HTTPException(status_code=409, detail="protection_required")
+            if body.symbol not in {"BTCUSD", "ETHUSD"}:
+                raise HTTPException(status_code=409, detail="symbol_not_allowed")
             product = await session.scalar(
                 select(CatalogueProduct)
                 .join(CatalogueSnapshot, CatalogueSnapshot.id == CatalogueProduct.snapshot_id)
@@ -3180,6 +3415,10 @@ def install_platform_routes(
                     contracts=body.contracts,
                     order_type=body.order_type,
                     reduce_only=body.reduce_only,
+                    stop_loss_pct=protection_values[0],
+                    target_pct=protection_values[1],
+                    trailing_offset_pct=protection_values[2],
+                    protection_required=body.protection_required,
                     enabled=body.enabled,
                     version=1,
                     created_at=now,
@@ -3209,8 +3448,10 @@ def install_platform_routes(
             if strategy is None:
                 raise HTTPException(status_code=404, detail="strategy_not_found")
             permission = await account_permission(session, actor, strategy.account_id)
-            if actor.role == "viewer" or permission == "view":
-                raise HTTPException(status_code=403, detail="trading_permission_required")
+            if actor.role != "admin" and permission != "manage":
+                raise HTTPException(status_code=403, detail="permission_denied")
+            if body.protection_required is False:
+                raise HTTPException(status_code=409, detail="protection_required")
             if (body.product_id is None) != (body.symbol is None):
                 raise HTTPException(status_code=400, detail="strategy_product_incomplete")
             if body.product_id is not None and body.symbol is not None:
@@ -3229,12 +3470,28 @@ def install_platform_routes(
                 )
                 if product is None:
                     raise HTTPException(status_code=409, detail="strategy_product_not_ready")
+                if body.symbol not in {"BTCUSD", "ETHUSD"}:
+                    raise HTTPException(status_code=409, detail="symbol_not_allowed")
                 strategy.product_id = body.product_id
                 strategy.symbol = body.symbol
-            for field in ("name", "contracts", "order_type", "reduce_only", "enabled"):
+            for field in (
+                "name",
+                "contracts",
+                "order_type",
+                "reduce_only",
+                "enabled",
+                "protection_required",
+            ):
                 value = getattr(body, field)
                 if value is not None:
                     setattr(strategy, field, value)
+            for field in ("stop_loss_pct", "target_pct", "trailing_offset_pct"):
+                value = getattr(body, field)
+                if value is not None:
+                    parsed = _positive_decimal(value)
+                    if parsed > 100:
+                        raise HTTPException(status_code=400, detail="invalid_protection")
+                    setattr(strategy, field, parsed)
             strategy.version += 1
             strategy.updated_at = now
             await append_audit(
@@ -3397,6 +3654,26 @@ def install_platform_routes(
             )
             if strategy is None or not strategy.enabled:
                 raise HTTPException(status_code=404, detail="webhook_not_found")
+            if not strategy.protection_required:
+                raise HTTPException(status_code=409, detail="protection_required")
+            qualified, reason, _, _ = await qualification_status(
+                session,
+                account_id=strategy.account_id,
+                now=now,
+            )
+            if not qualified:
+                raise HTTPException(status_code=409, detail=reason)
+            risk = await session.scalar(
+                select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == strategy.account_id)
+            )
+            inflight = await session.scalar(
+                select(func.count(TradingViewSignal.id)).where(
+                    TradingViewSignal.account_id == strategy.account_id,
+                    TradingViewSignal.status.in_(("received", "admitted")),
+                )
+            )
+            if risk is None or int(inflight or 0) >= risk.max_inflight_signals:
+                raise HTTPException(status_code=409, detail="signal_concurrency_exceeded")
             if (strategy.order_type == "limit") != (body.limit_price is not None):
                 raise HTTPException(status_code=409, detail="strategy_signal_incompatible")
             existing = await session.scalar(

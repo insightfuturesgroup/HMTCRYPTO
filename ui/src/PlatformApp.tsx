@@ -175,6 +175,15 @@ interface OrderPreview {
   price: string;
   priceBasis: string;
   notional: string;
+  projectedExposure?: string;
+  riskHeadroom?: string;
+  quoteAgeSeconds?: number;
+  reconciliationAgeSeconds?: number;
+  requiredProtection?: {
+    stopLossPct: string;
+    targetPct: string;
+    trailingOffsetPct: string;
+  };
   expiresAt: string;
 }
 
@@ -201,6 +210,10 @@ interface TradingViewStrategyRow {
   contracts: number;
   orderType: "market" | "limit";
   reduceOnly: boolean;
+  stopLossPct: string;
+  targetPct: string;
+  trailingOffsetPct: string;
+  protectionRequired: boolean;
   enabled: boolean;
   webhookConfigured: boolean;
   webhookFingerprint: string | null;
@@ -1391,6 +1404,29 @@ function TradingPage({
               <small>Expires</small>
               <strong className="block">{preview.expiresAt}</strong>
             </div>
+            <div>
+              <small>Projected aggregate exposure</small>
+              <strong className="block">${preview.projectedExposure ?? "—"}</strong>
+            </div>
+            <div>
+              <small>Risk headroom</small>
+              <strong className="block">${preview.riskHeadroom ?? "—"}</strong>
+            </div>
+            <div>
+              <small>Freshness</small>
+              <strong className="block">
+                Quote {preview.quoteAgeSeconds ?? "—"}s · Reconciliation{" "}
+                {preview.reconciliationAgeSeconds ?? "—"}s
+              </strong>
+            </div>
+            <div>
+              <small>Required protection</small>
+              <strong className="block">
+                SL {preview.requiredProtection?.stopLossPct ?? "2"}% · Target{" "}
+                {preview.requiredProtection?.targetPct ?? "4"}% · Trail{" "}
+                {preview.requiredProtection?.trailingOffsetPct ?? "1"}%
+              </strong>
+            </div>
             <button
               className="rounded bg-red-700 px-4 py-2 text-white md:col-span-2"
               onClick={() => void submitIntent()}
@@ -2039,6 +2075,9 @@ function TradingViewPage({
   const [contracts, setContracts] = useState("1");
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
   const [reduceOnly, setReduceOnly] = useState(false);
+  const [stopLossPct, setStopLossPct] = useState("2");
+  const [targetPct, setTargetPct] = useState("4");
+  const [trailingOffsetPct, setTrailingOffsetPct] = useState("1");
   const [strategies, setStrategies] = useState<TradingViewStrategyRow[]>([]);
   const [signals, setSignals] = useState<TradingViewSignalRow[]>([]);
   const [shownOnceUrl, setShownOnceUrl] = useState<string | null>(null);
@@ -2089,6 +2128,9 @@ function TradingViewPage({
     setContracts("1");
     setOrderType("market");
     setReduceOnly(false);
+    setStopLossPct("2");
+    setTargetPct("4");
+    setTrailingOffsetPct("1");
   }
   function edit(strategy: TradingViewStrategyRow) {
     setEditingId(strategy.id);
@@ -2097,6 +2139,9 @@ function TradingViewPage({
     setContracts(String(strategy.contracts));
     setOrderType(strategy.orderType);
     setReduceOnly(strategy.reduceOnly);
+    setStopLossPct(strategy.stopLossPct);
+    setTargetPct(strategy.targetPct);
+    setTrailingOffsetPct(strategy.trailingOffsetPct);
     setShowCreate(true);
     setNotice(null);
   }
@@ -2119,6 +2164,10 @@ function TradingViewPage({
               contracts: Number(contracts),
               order_type: orderType,
               reduce_only: reduceOnly,
+              stop_loss_pct: stopLossPct,
+              target_pct: targetPct,
+              trailing_offset_pct: trailingOffsetPct,
+              protection_required: true,
             }),
           },
           csrf,
@@ -2139,6 +2188,10 @@ function TradingViewPage({
               contracts: Number(contracts),
               order_type: orderType,
               reduce_only: reduceOnly,
+              stop_loss_pct: stopLossPct,
+              target_pct: targetPct,
+              trailing_offset_pct: trailingOffsetPct,
+              protection_required: true,
               enabled: true,
             }),
           },
@@ -2391,6 +2444,44 @@ function TradingViewPage({
               />
               Reduce-only exit configuration
             </label>
+            <label>
+              Stop loss (%)
+              <input
+                min="0.01"
+                onChange={(event) => setStopLossPct(event.target.value)}
+                required
+                step="0.01"
+                type="number"
+                value={stopLossPct}
+              />
+            </label>
+            <label>
+              Target (%)
+              <input
+                min="0.01"
+                onChange={(event) => setTargetPct(event.target.value)}
+                required
+                step="0.01"
+                type="number"
+                value={targetPct}
+              />
+            </label>
+            <label>
+              Trailing offset (%)
+              <input
+                min="0.01"
+                onChange={(event) => setTrailingOffsetPct(event.target.value)}
+                required
+                step="0.01"
+                type="number"
+                value={trailingOffsetPct}
+              />
+            </label>
+            <p className="tv-guide__note">
+              Protection is mandatory. A reduce-only stop, target, and trailing
+              group is created only after a reconciled fill confirms quantity
+              and average price.
+            </p>
             <button
               className="tv-primary-button md:col-span-2"
               disabled={busy || !canManage || !accountId || !productId}
@@ -2461,6 +2552,10 @@ function TradingViewPage({
                   {strategy.symbol} · {strategy.contracts} contract
                   {strategy.contracts === 1 ? "" : "s"} · {strategy.orderType} ·{" "}
                   {strategy.reduceOnly ? "Reduce only" : "Entry permitted"}
+                </p>
+                <p>
+                  Protection: SL {strategy.stopLossPct}% · Target {strategy.targetPct}% ·
+                  Trailing {strategy.trailingOffsetPct}%
                 </p>
               </div>
               <div className="tv-card__actions">
@@ -2587,10 +2682,12 @@ function RiskPage({
 }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState("");
-  const [maxOrder, setMaxOrder] = useState("100");
-  const [maxPosition, setMaxPosition] = useState("500");
-  const [maxLoss, setMaxLoss] = useState("50");
+  const [maxOrder, setMaxOrder] = useState("5000");
+  const [maxPosition, setMaxPosition] = useState("10000");
+  const [maxLoss, setMaxLoss] = useState("2000");
   const [maxOpen, setMaxOpen] = useState("5");
+  const [maxSignals, setMaxSignals] = useState("5");
+  const [usdInrRate, setUsdInrRate] = useState("100");
   const [products, setProducts] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
@@ -2615,6 +2712,8 @@ function RiskPage({
             max_position_notional: maxPosition,
             max_daily_loss: maxLoss,
             max_open_orders: Number(maxOpen),
+            max_inflight_signals: Number(maxSignals),
+            usd_inr_rate: usdInrRate,
             allowed_product_ids: allowed,
             enabled: true,
           }),
@@ -2650,7 +2749,7 @@ function RiskPage({
           ))}
         </select>
         <label>
-          Maximum order notional
+          Maximum order notional (INR)
           <input
             className="block w-full rounded border px-3 py-2"
             onChange={(e) => setMaxOrder(e.target.value)}
@@ -2658,7 +2757,7 @@ function RiskPage({
           />
         </label>
         <label>
-          Maximum position notional
+          Maximum aggregate exposure (INR)
           <input
             className="block w-full rounded border px-3 py-2"
             onChange={(e) => setMaxPosition(e.target.value)}
@@ -2666,13 +2765,39 @@ function RiskPage({
           />
         </label>
         <label>
-          Maximum daily loss
+          Daily-loss halt (INR)
           <input
             className="block w-full rounded border px-3 py-2"
             onChange={(e) => setMaxLoss(e.target.value)}
             value={maxLoss}
           />
         </label>
+        <label>
+          Maximum in-flight TradingView signals
+          <input
+            className="block w-full rounded border px-3 py-2"
+            min="1"
+            onChange={(e) => setMaxSignals(e.target.value)}
+            type="number"
+            value={maxSignals}
+          />
+        </label>
+        <label>
+          Fixed INR per USD
+          <input
+            className="block w-full rounded border px-3 py-2"
+            min="1"
+            onChange={(e) => setUsdInrRate(e.target.value)}
+            type="number"
+            value={usdInrRate}
+          />
+        </label>
+        <p className="md:col-span-2">
+          Effective USD limits: order ${Number(maxOrder || 0) / Number(usdInrRate || 1)},
+          exposure ${Number(maxPosition || 0) / Number(usdInrRate || 1)}, daily loss
+          ${Number(maxLoss || 0) / Number(usdInrRate || 1)}. Changing the approved
+          ₹100/USD policy requires requalification.
+        </p>
         <label>
           Maximum open orders
           <input

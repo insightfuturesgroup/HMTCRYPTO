@@ -27,6 +27,7 @@ from hmt_crypto.persistence.models import (
     MarketQuote,
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
+    ProtectionGroup,
 )
 
 
@@ -130,6 +131,15 @@ async def evaluate_one_gtt(
                 active_gtt.status = terminal
                 active_gtt.last_error_code = "submission_rejected" if terminal == "failed" else None
                 active_gtt.updated_at = now
+                if active_gtt.protection_group_id is not None:
+                    group = await session.get(
+                        ProtectionGroup,
+                        active_gtt.protection_group_id,
+                        with_for_update=True,
+                    )
+                    if group is not None:
+                        group.status = "completed" if terminal == "completed" else "failed"
+                        group.updated_at = now
                 return GttCycleResult(terminal.upper(), active_gtt.id, submission.id)
             if active_gtt.status == "uncertain":
                 return GttCycleResult("UNCERTAIN", active_gtt.id, submission.id)
@@ -192,6 +202,37 @@ async def evaluate_one_gtt(
         gtt.updated_at = now
         if not decision.triggered:
             return GttCycleResult("ARMED", gtt.id, None)
+        if gtt.protection_group_id is not None:
+            group = await session.get(
+                ProtectionGroup,
+                gtt.protection_group_id,
+                with_for_update=True,
+            )
+            if group is None or group.status not in {"armed", "claiming"}:
+                return GttCycleResult("BLOCKED", gtt.id, None)
+            if group.claimed_leg_id is not None and group.claimed_leg_id != gtt.id:
+                gtt.status = "cancelled"
+                gtt.last_error_code = "oco_sibling_claimed"
+                gtt.updated_at = now
+                return GttCycleResult("CANCELLED", gtt.id, None)
+            group.claimed_leg_id = gtt.id
+            group.status = "claiming"
+            group.updated_at = now
+            siblings = list(
+                await session.scalars(
+                    select(GttOrder)
+                    .where(
+                        GttOrder.protection_group_id == group.id,
+                        GttOrder.id != gtt.id,
+                        GttOrder.status == "armed",
+                    )
+                    .with_for_update()
+                )
+            )
+            for sibling in siblings:
+                sibling.status = "cancelled"
+                sibling.last_error_code = "oco_sibling_claimed"
+                sibling.updated_at = now
         try:
             signed_position = _position_contracts(reconciliation.positions_payload, gtt.product_id)
             direction = 1 if gtt.side == "buy" else -1

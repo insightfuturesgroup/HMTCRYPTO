@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -30,6 +30,7 @@ from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.errors import PersistenceError
 from hmt_crypto.persistence.models import (
     Account,
+    AccountLiveControl,
     BalanceSnapshot,
     CatalogueProduct,
     CatalogueSnapshot,
@@ -37,6 +38,7 @@ from hmt_crypto.persistence.models import (
     PnlSnapshot,
     PositionProtection,
     PositionSnapshot,
+    PrivateStreamEvidence,
     ReconciliationResource,
     RiskHaltEvent,
     RiskState,
@@ -268,7 +270,30 @@ class DatabaseControlPlane:
             async with self._database.transaction() as session:
                 _, scope = await self._scope(session)
                 risk = await self._risk_state(session, scope)
-            reconciliation_ready = risk is not None and risk.reconciliation_state == "READY_CLAIM"
+                live_control = await session.scalar(
+                    select(AccountLiveControl).where(
+                        AccountLiveControl.account_id == scope.account_id
+                    )
+                )
+                stream_rows = list(
+                    await session.scalars(
+                        select(PrivateStreamEvidence).where(
+                            PrivateStreamEvidence.account_id == scope.account_id,
+                            PrivateStreamEvidence.observed_at >= now - timedelta(seconds=45),
+                            PrivateStreamEvidence.state.in_(("snapshot", "live")),
+                        )
+                    )
+                )
+            reconciliation_ready = bool(
+                (risk is not None and risk.reconciliation_state == "READY_CLAIM")
+                or (live_control is not None and live_control.reconciliation_state == "ready")
+            )
+            private_stream_ready = {row.channel for row in stream_rows} == {
+                "orders",
+                "positions",
+                "margins",
+                "v2/user_trades",
+            }
             components = (
                 ComponentHealth(
                     component="database", state="ready", reason="reachable", observed_at=now
@@ -281,14 +306,16 @@ class DatabaseControlPlane:
                 ),
                 ComponentHealth(
                     component="private_stream",
-                    state="disabled",
-                    reason="no_durable_stream_evidence",
+                    state="ready" if private_stream_ready else "degraded",
+                    reason="fresh_channel_evidence"
+                    if private_stream_ready
+                    else "stream_evidence_stale",
                     observed_at=now,
                 ),
             )
             return HealthSnapshot(
                 live=True,
-                ready=False,
+                ready=reconciliation_ready and private_stream_ready,
                 sequence=0 if risk is None else risk.version,
                 observed_at=now,
                 components=components,

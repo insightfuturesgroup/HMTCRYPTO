@@ -268,6 +268,58 @@ class ApplicationSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class ProtectionGroup(Base):
+    """One fill-bound three-leg reduce-only OCO protection group."""
+
+    __tablename__ = "protection_groups"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending_fill','armed','claiming','completed','cancelled','failed')",
+            name="status_allowed",
+        ),
+        CheckConstraint("protected_contracts > 0", name="contracts_positive"),
+        CheckConstraint("average_fill_price > 0", name="fill_price_positive"),
+        CheckConstraint("version >= 1", name="version_positive"),
+        UniqueConstraint("entry_intent_id", name="uq_protection_group_entry_intent"),
+        Index("ix_protection_group_account_status", "account_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    entry_intent_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.live_order_intents.id", ondelete="RESTRICT"), nullable=False
+    )
+    product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    exit_side: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
+    protected_contracts: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    average_fill_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    strategy_version: Mapped[int | None] = mapped_column(StrictBigInteger())
+    protection_version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    catalogue_revision: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    reconciliation_snapshot_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("hmt_crypto.private_reconciliation_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    risk_policy_version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    credential_version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    qualification_evidence_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("hmt_crypto.live_qualification_evidence.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    claimed_leg_id: Mapped[UUID | None] = mapped_column(Uuid)
+    status: Mapped[str] = mapped_column(NulFreeString(24), nullable=False)
+    version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
 class GttOrder(Base):
     """Durable application-managed exit trigger; never implies dispatch authority."""
 
@@ -301,6 +353,7 @@ class GttOrder(Base):
         UniqueConstraint("account_id", "idempotency_key", name="uq_gtt_account_idempotency"),
         Index("ix_gtt_account_status", "account_id", "status"),
         Index("ix_gtt_product_status", "product_id", "status"),
+        Index("ix_gtt_protection_group_status", "protection_group_id", "status"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -309,6 +362,9 @@ class GttOrder(Base):
     )
     created_by_user_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    protection_group_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.protection_groups.id", ondelete="RESTRICT")
     )
     product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
@@ -342,6 +398,9 @@ class TradingViewStrategy(Base):
         CheckConstraint("contracts > 0", name="contracts_positive"),
         CheckConstraint("order_type IN ('market','limit')", name="order_type_allowed"),
         CheckConstraint("version >= 1", name="version_positive"),
+        CheckConstraint("stop_loss_pct > 0", name="stop_loss_pct_positive"),
+        CheckConstraint("target_pct > 0", name="target_pct_positive"),
+        CheckConstraint("trailing_offset_pct > 0", name="trailing_offset_pct_positive"),
         UniqueConstraint("account_id", "name", name="uq_tv_strategies_account_name"),
         Index("ix_tv_strategies_account_enabled", "account_id", "enabled"),
     )
@@ -359,6 +418,14 @@ class TradingViewStrategy(Base):
     contracts: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     order_type: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
     reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    stop_loss_pct: Mapped[Decimal] = mapped_column(
+        Numeric(9, 6), nullable=False, default=Decimal("2")
+    )
+    target_pct: Mapped[Decimal] = mapped_column(Numeric(9, 6), nullable=False, default=Decimal("4"))
+    trailing_offset_pct: Mapped[Decimal] = mapped_column(
+        Numeric(9, 6), nullable=False, default=Decimal("1")
+    )
+    protection_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
@@ -556,6 +623,9 @@ class AccountRiskPolicy(Base):
         CheckConstraint("max_position_notional > 0", name="max_position_notional_pos"),
         CheckConstraint("max_daily_loss > 0", name="max_daily_loss_pos"),
         CheckConstraint("max_open_orders >= 1", name="max_open_orders_pos"),
+        CheckConstraint("max_inflight_signals >= 1", name="max_inflight_signals_pos"),
+        CheckConstraint("usd_inr_rate > 0", name="usd_inr_rate_pos"),
+        CheckConstraint("limit_currency = 'INR'", name="limit_currency_inr"),
         CheckConstraint("version >= 1", name="version_pos"),
         UniqueConstraint("account_id", name="uq_account_risk_policies_account"),
         Index("ix_account_risk_policies_updated_by", "updated_by_user_id"),
@@ -569,6 +639,20 @@ class AccountRiskPolicy(Base):
     max_position_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     max_daily_loss: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     max_open_orders: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    max_inflight_signals: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False, default=5)
+    limit_currency: Mapped[str] = mapped_column(NulFreeString(8), nullable=False, default="INR")
+    usd_inr_rate: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), nullable=False, default=Decimal("100")
+    )
+    max_order_limit_inr: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18), nullable=False, default=Decimal("5000")
+    )
+    max_position_limit_inr: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18), nullable=False, default=Decimal("10000")
+    )
+    max_daily_loss_limit_inr: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18), nullable=False, default=Decimal("2000")
+    )
     allowed_product_ids: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_by_user_id: Mapped[UUID] = mapped_column(
@@ -579,6 +663,69 @@ class AccountRiskPolicy(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
     __mapper_args__ = {"version_id_col": version}
+
+
+class PrivateStreamEvidence(Base):
+    """Durable, secret-free evidence for one authenticated private channel."""
+
+    __tablename__ = "private_stream_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "channel IN ('orders','positions','margins','v2/user_trades')", name="channel_allowed"
+        ),
+        CheckConstraint(
+            "state IN ('connected','snapshot','live','gap','disconnected')", name="state_allowed"
+        ),
+        Index("ix_private_stream_account_observed", "account_id", "observed_at"),
+        Index(
+            "ix_private_stream_account_channel_observed",
+            "account_id",
+            "channel",
+            "observed_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    channel: Mapped[str] = mapped_column(NulFreeString(32), nullable=False)
+    state: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    sequence_number: Mapped[int | None] = mapped_column(StrictBigInteger())
+    credential_version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    worker_owner_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    worker_generation: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class LiveQualificationEvidence(Base):
+    """Immutable approval evidence; digest activation is a separate operator action."""
+
+    __tablename__ = "live_qualification_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('collecting','qualified','rejected','revoked')", name="status_allowed"
+        ),
+        UniqueConstraint("evidence_sha256", name="uq_live_qualification_digest"),
+        Index("ix_live_qualification_account_status", "account_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    release_commit: Mapped[str] = mapped_column(NulFreeString(40), nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    evidence_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    window_started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    window_completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    approved_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT")
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
 class PlatformLiveControl(Base):

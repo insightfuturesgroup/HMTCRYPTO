@@ -32,7 +32,9 @@ from hmt_crypto.persistence.models import (
     CatalogueProduct,
     CatalogueSnapshot,
     CredentialSecretReference,
+    LiveQualificationEvidence,
     PrivateReconciliationSnapshot,
+    PrivateStreamEvidence,
     PrivateWorkerLease,
 )
 from hmt_crypto.worker.gtt_runner import evaluate_one_gtt
@@ -47,6 +49,8 @@ from hmt_crypto.worker.live_order_actions import (
     execute_one_live_order_action,
 )
 from hmt_crypto.worker.live_recovery import LiveRecoveryResult, recover_one_live_submission
+from hmt_crypto.worker.private_stream import run_private_stream
+from hmt_crypto.worker.protection_sync import sync_one_protection_group
 from hmt_crypto.worker.tradingview_runner import admit_one_tradingview_signal
 
 
@@ -309,6 +313,8 @@ async def _execute_qualified_live_submission(
     """Bind one secret version and one lease owner to the one-shot adapter."""
     if not execution.enabled:
         return LiveExecutionResult("DISABLED", None)
+    if not await _dispatch_qualification_is_current(database, claim, execution):
+        return LiveExecutionResult("QUALIFICATION_MISSING", None)
     signer = DeltaSigner(
         api_key=SecretStr(api_key),
         api_secret=SecretStr(api_secret),
@@ -327,6 +333,48 @@ async def _execute_qualified_live_submission(
         )
     finally:
         await adapter.aclose()
+
+
+async def _dispatch_qualification_is_current(
+    database: Database,
+    claim: _Claim,
+    execution: LiveExecutionSettings,
+) -> bool:
+    digest = execution.qualification_sha256
+    if digest is None:
+        return False
+    now = datetime.now(UTC)
+    async with database.transaction() as session:
+        evidence = await session.scalar(
+            select(LiveQualificationEvidence).where(
+                LiveQualificationEvidence.account_id == claim.account_id,
+                LiveQualificationEvidence.evidence_sha256 == digest,
+                LiveQualificationEvidence.status == "qualified",
+            )
+        )
+        streams = list(
+            await session.scalars(
+                select(PrivateStreamEvidence).where(
+                    PrivateStreamEvidence.account_id == claim.account_id,
+                    PrivateStreamEvidence.credential_version == claim.credential_version,
+                    PrivateStreamEvidence.worker_generation == claim.generation,
+                    PrivateStreamEvidence.observed_at >= now - timedelta(seconds=45),
+                    PrivateStreamEvidence.state.in_(("snapshot", "live")),
+                )
+            )
+        )
+    if (
+        evidence is None
+        or evidence.window_completed_at is None
+        or evidence.window_completed_at - evidence.window_started_at < timedelta(hours=24)
+    ):
+        return False
+    return {row.channel for row in streams} == {
+        "orders",
+        "positions",
+        "margins",
+        "v2/user_trades",
+    }
 
 
 async def _execute_qualified_live_action(
@@ -402,6 +450,7 @@ async def run_private_worker(
     secrets = AwsDeltaSecretStore(region=process.aws_region, prefix=process.secret_prefix)
     execution = LiveExecutionSettings()
     logger = get_logger("worker.private")
+    stream_tasks: dict[UUID, tuple[int, int, asyncio.Task[None]]] = {}
     logger.info("private_worker_started", owner_id=str(process.owner_id))
     try:
         while not stop.is_set():
@@ -431,6 +480,34 @@ async def run_private_worker(
                                 allowed_product_ids=claim.product_ids,
                             )
                             if await _publish(database, process, claim, evidence):
+                                stream = stream_tasks.get(account_id)
+                                identity = (claim.credential_version, claim.generation)
+                                if stream is None or stream[:2] != identity or stream[2].done():
+                                    if stream is not None:
+                                        stream[2].cancel()
+                                    task = asyncio.create_task(
+                                        run_private_stream(
+                                            database,
+                                            account_id=claim.account_id,
+                                            owner_id=process.owner_id,
+                                            generation=claim.generation,
+                                            credential_version=claim.credential_version,
+                                            api_key=api_key,
+                                            api_secret=api_secret,
+                                            stop=stop,
+                                        )
+                                    )
+                                    stream_tasks[account_id] = (*identity, task)
+                                protection_created = await sync_one_protection_group(
+                                    database,
+                                    account_id=claim.account_id,
+                                    owner_id=process.owner_id,
+                                )
+                                if protection_created:
+                                    logger.info(
+                                        "protection_group_armed",
+                                        account_id=str(account_id),
+                                    )
                                 logger.info(
                                     "private_reconciliation_published",
                                     account_id=str(account_id),
@@ -554,6 +631,12 @@ async def run_private_worker(
             except TimeoutError:
                 pass
     finally:
+        for _, _, task in stream_tasks.values():
+            task.cancel()
+        await asyncio.gather(
+            *(task for _, _, task in stream_tasks.values()),
+            return_exceptions=True,
+        )
         await database.aclose()
         logger.info("private_worker_stopped")
 

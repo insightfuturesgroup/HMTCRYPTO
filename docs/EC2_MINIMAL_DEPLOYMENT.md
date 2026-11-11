@@ -157,3 +157,25 @@ certificate expiry, worker leadership, reconciliation age, public/private stream
 uncertain operations, risk halt, and alert-delivery failure. Keep both database-backed global and
 per-account entry gates disabled through deployment and read-only qualification. Environment flags
 alone are not an activation control.
+
+## Evidence-derived Live qualification
+
+Phase 22 stores private-stream observations as append-only evidence. Do not qualify from a health
+snapshot or elapsed wall time. After at least 24 continuous hours, record the reviewed failure-drill
+bundle digest and run the qualification command from the reviewed API image:
+
+```bash
+sudo docker compose -f docker-compose.ec2.yml run --rm --no-deps api \
+  hmt-crypto platform qualify-live \
+  --profile hitashi \
+  --release-commit <reviewed-full-git-sha> \
+  --approver-email <active-admin-email> \
+  --failure-drills-sha256 <approved-64-character-sha256>
+```
+
+The command fails closed unless all four private channels and complete REST reconciliations are
+continuous for the window, the current lease/credential generation is unchanged, the exact INR risk
+policy and BTCUSD/ETHUSD scope are active, and global/account gates remain closed. It prints the
+derived qualification SHA-256 but no credential or secret. Store that digest in the protected worker
+environment only during the separately approved activation window. Stage the qualified account gate
+first and enable the global entry gate last; order admission continues to require both.
