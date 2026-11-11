@@ -102,7 +102,8 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
         ("phase12_live_order_admission_v1", "phase11_live_risk_controls_v1"),
         ("phase11_live_risk_controls_v1", "phase10_private_worker_lease_v1"),
         ("phase10_private_worker_lease_v1", "phase9_private_state_projection_v1"),
-        ("phase9_private_state_projection_v1", "phase8_private_reconciliation_v1"),
+        ("phase9_private_state_projection_v1", "phase8_version_width_v1"),
+        ("phase8_version_width_v1", "phase8_private_reconciliation_v1"),
         ("phase8_private_reconciliation_v1", "phase7_live_control_v1"),
         ("phase7_live_control_v1", "phase6_multi_user_platform_v1"),
         ("phase6_multi_user_platform_v1", "phase5_runtime_grants_v1"),
@@ -113,6 +114,8 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
         ("phase2_baseline_v1", None),
     ]
     assert script.get_current_head() == "phase19_notifications_v1"
+    assert len("phase8_version_width_v1") <= 32
+    assert max(len(revision.revision) for revision in revisions) <= 128
 
 
 def test_runtime_grants_are_data_only_and_reversible() -> None:
@@ -587,6 +590,10 @@ def test_offline_upgrade_renders_without_importing_models_or_leaking_dsn(
     assert "CREATE TABLE hmt_crypto.platform_sessions" in rendered
     assert "CREATE TABLE hmt_crypto.market_candles" in rendered
     assert "CREATE TABLE hmt_crypto.platform_notifications" in rendered
+    assert (
+        "ALTER TABLE public.hmt_crypto_alembic_version ALTER COLUMN version_num "
+        "TYPE VARCHAR(128)" in rendered
+    )
     assert "CREATE TABLE hmt_crypto.tradingview_signals" in rendered
     assert "CONSTRAINT ck_kill_workflows_identity_matches_command" in rendered
     assert "ON hmt_crypto.kill_workflow_events" in rendered

@@ -1,7 +1,7 @@
 """Add bounded sanitized private account-state projections.
 
 Revision ID: phase9_private_state_projection_v1
-Revises: phase8_private_reconciliation_v1
+Revises: phase8_version_width_v1
 """
 
 from collections.abc import Sequence
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "phase9_private_state_projection_v1"
-down_revision: str | Sequence[str] | None = "phase8_private_reconciliation_v1"
+down_revision: str | Sequence[str] | None = "phase8_version_width_v1"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
