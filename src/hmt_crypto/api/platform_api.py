@@ -29,6 +29,11 @@ from hmt_crypto.api.delta_verification import (
     DeltaVerificationUnavailable,
     verify_delta_credentials,
 )
+from hmt_crypto.api.live_order_admission import (
+    LiveOrderAdmissionError,
+    evaluate_order_sizing,
+    position_notional,
+)
 from hmt_crypto.api.platform_auth import (
     AuthenticationRejected,
     AuthenticationUnavailable,
@@ -47,6 +52,8 @@ from hmt_crypto.persistence.models import (
     CredentialSecretReference,
     CredentialVersion,
     GttOrder,
+    LiveOrderIntent,
+    LiveOrderPreview,
     MarketQuote,
     PlatformAuditEvent,
     PlatformLiveControl,
@@ -133,6 +140,20 @@ class LiveGateBody(_Body):
 class GlobalEntryGateBody(_Body):
     entries_enabled: bool
     reason: str = Field(min_length=3, max_length=256)
+
+
+class OrderPreviewBody(_Body):
+    account_id: UUID
+    product_id: int = Field(gt=0)
+    side: Literal["buy", "sell"]
+    contracts: int = Field(gt=0, lt=2**63)
+    order_type: Literal["market", "limit"]
+    limit_price: str | None = Field(default=None, max_length=64)
+    reduce_only: bool
+
+
+class OrderIntentBody(_Body):
+    preview_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -1221,6 +1242,361 @@ def install_platform_routes(
                 request_id=request_id,
             )
             return {"id": str(row.id), "symbol": row.symbol, "productId": row.product_id}
+
+    @app.post("/api/v1/trading/previews")
+    async def create_order_preview(body: OrderPreviewBody, request: Request) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        request_id = UUID(_request_id(request))
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            permission = await account_permission(session, actor, body.account_id)
+            if actor.role == "viewer" or permission == "view":
+                raise HTTPException(status_code=403, detail="trading_permission_required")
+            replay = await session.scalar(
+                select(LiveOrderPreview).where(
+                    LiveOrderPreview.account_id == body.account_id,
+                    LiveOrderPreview.request_id == request_id,
+                )
+            )
+            if replay is not None:
+                try:
+                    requested_limit = (
+                        None if body.limit_price is None else Decimal(body.limit_price)
+                    )
+                except InvalidOperation:
+                    raise HTTPException(status_code=409, detail="idempotency_conflict") from None
+                if (
+                    replay.product_id != body.product_id
+                    or replay.side != body.side
+                    or replay.contracts != body.contracts
+                    or replay.order_type != body.order_type
+                    or replay.reduce_only != body.reduce_only
+                    or replay.limit_price != requested_limit
+                ):
+                    raise HTTPException(status_code=409, detail="idempotency_conflict")
+                return {
+                    "previewId": str(replay.id),
+                    "accountId": str(replay.account_id),
+                    "productId": replay.product_id,
+                    "price": str(replay.price),
+                    "priceBasis": replay.price_basis,
+                    "notional": str(replay.notional),
+                    "expiresAt": _utc(replay.expires_at),
+                    "dispatchable": False,
+                }
+            account = await session.get(Account, body.account_id)
+            control = await session.scalar(
+                select(AccountLiveControl).where(AccountLiveControl.account_id == body.account_id)
+            )
+            risk = await session.scalar(
+                select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == body.account_id)
+            )
+            global_control = await session.get(PlatformLiveControl, "global")
+            lease = await session.scalar(
+                select(PrivateWorkerLease).where(PrivateWorkerLease.account_id == body.account_id)
+            )
+            reconciliation = await session.scalar(
+                select(PrivateReconciliationSnapshot)
+                .where(PrivateReconciliationSnapshot.account_id == body.account_id)
+                .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+                .limit(1)
+            )
+            catalogue = await session.scalar(
+                select(CatalogueSnapshot)
+                .where(
+                    CatalogueSnapshot.region == "india",
+                    CatalogueSnapshot.environment == "prod",
+                    CatalogueSnapshot.fresh_until > now,
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            product_row = (
+                None
+                if catalogue is None
+                else await session.scalar(
+                    select(CatalogueProduct).where(
+                        CatalogueProduct.snapshot_id == catalogue.id,
+                        CatalogueProduct.product_id == body.product_id,
+                    )
+                )
+            )
+            quote = await session.scalar(
+                select(MarketQuote).where(
+                    MarketQuote.region == "india",
+                    MarketQuote.environment == "prod",
+                    MarketQuote.product_id == body.product_id,
+                    MarketQuote.observed_at >= now - timedelta(seconds=15),
+                )
+            )
+            allowed = set() if risk is None else set(json.loads(risk.allowed_product_ids))
+            gate_open = bool(
+                control and (control.exits_enabled if body.reduce_only else control.entries_enabled)
+            )
+            ready = (
+                account is not None
+                and account.mode == "LIVE"
+                and account.environment == "prod"
+                and account.identity_verified_at is not None
+                and control is not None
+                and control.credential_state == "verified"
+                and control.reconciliation_state == "ready"
+                and control.reconciled_at is not None
+                and control.reconciled_at >= now - timedelta(seconds=60)
+                and gate_open
+                and risk is not None
+                and risk.enabled
+                and body.product_id in allowed
+                and lease is not None
+                and lease.lease_until > now
+                and reconciliation is not None
+                and reconciliation.outcome == "ready"
+                and reconciliation.observed_at >= now - timedelta(seconds=60)
+                and reconciliation.worker_owner_id == lease.owner_id
+                and reconciliation.worker_generation == lease.generation
+                and reconciliation.credential_version == lease.credential_version
+                and catalogue is not None
+                and product_row is not None
+                and quote is not None
+                and (body.reduce_only or bool(global_control and global_control.entries_enabled))
+            )
+            if not ready:
+                raise HTTPException(status_code=409, detail="order_preview_prerequisites_failed")
+            assert risk is not None
+            assert reconciliation is not None
+            assert catalogue is not None
+            assert product_row is not None
+            assert quote is not None
+            try:
+                positions = json.loads(reconciliation.positions_payload or "")
+                open_orders = json.loads(reconciliation.open_orders_payload or "")
+                wallet = json.loads(reconciliation.wallet_transactions_payload or "")
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=409, detail="account_state_not_ready") from None
+            if (
+                not isinstance(positions, list)
+                or not isinstance(open_orders, list)
+                or not isinstance(wallet, list)
+            ):
+                raise HTTPException(status_code=409, detail="account_state_not_ready")
+            if len(open_orders) >= risk.max_open_orders and not body.reduce_only:
+                raise HTTPException(status_code=409, detail="open_order_limit_reached")
+            product = product_row.to_product()
+            market_price = quote.best_ask if body.side == "buy" else quote.best_bid
+            try:
+                sizing = evaluate_order_sizing(
+                    product=product,
+                    contracts=body.contracts,
+                    order_type=body.order_type,
+                    limit_price=body.limit_price,
+                    market_price=market_price,
+                    reduce_only=body.reduce_only,
+                    max_order_notional=risk.max_order_notional,
+                )
+            except LiveOrderAdmissionError:
+                raise HTTPException(status_code=400, detail="invalid_order_sizing") from None
+            signed_position = 0
+            for item in positions:
+                if isinstance(item, dict) and item.get("product_id") == body.product_id:
+                    value = item.get("size")
+                    if type(value) is not int:
+                        raise HTTPException(status_code=409, detail="account_state_not_ready")
+                    signed_position = value
+            direction = 1 if body.side == "buy" else -1
+            if body.reduce_only and (
+                signed_position == 0
+                or signed_position * direction >= 0
+                or body.contracts > abs(signed_position)
+            ):
+                raise HTTPException(status_code=409, detail="reduce_only_violation")
+            projected_contracts = signed_position + direction * body.contracts
+            projected_notional = (
+                Decimal(0)
+                if projected_contracts == 0
+                else position_notional(
+                    product=product, contracts=abs(projected_contracts), price=sizing.price
+                )
+            )
+            if projected_notional > risk.max_position_notional:
+                raise HTTPException(status_code=409, detail="position_limit_exceeded")
+            daily_net = Decimal(0)
+            for item in wallet:
+                if not isinstance(item, dict):
+                    raise HTTPException(status_code=409, detail="account_state_not_ready")
+                created_at, kind, amount = (
+                    item.get("created_at"),
+                    item.get("transaction_type"),
+                    item.get("amount"),
+                )
+                if (
+                    type(created_at) is str
+                    and created_at[:10] == now.date().isoformat()
+                    and kind
+                    in {"cashflow", "commission", "funding", "liquidation_fee", "settlement"}
+                ):
+                    try:
+                        daily_net += Decimal(str(amount))
+                    except InvalidOperation:
+                        raise HTTPException(
+                            status_code=409, detail="account_state_not_ready"
+                        ) from None
+            if max(Decimal(0), -daily_net) >= risk.max_daily_loss and not body.reduce_only:
+                raise HTTPException(status_code=409, detail="daily_loss_limit_reached")
+            evidence_values = {
+                "accountId": str(body.account_id),
+                "catalogue": str(catalogue.id),
+                "contracts": body.contracts,
+                "notional": str(sizing.notional),
+                "price": str(sizing.price),
+                "productId": body.product_id,
+                "reconciliation": str(reconciliation.id),
+                "reduceOnly": body.reduce_only,
+                "riskVersion": risk.version,
+                "side": body.side,
+            }
+            digest = hashlib.sha256(
+                json.dumps(
+                    evidence_values, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+                ).encode("ascii")
+            ).hexdigest()
+            preview = LiveOrderPreview(
+                id=uuid4(),
+                account_id=body.account_id,
+                created_by_user_id=actor.profile_id,
+                request_id=request_id,
+                product_id=body.product_id,
+                side=body.side,
+                contracts=body.contracts,
+                order_type=body.order_type,
+                limit_price=None if body.limit_price is None else sizing.price,
+                reduce_only=body.reduce_only,
+                price_basis=sizing.price_basis,
+                price=sizing.price,
+                notional=sizing.notional,
+                catalogue_snapshot_id=catalogue.id,
+                reconciliation_snapshot_id=reconciliation.id,
+                risk_policy_version=risk.version,
+                evidence_sha256=digest,
+                created_at=now,
+                expires_at=now + timedelta(seconds=15),
+            )
+            session.add(preview)
+            await append_audit(
+                session,
+                actor=actor,
+                action="LIVE_ORDER_PREVIEWED",
+                target_type="account",
+                target_id=str(body.account_id),
+                outcome="SUCCEEDED",
+                request_id=str(request_id),
+                details={"productId": body.product_id, "reduceOnly": body.reduce_only},
+            )
+            return {
+                "previewId": str(preview.id),
+                "accountId": str(body.account_id),
+                "productId": body.product_id,
+                "price": str(sizing.price),
+                "priceBasis": sizing.price_basis,
+                "notional": str(sizing.notional),
+                "expiresAt": _utc(preview.expires_at),
+                "dispatchable": False,
+            }
+
+    @app.post("/api/v1/trading/intents")
+    async def admit_order_intent(body: OrderIntentBody, request: Request) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        request_id = UUID(_request_id(request))
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            preview = await session.get(LiveOrderPreview, body.preview_id, with_for_update=True)
+            if preview is None or preview.created_by_user_id != actor.profile_id:
+                raise HTTPException(status_code=404, detail="preview_not_found")
+            permission = await account_permission(session, actor, preview.account_id)
+            if actor.role == "viewer" or permission == "view":
+                raise HTTPException(status_code=403, detail="trading_permission_required")
+            replay = await session.scalar(
+                select(LiveOrderIntent).where(
+                    LiveOrderIntent.account_id == preview.account_id,
+                    LiveOrderIntent.idempotency_key == request_id,
+                )
+            )
+            if replay is not None:
+                if replay.preview_id != preview.id:
+                    raise HTTPException(status_code=409, detail="idempotency_conflict")
+                return {"intentId": str(replay.id), "status": replay.status, "dispatchable": False}
+            used = await session.scalar(
+                select(LiveOrderIntent.id).where(LiveOrderIntent.preview_id == preview.id)
+            )
+            control = await session.scalar(
+                select(AccountLiveControl).where(
+                    AccountLiveControl.account_id == preview.account_id
+                )
+            )
+            risk = await session.scalar(
+                select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == preview.account_id)
+            )
+            lease = await session.scalar(
+                select(PrivateWorkerLease).where(
+                    PrivateWorkerLease.account_id == preview.account_id
+                )
+            )
+            reconciliation = await session.get(
+                PrivateReconciliationSnapshot, preview.reconciliation_snapshot_id
+            )
+            global_control = await session.get(PlatformLiveControl, "global")
+            if (
+                used is not None
+                or preview.expires_at <= now
+                or control is None
+                or risk is None
+                or not risk.enabled
+                or risk.version != preview.risk_policy_version
+                or control.reconciliation_state != "ready"
+                or control.reconciled_at is None
+                or control.reconciled_at < now - timedelta(seconds=60)
+                or lease is None
+                or lease.lease_until <= now
+                or reconciliation is None
+                or reconciliation.outcome != "ready"
+                or reconciliation.observed_at < now - timedelta(seconds=60)
+                or reconciliation.worker_owner_id != lease.owner_id
+                or reconciliation.worker_generation != lease.generation
+                or reconciliation.credential_version != lease.credential_version
+                or (preview.reduce_only and not control.exits_enabled)
+                or (not preview.reduce_only and not control.entries_enabled)
+                or (
+                    not preview.reduce_only
+                    and (global_control is None or not global_control.entries_enabled)
+                )
+            ):
+                raise HTTPException(status_code=409, detail="preview_expired_or_invalidated")
+            intent_id = uuid4()
+            digest = hashlib.sha256(
+                f"{intent_id}:{preview.id}:{preview.evidence_sha256}".encode("ascii")
+            ).hexdigest()
+            session.add(
+                LiveOrderIntent(
+                    id=intent_id,
+                    account_id=preview.account_id,
+                    preview_id=preview.id,
+                    created_by_user_id=actor.profile_id,
+                    idempotency_key=request_id,
+                    status="ADMITTED",
+                    intent_sha256=digest,
+                    created_at=now,
+                )
+            )
+            await append_audit(
+                session,
+                actor=actor,
+                action="LIVE_ORDER_INTENT_ADMITTED",
+                target_type="intent",
+                target_id=str(intent_id),
+                outcome="SUCCEEDED",
+                request_id=str(request_id),
+                details={"previewId": str(preview.id)},
+            )
+            return {"intentId": str(intent_id), "status": "ADMITTED", "dispatchable": False}
 
     @app.get("/api/v1/risk/{account_id}")
     async def get_risk_policy(account_id: UUID, request: Request) -> dict[str, object]:

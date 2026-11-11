@@ -408,11 +408,87 @@ class PlatformLiveControl(Base):
     __mapper_args__ = {"version_id_col": version}
 
 
+class LiveOrderPreview(Base):
+    """Short-lived, non-dispatchable Live validation evidence."""
+
+    __tablename__ = "live_order_previews"
+    __table_args__ = (
+        CheckConstraint("side IN ('buy','sell')", name="side_allowed"),
+        CheckConstraint("order_type IN ('market','limit')", name="order_type_allowed"),
+        CheckConstraint("contracts >= 1", name="contracts_pos"),
+        CheckConstraint("notional > 0", name="notional_pos"),
+        CheckConstraint("expires_at > created_at", name="expiry_order"),
+        UniqueConstraint("account_id", "request_id", name="uq_live_order_previews_request"),
+        Index("ix_live_order_previews_account_expiry", "account_id", "expires_at"),
+        Index("ix_live_order_previews_created_by", "created_by_user_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    request_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    side: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
+    contracts: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    order_type: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
+    limit_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    price_basis: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    notional: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    catalogue_snapshot_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.catalogue_snapshots.id", ondelete="RESTRICT"), nullable=False
+    )
+    reconciliation_snapshot_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("hmt_crypto.private_reconciliation_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    risk_policy_version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class LiveOrderIntent(Base):
+    """Durable admitted intent with no exchange-dispatch capability."""
+
+    __tablename__ = "live_order_intents"
+    __table_args__ = (
+        CheckConstraint("status = 'ADMITTED'", name="admitted_only"),
+        UniqueConstraint("preview_id", name="uq_live_order_intents_preview"),
+        UniqueConstraint("account_id", "idempotency_key", name="uq_live_order_intents_request"),
+        Index("ix_live_order_intents_account_created", "account_id", "created_at"),
+        Index("ix_live_order_intents_created_by", "created_by_user_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    preview_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.live_order_previews.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    idempotency_key: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    intent_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 __all__ = [
     "AccountAssignment",
     "AccountRiskPolicy",
     "ApplicationSetting",
     "GttOrder",
+    "LiveOrderIntent",
+    "LiveOrderPreview",
     "AccountLiveControl",
     "CredentialSecretReference",
     "MarketQuote",

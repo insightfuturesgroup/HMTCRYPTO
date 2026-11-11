@@ -31,6 +31,8 @@ from hmt_crypto.persistence.platform_models import (
     ApplicationSetting,
     CredentialSecretReference,
     GttOrder,
+    LiveOrderIntent,
+    LiveOrderPreview,
     MarketQuote,
     PlatformAuditEvent,
     PlatformLiveControl,
@@ -119,5 +121,7 @@ __all__ = [
     "PrivateWorkerLease",
     "ApplicationSetting",
     "GttOrder",
+    "LiveOrderIntent",
+    "LiveOrderPreview",
     "metadata",
 ]
