@@ -27,6 +27,7 @@ BASELINE = VERSIONS / "phase2_baseline_v1.py"
 HARDENING = VERSIONS / "phase2_hardening_v1.py"
 CONTROL = VERSIONS / "phase5_control_v1.py"
 RECONCILIATION_CHECKPOINT = VERSIONS / "phase5_reconcile_checkpoint_v1.py"
+RUNTIME_GRANTS = VERSIONS / "phase5_runtime_grants_v1_grant_least_privilege_runtime_access.py"
 MANIFEST = MIGRATIONS / "schema_manifest.json"
 EXPECTED_TABLES = {
     "accounts",
@@ -87,12 +88,34 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions(base="base", head="heads"))
     assert [(revision.revision, revision.down_revision) for revision in revisions] == [
+        ("phase5_runtime_grants_v1", "phase5_reconcile_checkpoint_v1"),
         ("phase5_reconcile_checkpoint_v1", "phase5_control_v1"),
         ("phase5_control_v1", "phase2_hardening_v1"),
         ("phase2_hardening_v1", "phase2_baseline_v1"),
         ("phase2_baseline_v1", None),
     ]
-    assert script.get_current_head() == "phase5_reconcile_checkpoint_v1"
+    assert script.get_current_head() == "phase5_runtime_grants_v1"
+
+
+def test_runtime_grants_are_data_only_and_reversible() -> None:
+    migration = _load(RUNTIME_GRANTS, "least_privilege_runtime_grants")
+    upgrade: list[str] = []
+    migration._execute = upgrade.append
+    migration.upgrade()
+
+    rendered = "\n".join(upgrade).upper()
+    assert "GRANT SELECT, INSERT, UPDATE ON ALL TABLES" in rendered
+    assert "GRANT ALL" not in rendered
+    assert "GRANT DELETE" not in rendered
+    assert "GRANT EXECUTE" not in rendered
+    assert "REVOKE DELETE ON ALL TABLES" in rendered
+    assert "REVOKE ALL ON ALL FUNCTIONS" in rendered
+    assert "REVOKE CREATE ON SCHEMA" in rendered
+
+    downgrade: list[str] = []
+    migration._execute = downgrade.append
+    migration.downgrade()
+    assert "REVOKE SELECT, INSERT, UPDATE ON ALL TABLES" in "\n".join(downgrade).upper()
 
 
 def test_built_wheel_contains_the_operator_migration_history(tmp_path: Path) -> None:

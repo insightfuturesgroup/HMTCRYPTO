@@ -47,6 +47,15 @@ def test_runtime_images_drop_root_before_entrypoint() -> None:
     assert "USER 101:101" in ui_runtime
 
 
+def test_ec2_migration_mounts_the_pinned_supabase_ca() -> None:
+    root = Path(__file__).resolve().parents[2]
+    compose = (root / "docker-compose.ec2.yml").read_text(encoding="utf-8")
+    migration = _example("ec2/migration.env.example")
+
+    assert "/etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro" in compose
+    assert migration["DATABASE_MIGRATION_CA_FILE"] == "/run/secrets/supabase-prod-ca.crt"
+
+
 def test_api_compose_service_receives_no_exchange_credentials() -> None:
     """The browser/control process must not inherit the worker secret environment."""
     root = Path(__file__).resolve().parents[2]
