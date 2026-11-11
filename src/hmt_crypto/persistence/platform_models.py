@@ -71,6 +71,38 @@ class PlatformSession(Base):
     user_agent_sha256: Mapped[str | None] = mapped_column(NulFreeString(64))
 
 
+class PlatformNotification(Base):
+    __tablename__ = "platform_notifications"
+    __table_args__ = (
+        CheckConstraint("severity IN ('critical','warning')", name="severity_allowed"),
+        CheckConstraint("last_observed_at >= first_observed_at", name="observed_order"),
+        UniqueConstraint("finding_key", name="uq_platform_notifications_finding_key"),
+        Index(
+            "ix_platform_notifications_active",
+            "severity",
+            "last_observed_at",
+            postgresql_where=text("resolved_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    finding_key: Mapped[str] = mapped_column(NulFreeString(256), nullable=False)
+    account_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT")
+    )
+    account_name: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    severity: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    code: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    message: Mapped[str] = mapped_column(NulFreeString(512), nullable=False)
+    first_observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    acknowledged_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    acknowledged_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT")
+    )
+
+
 class AccountAssignment(Base):
     __tablename__ = "account_assignments"
     __table_args__ = (

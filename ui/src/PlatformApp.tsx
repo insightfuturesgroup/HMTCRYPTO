@@ -223,6 +223,8 @@ interface NotificationRow {
   code: string;
   message: string;
   observedAt: string;
+  firstObservedAt: string;
+  acknowledgedAt: string | null;
 }
 
 interface GeneralSettings {
@@ -568,9 +570,11 @@ function PerformancePage() {
 function NotificationsPage() {
   const [rows, setRows] = useState<NotificationRow[]>([]);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const [viewer, setViewer] = useState<Session | null>(null);
   const load = useCallback(() => { void request<{ notifications: NotificationRow[]; generatedAt: string }>("/api/v1/notifications").then((value) => { setRows(value.notifications); setGeneratedAt(value.generatedAt); }); }, []);
-  useEffect(load, [load]);
-  return <Panel title="Active operational notifications"><div className="flex items-center gap-3 p-4"><span className="text-sm">Generated {generatedAt ?? "—"}</span><button className="rounded border px-3 py-2" onClick={load} type="button">Refresh</button></div><div className="overflow-x-auto"><table><thead><tr><th>Severity</th><th>Account</th><th>Code</th><th>Message</th><th>Observed</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong className={row.severity === "critical" ? "text-red-700" : "text-amber-700"}>{row.severity}</strong></td><td>{row.accountName}</td><td>{row.code}</td><td>{row.message}</td><td>{row.observedAt}</td></tr>)}{rows.length === 0 ? <tr><td colSpan={5}>No active platform findings.</td></tr> : null}</tbody></table></div></Panel>;
+  useEffect(() => { load(); void request<Session>("/api/v1/auth/session").then(setViewer); }, [load]);
+  async function acknowledge(id: string) { if (!viewer?.csrfToken) return; await request(`/api/v1/notifications/${id}/acknowledge`, { method: "POST" }, viewer.csrfToken); load(); }
+  return <Panel title="Active operational notifications"><div className="flex items-center gap-3 p-4"><span className="text-sm">Generated {generatedAt ?? "—"}</span><button className="rounded border px-3 py-2" onClick={load} type="button">Refresh</button></div><div className="overflow-x-auto"><table><thead><tr><th>Severity</th><th>Account</th><th>Code</th><th>Message</th><th>First seen</th><th>Last seen</th><th>Acknowledgement</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong className={row.severity === "critical" ? "text-red-700" : "text-amber-700"}>{row.severity}</strong></td><td>{row.accountName}</td><td>{row.code}</td><td>{row.message}</td><td>{row.firstObservedAt}</td><td>{row.observedAt}</td><td>{row.acknowledgedAt ?? (viewer?.user?.role === "admin" ? <button className="rounded border px-2 py-1" onClick={() => void acknowledge(row.id)} type="button">Acknowledge</button> : "Pending admin")}</td></tr>)}{rows.length === 0 ? <tr><td colSpan={7}>No active platform findings.</td></tr> : null}</tbody></table></div></Panel>;
 }
 
 function SettingsPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {

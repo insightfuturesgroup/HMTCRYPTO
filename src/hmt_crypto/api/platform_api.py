@@ -63,6 +63,7 @@ from hmt_crypto.persistence.models import (
     MarketQuote,
     PlatformAuditEvent,
     PlatformLiveControl,
+    PlatformNotification,
     PlatformSession,
     PlatformUser,
     PrivateReconciliationSnapshot,
@@ -1496,57 +1497,161 @@ def install_platform_routes(
                     AccountAssignment, AccountAssignment.account_id == Account.id
                 ).where(AccountAssignment.user_id == actor.profile_id)
             rows = (await session.execute(query.order_by(Account.profile_name))).all()
-            notifications: list[dict[str, object]] = []
+            findings: dict[str, tuple[UUID | None, str, str, str, str]] = {}
             for account, control, lease, risk in rows:
-                findings: list[tuple[str, str, str]] = []
+                account_findings: list[tuple[str, str, str]] = []
                 if control is None or control.credential_state != "verified":
-                    findings.append(
+                    account_findings.append(
                         ("critical", "credentials", "Delta credentials are not verified")
                     )
                 if control is None or control.reconciliation_state != "ready":
-                    findings.append(
+                    account_findings.append(
                         ("critical", "reconciliation", "Private reconciliation is not ready")
                     )
                 elif control.reconciled_at is None or control.reconciled_at < now - timedelta(
                     seconds=60
                 ):
-                    findings.append(
+                    account_findings.append(
                         ("critical", "reconciliation_stale", "Private reconciliation is stale")
                     )
                 if lease is None or lease.lease_until <= now:
-                    findings.append(("critical", "worker_lease", "No active private worker lease"))
+                    account_findings.append(
+                        ("critical", "worker_lease", "No active private worker lease")
+                    )
                 if risk is None or not risk.enabled:
-                    findings.append(("warning", "risk_policy", "Live risk policy is not enabled"))
+                    account_findings.append(
+                        ("warning", "risk_policy", "Live risk policy is not enabled")
+                    )
                 if control is not None and control.last_error_code is not None:
-                    findings.append(
+                    account_findings.append(
                         ("critical", control.last_error_code, "Account control reported an error")
                     )
-                for severity, code, message in findings:
-                    notifications.append(
-                        {
-                            "id": f"{account.id}:{code}",
-                            "accountId": str(account.id),
-                            "accountName": account.profile_name,
-                            "severity": severity,
-                            "code": code,
-                            "message": message,
-                            "observedAt": _utc(now),
-                        }
+                for severity, code, message in account_findings:
+                    key = f"{account.id}:{code}"
+                    findings[key] = (
+                        account.id,
+                        account.profile_name,
+                        severity,
+                        code,
+                        message,
                     )
             newest_quote = await session.scalar(select(func.max(MarketQuote.observed_at)))
             if newest_quote is None or newest_quote < now - timedelta(seconds=15):
-                notifications.append(
-                    {
-                        "id": "platform:market_feed_stale",
-                        "accountId": None,
-                        "accountName": "Platform",
-                        "severity": "critical",
-                        "code": "market_feed_stale",
-                        "message": "Delta public market feed is unavailable or stale",
-                        "observedAt": _utc(now),
-                    }
+                findings["platform:market_feed_stale"] = (
+                    None,
+                    "Platform",
+                    "critical",
+                    "market_feed_stale",
+                    "Delta public market feed is unavailable or stale",
                 )
-            return {"notifications": notifications, "generatedAt": _utc(now)}
+            existing = {
+                row.finding_key: row
+                for row in (
+                    await session.scalars(
+                        select(PlatformNotification).where(
+                            PlatformNotification.finding_key.in_(findings)
+                        )
+                    )
+                ).all()
+            }
+            for key, (account_id, account_name, severity, code, message) in findings.items():
+                notification = existing.get(key)
+                if notification is None:
+                    session.add(
+                        PlatformNotification(
+                            id=uuid4(),
+                            finding_key=key,
+                            account_id=account_id,
+                            account_name=account_name,
+                            severity=severity,
+                            code=code,
+                            message=message,
+                            first_observed_at=now,
+                            last_observed_at=now,
+                        )
+                    )
+                else:
+                    notification.account_name = account_name
+                    notification.severity = severity
+                    notification.message = message
+                    notification.last_observed_at = now
+                    if notification.resolved_at is not None:
+                        notification.first_observed_at = now
+                        notification.resolved_at = None
+                        notification.acknowledged_at = None
+                        notification.acknowledged_by_user_id = None
+            if actor.role == "admin":
+                active_rows = (
+                    await session.scalars(
+                        select(PlatformNotification).where(
+                            PlatformNotification.resolved_at.is_(None)
+                        )
+                    )
+                ).all()
+                for notification in active_rows:
+                    if notification.finding_key not in findings:
+                        notification.resolved_at = now
+            await session.flush()
+            visible = select(PlatformNotification).where(PlatformNotification.resolved_at.is_(None))
+            if actor.role != "admin":
+                visible = visible.outerjoin(
+                    AccountAssignment,
+                    AccountAssignment.account_id == PlatformNotification.account_id,
+                ).where(
+                    (PlatformNotification.account_id.is_(None))
+                    | (AccountAssignment.user_id == actor.profile_id)
+                )
+            notifications = (
+                await session.scalars(
+                    visible.order_by(
+                        PlatformNotification.severity,
+                        PlatformNotification.last_observed_at.desc(),
+                    )
+                )
+            ).all()
+            return {
+                "notifications": [
+                    {
+                        "id": str(row.id),
+                        "accountId": str(row.account_id) if row.account_id else None,
+                        "accountName": row.account_name,
+                        "severity": row.severity,
+                        "code": row.code,
+                        "message": row.message,
+                        "observedAt": _utc(row.last_observed_at),
+                        "firstObservedAt": _utc(row.first_observed_at),
+                        "acknowledgedAt": (
+                            _utc(row.acknowledged_at) if row.acknowledged_at else None
+                        ),
+                    }
+                    for row in notifications
+                ],
+                "generatedAt": _utc(now),
+            }
+
+    @app.post("/api/v1/notifications/{notification_id}/acknowledge")
+    async def acknowledge_notification(
+        notification_id: UUID, request: Request
+    ) -> dict[str, object]:
+        require_csrf(request)
+        actor = await admin(request, mutation=True)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            row = await session.get(PlatformNotification, notification_id)
+            if row is None or row.resolved_at is not None:
+                raise HTTPException(status_code=404, detail="notification_not_found")
+            row.acknowledged_at = now
+            row.acknowledged_by_user_id = actor.profile_id
+            await append_audit(
+                session,
+                actor=actor,
+                action="NOTIFICATION_ACKNOWLEDGED",
+                target_type="notification",
+                target_id=str(notification_id),
+                outcome="SUCCEEDED",
+                request_id=_request_id(request),
+            )
+            return {"id": str(row.id), "acknowledgedAt": _utc(now)}
 
     @app.get("/api/v1/settings")
     async def get_general_settings(request: Request) -> dict[str, object]:
