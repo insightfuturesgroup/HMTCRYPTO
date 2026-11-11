@@ -100,6 +100,42 @@ interface HealthAccount {
   lastErrorCode: string | null;
 }
 
+interface AccountState {
+  accountId: string;
+  observedAt: string;
+  ageSeconds: number;
+  fresh: boolean;
+  balances: Record<string, unknown>[];
+  positions: Record<string, unknown>[];
+  openOrders: Record<string, unknown>[];
+  fills: Record<string, unknown>[];
+  walletTransactions: Record<string, unknown>[];
+}
+
+interface OrderPreview {
+  previewId: string;
+  accountId: string;
+  productId: number;
+  price: string;
+  priceBasis: string;
+  notional: string;
+  expiresAt: string;
+}
+
+interface GttRow {
+  id: string;
+  productId: number;
+  symbol: string;
+  side: "buy" | "sell";
+  contracts: number;
+  triggerKind: "stop_loss" | "target" | "trailing_stop";
+  triggerPrice: string | null;
+  trailOffset: string | null;
+  limitPrice: string | null;
+  status: string;
+  updatedAt: string;
+}
+
 async function request<T>(path: string, init?: RequestInit, csrf?: string): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
@@ -180,7 +216,7 @@ function Panel({ title, children }: { readonly title: string; readonly children:
 }
 
 function Deferred({ name }: { readonly name: string }) {
-  return <Panel title={name}><div className="p-6 text-sm text-slate-600"><strong>Live module locked.</strong><p className="mt-2">This module will become available after private-stream reconciliation, live risk controls, and the final entry gate are installed. No PAPER substitute is used.</p></div></Panel>;
+  return <Panel title={name}><div className="p-6 text-sm text-slate-600"><strong>Module under qualification.</strong><p className="mt-2">This function remains unavailable until its authorization, replay protection, and operational evidence are complete.</p></div></Panel>;
 }
 
 function MarketPage() {
@@ -229,6 +265,77 @@ function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csr
   return <><Panel title="Delta accounts">{user.role === "admin" ? <form className="flex gap-2 p-4" onSubmit={(event) => void create(event)}><input className="rounded border px-3 py-2" onChange={(e) => setProfileName(e.target.value)} placeholder="Account profile name" required value={profileName}/><button className="rounded bg-blue-600 px-4 py-2 text-white" type="submit">Add Live account</button></form> : null}{notice ? <p className="px-4 pb-4 text-sm text-slate-700" role="status">{notice}</p> : null}<div className="overflow-x-auto"><table><thead><tr><th>Profile</th><th>Environment</th><th>Access</th><th>Credentials</th><th>Reconciliation</th><th>Live gates</th><th>Actions</th></tr></thead><tbody>{accounts.map((a) => <tr key={a.id}><td>{a.profileName}</td><td>{a.environment}</td><td>{a.permission}</td><td>{a.credentialState}</td><td>{a.reconciliationState}</td><td>Entries {a.entriesEnabled ? "ON" : "OFF"} · Exits {a.exitsEnabled ? "ON" : "OFF"}</td><td>{user.role === "admin" ? <div className="flex gap-2"><button className="text-blue-700" onClick={() => setCredentialAccount(a.id)} type="button">Configure</button><button className="text-blue-700 disabled:text-slate-400" disabled={!a.credentialConfigured} onClick={() => void verify(a.id)} type="button">Verify</button></div> : "—"}</td></tr>)}{accounts.length === 0 ? <tr><td colSpan={7}>No assigned Delta accounts.</td></tr> : null}</tbody></table></div>{credentialAccount !== null ? <form className="grid gap-3 border-t p-4 md:grid-cols-2" onSubmit={(event) => void saveCredentials(event)}><div className="md:col-span-2"><strong>Replace Delta API credentials</strong><p className="text-xs text-slate-500">Use a production India key with the EC2 Elastic IP whitelisted. Values are never returned.</p></div><input autoComplete="off" className="rounded border px-3 py-2" onChange={(e) => setApiKey(e.target.value)} placeholder="API key" required value={apiKey}/><input autoComplete="new-password" className="rounded border px-3 py-2" onChange={(e) => setApiSecret(e.target.value)} placeholder="API secret" required type="password" value={apiSecret}/><div className="flex gap-2 md:col-span-2"><button className="rounded bg-blue-600 px-4 py-2 text-white" type="submit">Store credentials</button><button className="rounded border px-4 py-2" onClick={() => { setCredentialAccount(null); setApiKey(""); setApiSecret(""); }} type="button">Cancel</button></div></form> : null}</Panel></>;
 }
 
+function TradingPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [accountId, setAccountId] = useState("");
+  const [productId, setProductId] = useState("");
+  const [side, setSide] = useState<"buy" | "sell">("buy");
+  const [contracts, setContracts] = useState("1");
+  const [orderType, setOrderType] = useState<"market" | "limit">("market");
+  const [limitPrice, setLimitPrice] = useState("");
+  const [reduceOnly, setReduceOnly] = useState(false);
+  const [preview, setPreview] = useState<OrderPreview | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    void Promise.all([
+      request<{ accounts: Account[] }>("/api/v1/accounts"),
+      request<{ products: Product[] }>("/api/v1/market/products"),
+    ]).then(([a, p]) => {
+      setAccounts(a.accounts);
+      setAccountId(a.accounts[0]?.id ?? "");
+      setProducts(p.products);
+      setProductId(String(p.products[0]?.productId ?? ""));
+    });
+  }, []);
+  async function createPreview(event: FormEvent) {
+    event.preventDefault(); setNotice(null); setPreview(null);
+    try {
+      const value = await request<OrderPreview>("/api/v1/trading/previews", {
+        method: "POST",
+        body: JSON.stringify({ account_id: accountId, product_id: Number(productId), side, contracts: Number(contracts), order_type: orderType, limit_price: orderType === "limit" ? limitPrice : null, reduce_only: reduceOnly }),
+      }, csrf);
+      setPreview(value);
+    } catch { setNotice("Preview rejected. Check account readiness, quote freshness, position and risk limits."); }
+  }
+  async function submitIntent() {
+    if (preview === null) return;
+    try {
+      const value = await request<{ intentId: string; status: string }>("/api/v1/trading/intents", { method: "POST", body: JSON.stringify({ preview_id: preview.previewId }) }, csrf);
+      setNotice(`Live intent ${value.intentId} admitted. The fenced worker will process it.`); setPreview(null);
+    } catch { setNotice("Preview expired or was invalidated. Create a fresh preview."); setPreview(null); }
+  }
+  const selected = accounts.find((account) => account.id === accountId);
+  const canTrade = user.role !== "viewer" && selected?.permission !== "view";
+  return <><Panel title="Manual Live trading"><form className="grid gap-3 p-4 md:grid-cols-2" onSubmit={(event) => void createPreview(event)}><select className="rounded border px-3 py-2" onChange={(event) => setAccountId(event.target.value)} required value={accountId}><option value="">Select account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><select className="rounded border px-3 py-2" onChange={(event) => setProductId(event.target.value)} required value={productId}><option value="">Select contract</option>{products.map((product) => <option key={product.productId} value={product.productId}>{product.symbol} · {product.productId}</option>)}</select><select className="rounded border px-3 py-2" onChange={(event) => setSide(event.target.value as "buy" | "sell")} value={side}><option value="buy">Buy</option><option value="sell">Sell</option></select><input className="rounded border px-3 py-2" min="1" onChange={(event) => setContracts(event.target.value)} required type="number" value={contracts}/><select className="rounded border px-3 py-2" onChange={(event) => setOrderType(event.target.value as "market" | "limit")} value={orderType}><option value="market">Market</option><option value="limit">Limit</option></select>{orderType === "limit" ? <input className="rounded border px-3 py-2" onChange={(event) => setLimitPrice(event.target.value)} placeholder="Limit price" required value={limitPrice}/> : <div className="rounded bg-slate-50 px-3 py-2 text-sm">Uses the fresh executable quote.</div>}<label className="flex items-center gap-2"><input checked={reduceOnly} onChange={(event) => setReduceOnly(event.target.checked)} type="checkbox"/>Reduce-only exit</label><button className="rounded bg-blue-600 px-4 py-2 text-white disabled:bg-slate-400" disabled={!canTrade || !accountId || !productId} type="submit">Create 15-second preview</button>{notice ? <p className="md:col-span-2" role="status">{notice}</p> : null}</form></Panel>{preview ? <Panel title="Confirm exact Live intent"><div className="grid gap-3 p-4 md:grid-cols-4"><div><small>Product</small><strong className="block">{preview.productId}</strong></div><div><small>Validated price</small><strong className="block">{preview.price}</strong></div><div><small>Notional</small><strong className="block">{preview.notional}</strong></div><div><small>Expires</small><strong className="block">{preview.expiresAt}</strong></div><button className="rounded bg-red-700 px-4 py-2 text-white md:col-span-2" onClick={() => void submitIntent()} type="button">Admit Live order intent</button><button className="rounded border px-4 py-2 md:col-span-2" onClick={() => setPreview(null)} type="button">Discard preview</button></div></Panel> : null}</>;
+}
+
+function AccountStatePage({ mode }: { readonly mode: "orders" | "positions" }) {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountId, setAccountId] = useState("");
+  const [state, setState] = useState<AccountState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback((selected: string) => {
+    if (!selected) return;
+    setError(null);
+    void request<AccountState>(`/api/v1/accounts/${selected}/state`).then(setState).catch(() => { setState(null); setError("Reconciled account state is unavailable or stale."); });
+  }, []);
+  useEffect(() => { void request<{ accounts: Account[] }>("/api/v1/accounts").then((value) => { setAccounts(value.accounts); const first = value.accounts[0]?.id ?? ""; setAccountId(first); load(first); }); }, [load]);
+  const rows = mode === "orders" ? [...(state?.openOrders ?? []), ...(state?.fills ?? [])] : state?.positions ?? [];
+  return <Panel title={mode === "orders" ? "Reconciled orders and fills" : "Reconciled positions and balances"}><div className="flex gap-3 p-4"><select className="rounded border px-3 py-2" onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} value={accountId}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><button className="rounded border px-3 py-2" onClick={() => load(accountId)} type="button">Refresh</button><span className="self-center text-sm">{state ? `${state.fresh ? "Fresh" : "Stale"} · ${state.ageSeconds}s` : "No state"}</span></div>{error ? <p className="px-4 pb-4" role="alert">{error}</p> : null}<div className="overflow-x-auto"><table><thead><tr><th>Type</th><th>ID</th><th>Product</th><th>Side / Size</th><th>State</th><th>Price</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${String(row.id ?? index)}-${index}`}><td>{mode === "positions" ? "Position" : index < (state?.openOrders.length ?? 0) ? "Order" : "Fill"}</td><td>{String(row.id ?? row.order_id ?? "—")}</td><td>{String(row.product_symbol ?? row.product_id ?? "—")}</td><td>{String(row.side ?? "")} {String(row.size ?? row.contracts ?? "")}</td><td>{String(row.state ?? row.role ?? "—")}</td><td>{String(row.limit_price ?? row.price ?? row.entry_price ?? "—")}</td></tr>)}{rows.length === 0 ? <tr><td colSpan={6}>No reconciled records.</td></tr> : null}</tbody></table></div>{mode === "positions" ? <div className="border-t p-4 text-sm"><strong>Balances</strong><pre className="mt-2 overflow-auto rounded bg-slate-950 p-3 text-slate-100">{JSON.stringify(state?.balances ?? [], null, 2)}</pre></div> : null}</Panel>;
+}
+
+function GttPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {
+  const [accounts, setAccounts] = useState<Account[]>([]); const [products, setProducts] = useState<Product[]>([]); const [accountId, setAccountId] = useState(""); const [productId, setProductId] = useState(""); const [rows, setRows] = useState<GttRow[]>([]);
+  const [side, setSide] = useState<"buy" | "sell">("sell"); const [contracts, setContracts] = useState("1"); const [kind, setKind] = useState<GttRow["triggerKind"]>("stop_loss"); const [trigger, setTrigger] = useState(""); const [trail, setTrail] = useState(""); const [limit, setLimit] = useState(""); const [notice, setNotice] = useState<string | null>(null);
+  const load = useCallback((selected: string) => { if (selected) void request<{ orders: GttRow[] }>(`/api/v1/gtt?account_id=${encodeURIComponent(selected)}`).then((value) => setRows(value.orders)); }, []);
+  useEffect(() => { void Promise.all([request<{ accounts: Account[] }>("/api/v1/accounts"), request<{ products: Product[] }>("/api/v1/market/products")]).then(([a, p]) => { setAccounts(a.accounts); setProducts(p.products); const first = a.accounts[0]?.id ?? ""; setAccountId(first); setProductId(String(p.products[0]?.productId ?? "")); load(first); }); }, [load]);
+  async function create(event: FormEvent) { event.preventDefault(); const product = products.find((item) => item.productId === Number(productId)); try { await request("/api/v1/gtt", { method: "POST", body: JSON.stringify({ account_id: accountId, product_id: Number(productId), symbol: product?.symbol ?? String(productId), side, contracts: Number(contracts), trigger_kind: kind, trigger_price: kind === "trailing_stop" ? null : trigger, trail_offset: kind === "trailing_stop" ? trail : null, limit_price: limit || null }) }, csrf); setNotice("Protected exit armed."); load(accountId); } catch { setNotice("GTT rejected. Confirm Live readiness, fresh quotes and risk policy."); } }
+  async function cancel(id: string) { await request(`/api/v1/gtt/${id}/cancel`, { method: "POST" }, csrf); load(accountId); }
+  const canTrade = user.role !== "viewer" && accounts.find((account) => account.id === accountId)?.permission !== "view";
+  return <Panel title="Application-managed GTT protected exits"><form className="grid gap-3 p-4 md:grid-cols-3" onSubmit={(event) => void create(event)}><select className="rounded border px-3 py-2" onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} value={accountId}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><select className="rounded border px-3 py-2" onChange={(event) => setProductId(event.target.value)} value={productId}>{products.map((product) => <option key={product.productId} value={product.productId}>{product.symbol}</option>)}</select><select className="rounded border px-3 py-2" onChange={(event) => setSide(event.target.value as "buy" | "sell")} value={side}><option value="sell">Sell to close long</option><option value="buy">Buy to close short</option></select><input className="rounded border px-3 py-2" min="1" onChange={(event) => setContracts(event.target.value)} type="number" value={contracts}/><select className="rounded border px-3 py-2" onChange={(event) => setKind(event.target.value as GttRow["triggerKind"])} value={kind}><option value="stop_loss">Stop loss</option><option value="target">Target</option><option value="trailing_stop">Trailing stop</option></select>{kind === "trailing_stop" ? <input className="rounded border px-3 py-2" onChange={(event) => setTrail(event.target.value)} placeholder="Trail offset" required value={trail}/> : <input className="rounded border px-3 py-2" onChange={(event) => setTrigger(event.target.value)} placeholder="Trigger price" required value={trigger}/>}<input className="rounded border px-3 py-2" onChange={(event) => setLimit(event.target.value)} placeholder="Optional limit price" value={limit}/><button className="rounded bg-blue-600 px-4 py-2 text-white disabled:bg-slate-400" disabled={!canTrade} type="submit">Arm protected exit</button>{notice ? <p className="self-center" role="status">{notice}</p> : null}</form><div className="overflow-x-auto"><table><thead><tr><th>Symbol</th><th>Exit</th><th>Trigger</th><th>Status</th><th>Updated</th><th>Action</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.symbol}</td><td>{row.side} {row.contracts}</td><td>{row.triggerKind} · {row.triggerPrice ?? row.trailOffset}</td><td>{row.status}</td><td>{row.updatedAt}</td><td>{["armed", "triggered"].includes(row.status) ? <button className="text-red-700" onClick={() => void cancel(row.id)} type="button">Cancel</button> : "—"}</td></tr>)}{rows.length === 0 ? <tr><td colSpan={6}>No protected exits.</td></tr> : null}</tbody></table></div></Panel>;
+}
+
 function RiskPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState("");
@@ -274,7 +381,7 @@ function Shell({ session, onLogout }: { readonly session: Session; readonly onLo
   const user = session.user!;
   const csrf = session.csrfToken!;
   const visible = navigation.filter((item) => !item.admin || user.role === "admin");
-  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "risk" ? <RiskPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage csrf={csrf}/> : null}{["trading","orders","positions","gtt","strategies","performance","notifications","settings"].includes(page) ? <Deferred name={navigation.find((item) => item.page === page)?.label ?? page}/> : null}</div></main></div></div>;
+  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "trading" ? <TradingPage csrf={csrf} user={user}/> : null}{page === "orders" ? <AccountStatePage mode="orders"/> : null}{page === "positions" ? <AccountStatePage mode="positions"/> : null}{page === "gtt" ? <GttPage csrf={csrf} user={user}/> : null}{page === "risk" ? <RiskPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage csrf={csrf}/> : null}{["strategies","performance","notifications","settings"].includes(page) ? <Deferred name={navigation.find((item) => item.page === page)?.label ?? page}/> : null}</div></main></div></div>;
 }
 
 export default function PlatformApp() {
