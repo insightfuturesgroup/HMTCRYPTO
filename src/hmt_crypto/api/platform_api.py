@@ -1611,6 +1611,8 @@ def install_platform_routes(
                     attempt_number=0,
                     exchange_order_id=None,
                     last_error_code=None,
+                    sent_at=None,
+                    resolved_at=None,
                     version=1,
                     created_at=now,
                     updated_at=now,

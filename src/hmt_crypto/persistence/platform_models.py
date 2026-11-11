@@ -528,6 +528,15 @@ class LiveOrderSubmission(Base):
             "prepared_request_sha256 IS NOT NULL",
             name="prepared_evidence_required",
         ),
+        CheckConstraint(
+            "status NOT IN ('SENDING','UNCERTAIN','ACCEPTED','REJECTED') OR sent_at IS NOT NULL",
+            name="sent_timestamp_required",
+        ),
+        CheckConstraint(
+            "(status IN ('ACCEPTED','REJECTED','BLOCKED') AND resolved_at IS NOT NULL) OR "
+            "(status NOT IN ('ACCEPTED','REJECTED','BLOCKED') AND resolved_at IS NULL)",
+            name="resolution_timestamp",
+        ),
         UniqueConstraint("intent_id", name="uq_live_order_submissions_intent"),
         UniqueConstraint(
             "account_id", "client_order_id", name="uq_live_order_submissions_client_order"
@@ -555,6 +564,8 @@ class LiveOrderSubmission(Base):
     attempt_number: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     exchange_order_id: Mapped[int | None] = mapped_column(StrictBigInteger())
     last_error_code: Mapped[str | None] = mapped_column(NulFreeString(64))
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

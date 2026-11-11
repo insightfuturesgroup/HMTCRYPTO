@@ -8,7 +8,11 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import desc, select
 
-from hmt_crypto.api.live_order_transport import PreparedLiveOrder, prepare_live_order
+from hmt_crypto.api.live_order_transport import (
+    LiveOrderResponseOutcome,
+    PreparedLiveOrder,
+    prepare_live_order,
+)
 from hmt_crypto.api.live_submission import (
     SubmissionFence,
     require_transition,
@@ -271,8 +275,171 @@ async def prepare_claimed_live_submission(
         return prepared
 
 
+async def mark_live_submission_sending(
+    database: Database, claim: ClaimedLiveSubmission
+) -> PreparedLiveOrder:
+    """Persist possible venue entry before a transport may send any bytes."""
+    if type(claim) is not ClaimedLiveSubmission:
+        raise ValueError("invalid live submission claim")
+    now = datetime.now(UTC)
+    async with database.transaction() as session:
+        submission = await session.scalar(
+            select(LiveOrderSubmission)
+            .where(LiveOrderSubmission.id == claim.submission_id)
+            .with_for_update()
+        )
+        lease = await session.scalar(
+            select(PrivateWorkerLease)
+            .where(PrivateWorkerLease.account_id == claim.account_id)
+            .with_for_update()
+        )
+        if (
+            submission is None
+            or lease is None
+            or submission.status != "PREPARED"
+            or submission.prepared_request_payload is None
+            or submission.prepared_request_sha256 is None
+            or submission.claim_until is None
+            or submission.claim_until <= now
+            or lease.lease_until <= now
+            or submission.worker_owner_id is None
+            or submission.worker_generation is None
+            or submission.credential_version is None
+        ):
+            raise ValueError("prepared live submission is stale")
+        stored_fence = SubmissionFence(
+            submission.worker_owner_id,
+            submission.worker_generation,
+            submission.credential_version,
+        )
+        active_fence = SubmissionFence(lease.owner_id, lease.generation, lease.credential_version)
+        require_transition(
+            current="PREPARED",
+            target="SENDING",
+            stored_fence=stored_fence,
+            actor_fence=active_fence,
+        )
+        intent = await session.get(LiveOrderIntent, submission.intent_id)
+        preview = None if intent is None else await session.get(LiveOrderPreview, intent.preview_id)
+        if intent is None or preview is None:
+            raise ValueError("live submission evidence is unavailable")
+        prepared = prepare_live_order(
+            product_id=preview.product_id,
+            contracts=preview.contracts,
+            side=preview.side,
+            order_type=preview.order_type,
+            limit_price=preview.limit_price,
+            reduce_only=preview.reduce_only,
+            client_order_id=submission.client_order_id,
+        )
+        if (
+            prepared.body_sha256 != submission.prepared_request_sha256
+            or prepared.body.decode("ascii") != submission.prepared_request_payload
+        ):
+            raise ValueError("prepared live submission evidence changed")
+        submission.status = "SENDING"
+        submission.sent_at = now
+        submission.updated_at = now
+        event_hash = submission_event_sha256(
+            submission_id=submission.id,
+            sequence=3,
+            from_status="PREPARED",
+            to_status="SENDING",
+            fence=stored_fence,
+            occurred_at=now,
+        )
+        session.add(
+            LiveOrderSubmissionEvent(
+                id=uuid4(),
+                submission_id=submission.id,
+                account_id=submission.account_id,
+                sequence=3,
+                from_status="PREPARED",
+                to_status="SENDING",
+                worker_owner_id=stored_fence.owner_id,
+                worker_generation=stored_fence.generation,
+                credential_version=stored_fence.credential_version,
+                evidence_sha256=event_hash,
+                occurred_at=now,
+            )
+        )
+        return prepared
+
+
+async def record_live_submission_outcome(
+    database: Database,
+    claim: ClaimedLiveSubmission,
+    outcome: LiveOrderResponseOutcome,
+) -> None:
+    """Persist a classified response without ever retrying an uncertain write."""
+    if (
+        type(claim) is not ClaimedLiveSubmission
+        or type(outcome) is not LiveOrderResponseOutcome
+        or outcome.kind not in {"ACCEPTED", "REJECTED", "UNCERTAIN"}
+        or (
+            outcome.kind == "ACCEPTED"
+            and (type(outcome.exchange_order_id) is not int or outcome.exchange_order_id < 1)
+        )
+        or (outcome.kind != "ACCEPTED" and outcome.exchange_order_id is not None)
+    ):
+        raise ValueError("invalid live submission outcome")
+    now = datetime.now(UTC)
+    async with database.transaction() as session:
+        submission = await session.scalar(
+            select(LiveOrderSubmission)
+            .where(LiveOrderSubmission.id == claim.submission_id)
+            .with_for_update()
+        )
+        if (
+            submission is None
+            or submission.status != "SENDING"
+            or submission.worker_owner_id is None
+            or submission.worker_generation is None
+            or submission.credential_version is None
+        ):
+            raise ValueError("sending live submission is unavailable")
+        fence = SubmissionFence(
+            submission.worker_owner_id,
+            submission.worker_generation,
+            submission.credential_version,
+        )
+        require_transition(
+            current="SENDING", target=outcome.kind, stored_fence=fence, actor_fence=claim.fence
+        )
+        submission.status = outcome.kind
+        submission.exchange_order_id = outcome.exchange_order_id
+        submission.last_error_code = "response_uncertain" if outcome.kind == "UNCERTAIN" else None
+        submission.resolved_at = None if outcome.kind == "UNCERTAIN" else now
+        submission.updated_at = now
+        event_hash = submission_event_sha256(
+            submission_id=submission.id,
+            sequence=4,
+            from_status="SENDING",
+            to_status=outcome.kind,
+            fence=fence,
+            occurred_at=now,
+        )
+        session.add(
+            LiveOrderSubmissionEvent(
+                id=uuid4(),
+                submission_id=submission.id,
+                account_id=submission.account_id,
+                sequence=4,
+                from_status="SENDING",
+                to_status=outcome.kind,
+                worker_owner_id=fence.owner_id,
+                worker_generation=fence.generation,
+                credential_version=fence.credential_version,
+                evidence_sha256=event_hash,
+                occurred_at=now,
+            )
+        )
+
+
 __all__ = [
     "ClaimedLiveSubmission",
     "claim_next_live_submission",
+    "mark_live_submission_sending",
     "prepare_claimed_live_submission",
+    "record_live_submission_outcome",
 ]
