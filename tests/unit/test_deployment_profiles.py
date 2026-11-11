@@ -56,6 +56,17 @@ def test_ec2_migration_mounts_the_pinned_supabase_ca() -> None:
     assert migration["DATABASE_MIGRATION_CA_FILE"] == "/run/secrets/supabase-prod-ca.crt"
 
 
+def test_ec2_runtime_services_mount_and_use_the_pinned_supabase_ca() -> None:
+    root = Path(__file__).resolve().parents[2]
+    compose = (root / "docker-compose.ec2.yml").read_text(encoding="utf-8")
+    api = _example("ec2/api.env.example")
+    worker = _example("ec2/worker.env.example")
+
+    assert compose.count("/etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro") == 3
+    assert api["DATABASE_CA_FILE"] == "/run/secrets/supabase-prod-ca.crt"
+    assert worker["DATABASE_CA_FILE"] == "/run/secrets/supabase-prod-ca.crt"
+
+
 def test_api_compose_service_receives_no_exchange_credentials() -> None:
     """The browser/control process must not inherit the worker secret environment."""
     root = Path(__file__).resolve().parents[2]

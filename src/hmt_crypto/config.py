@@ -199,6 +199,7 @@ class Settings(BaseSettings):
     database_url: SecretStr = Field(
         default=SecretStr("sqlite+aiosqlite:///./hmt_crypto.db"), alias="DATABASE_URL"
     )
+    database_ca_file: str | None = Field(default=None, alias="DATABASE_CA_FILE")
     database_migration_url: SecretStr | None = Field(default=None, alias="DATABASE_MIGRATION_URL")
     database_single_process: StrictBool = Field(default=True, alias="DATABASE_SINGLE_PROCESS")
 

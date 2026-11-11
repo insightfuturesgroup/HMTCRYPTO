@@ -26,6 +26,8 @@ services:
     init: true
     env_file:
       - deploy/ec2/api.env
+    volumes:
+      - /etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro
     environment:
       HMT_API_BIND_HOST: 0.0.0.0
       HMT_API_BIND_PORT: "8000"
@@ -60,6 +62,8 @@ services:
     init: true
     env_file:
       - deploy/ec2/worker.env
+    volumes:
+      - /etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

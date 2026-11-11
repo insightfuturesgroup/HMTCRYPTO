@@ -39,6 +39,7 @@ class ControlRuntimeSettings(BaseSettings):
     database_url: SecretStr = Field(
         default=SecretStr("sqlite+aiosqlite:///./hmt_crypto.db"), alias="DATABASE_URL"
     )
+    database_ca_file: str | None = Field(default=None, alias="DATABASE_CA_FILE")
     database_single_process: StrictBool = Field(default=True, alias="DATABASE_SINGLE_PROCESS")
 
     @field_validator("database_single_process", mode="before")
@@ -64,6 +65,7 @@ class ControlRuntimeSettings(BaseSettings):
             execution_mode=self.execution_mode.value,
             database_url=self.database_url,
             database_single_process=self.database_single_process,
+            database_ca_file=self.database_ca_file,
         )
 
 

@@ -23,8 +23,16 @@ def test_database_defaults_are_secret_and_lazy(tmp_path: Path, monkeypatch: pyte
     assert isinstance(settings.database_url, SecretStr)
     assert settings.database_url.get_secret_value() == "sqlite+aiosqlite:///./hmt_crypto.db"
     assert settings.database_migration_url is None
+    assert settings.database_ca_file is None
     assert settings.database_single_process is True
     assert list(tmp_path.iterdir()) == []
+
+
+def test_runtime_ca_file_is_loaded_without_exposing_database_secret(tmp_path: Path):
+    ca_file = tmp_path / "supabase-ca.crt"
+    ca_file.write_text("fixture")
+    settings = Settings(_env_file=None, DATABASE_CA_FILE=str(ca_file))
+    assert settings.database_ca_file == str(ca_file)
 
 
 def test_database_urls_are_redacted_everywhere():

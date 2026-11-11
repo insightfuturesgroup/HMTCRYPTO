@@ -16,16 +16,19 @@ class DatabaseRuntimeConfig:
     execution_mode: DatabaseExecutionMode
     database_url: SecretStr
     database_single_process: bool
+    database_ca_file: str | None = None
 
     def __post_init__(self) -> None:
         mode: object = self.execution_mode
         url_value: object = self.database_url
         single_process: object = self.database_single_process
+        ca_file: object = self.database_ca_file
         if (
             type(mode) is not str
             or mode not in {"BACKTEST", "PAPER", "LIVE"}
             or type(url_value) is not SecretStr
             or type(single_process) is not bool
+            or (ca_file is not None and (type(ca_file) is not str or not ca_file))
         ):
             raise ValueError("invalid database runtime configuration") from None
         database_url(url_value)

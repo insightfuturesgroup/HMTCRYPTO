@@ -8,6 +8,7 @@ connections. PostgreSQL pooler/TLS/role suitability requires deployment evidence
 
 import asyncio
 import socket
+import ssl
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -160,12 +161,14 @@ class Database:
                     execution_mode=owned.execution_mode.value,
                     database_url=owned.database_url,
                     database_single_process=owned.database_single_process,
+                    database_ca_file=owned.database_ca_file,
                 )
             elif type(settings) is DatabaseRuntimeConfig:
                 runtime = DatabaseRuntimeConfig(
                     execution_mode=settings.execution_mode,
                     database_url=settings.database_url,
                     database_single_process=settings.database_single_process,
+                    database_ca_file=settings.database_ca_file,
                 )
             else:
                 raise ValueError
@@ -186,7 +189,10 @@ class Database:
         if url.drivername == "sqlite+aiosqlite":
             options["execution_options"] = {"schema_translate_map": {APP_SCHEMA: None}}
         else:
-            options["connect_args"] = {"server_settings": {"timezone": "UTC"}}
+            connect_args: dict[str, Any] = {"server_settings": {"timezone": "UTC"}}
+            if runtime.database_ca_file is not None:
+                connect_args["ssl"] = ssl.create_default_context(cafile=runtime.database_ca_file)
+            options["connect_args"] = connect_args
         try:
             self._engine = create_async_engine(url, **options)
         except Exception:
