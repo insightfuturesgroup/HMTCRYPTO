@@ -74,7 +74,8 @@ def test_ec2_runtime_services_mount_and_use_the_pinned_supabase_ca() -> None:
     api = _example("ec2/api.env.example")
     worker = _example("ec2/worker.env.example")
 
-    assert compose.count("/etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro") == 3
+    # Migration, API, public worker, and private worker all use the pinned CA mount.
+    assert compose.count("/etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro") == 4
     assert api["DATABASE_CA_FILE"] == "/run/secrets/supabase-prod-ca.crt"
     assert worker["DATABASE_CA_FILE"] == "/run/secrets/supabase-prod-ca.crt"
 
