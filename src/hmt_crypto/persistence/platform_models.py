@@ -162,6 +162,41 @@ class MarketQuote(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class MarketCandle(Base):
+    __tablename__ = "market_candles"
+    __table_args__ = (
+        CheckConstraint("region = 'india'", name="india_only"),
+        CheckConstraint("environment = 'prod'", name="prod_only"),
+        CheckConstraint("resolution = '1m'", name="resolution"),
+        CheckConstraint("open > 0 AND high > 0 AND low > 0 AND close > 0", name="prices_positive"),
+        CheckConstraint("high >= low", name="range"),
+        CheckConstraint("volume IS NULL OR volume >= 0", name="volume_nonnegative"),
+        UniqueConstraint(
+            "region",
+            "environment",
+            "product_id",
+            "resolution",
+            "timestamp",
+            name="uq_market_candles_identity",
+        ),
+        Index("ix_market_candles_product_time", "product_id", "resolution", text("timestamp DESC")),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    region: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    environment: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    resolution: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    open: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    high: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    low: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    close: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    volume: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class PlatformAuditEvent(Base):
     __tablename__ = "platform_audit_events"
     __table_args__ = (

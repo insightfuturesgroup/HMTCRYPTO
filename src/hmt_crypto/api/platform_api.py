@@ -59,6 +59,7 @@ from hmt_crypto.persistence.models import (
     LiveOrderIntent,
     LiveOrderPreview,
     LiveOrderSubmission,
+    MarketCandle,
     MarketQuote,
     PlatformAuditEvent,
     PlatformLiveControl,
@@ -1692,6 +1693,50 @@ def install_platform_routes(
                     for row in rows
                 ]
             }
+
+    @app.get("/api/v1/market/candles/{product_id}")
+    async def market_candles(
+        product_id: int,
+        request: Request,
+        resolution: str = "1m",
+        limit: int = 120,
+    ) -> dict[str, object]:
+        await principal(request)
+        if product_id <= 0 or resolution != "1m" or not 1 <= limit <= 1440:
+            raise HTTPException(status_code=400, detail="invalid_candle_query")
+        async with database.transaction() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(MarketCandle)
+                        .where(
+                            MarketCandle.region == "india",
+                            MarketCandle.environment == "prod",
+                            MarketCandle.product_id == product_id,
+                            MarketCandle.resolution == resolution,
+                        )
+                        .order_by(desc(MarketCandle.timestamp))
+                        .limit(limit)
+                    )
+                ).scalars()
+            )
+        return {
+            "productId": product_id,
+            "resolution": resolution,
+            "provisional": True,
+            "items": [
+                {
+                    "timestamp": _utc(row.timestamp),
+                    "open": format(row.open, "f"),
+                    "high": format(row.high, "f"),
+                    "low": format(row.low, "f"),
+                    "close": format(row.close, "f"),
+                    "volume": None if row.volume is None else format(row.volume, "f"),
+                    "observedAt": _utc(row.observed_at),
+                }
+                for row in reversed(rows)
+            ],
+        }
 
     @app.put("/api/v1/market/watchlist")
     async def upsert_watchlist(body: WatchlistBody, request: Request) -> dict[str, object]:

@@ -77,6 +77,16 @@ interface WatchlistRow {
   productId: number;
 }
 
+interface CandleRow {
+  timestamp: string;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string | null;
+  observedAt: string;
+}
+
 interface UserRow extends SessionUser {
   status: "invited" | "active" | "disabled";
   createdAt: string;
@@ -316,11 +326,14 @@ function Panel({ title, children }: { readonly title: string; readonly children:
 function MarketPage({ csrf }: { readonly csrf: string }) {
   const [products, setProducts] = useState<Product[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistRow[]>([]);
+  const [candleProduct, setCandleProduct] = useState("");
+  const [candles, setCandles] = useState<CandleRow[]>([]);
   const [fresh, setFresh] = useState<boolean | null>(null);
   const load = useCallback(() => { void Promise.all([request<{ snapshot: { fresh: boolean } | null; products: Product[] }>("/api/v1/market/products"), request<{ items: WatchlistRow[] }>("/api/v1/market/watchlist")]).then(([market, saved]) => { setProducts(market.products); setFresh(market.snapshot?.fresh ?? null); setWatchlist(saved.items); }).catch(() => { setProducts([]); setFresh(false); }); }, []);
   useEffect(load, [load]);
+  useEffect(() => { const selected = candleProduct || String(watchlist[0]?.productId ?? ""); if (!selected) { setCandles([]); return; } setCandleProduct(selected); void request<{ items: CandleRow[] }>(`/api/v1/market/candles/${selected}?resolution=1m&limit=60`).then((value) => setCandles(value.items)).catch(() => setCandles([])); }, [candleProduct, watchlist]);
   async function toggle(product: Product) { const saved = watchlist.find((item) => item.productId === product.productId); if (saved) await request(`/api/v1/market/watchlist/${saved.id}`, { method: "DELETE" }, csrf); else await request("/api/v1/market/watchlist", { method: "PUT", body: JSON.stringify({ symbol: product.symbol, product_id: product.productId }) }, csrf); load(); }
-  return <Panel title="Delta India futures market"><div className="flex items-center justify-between p-4 text-sm"><span>Feed: <strong>{fresh === true ? "Fresh" : fresh === false ? "Unavailable or stale" : "Not published"}</strong></span><span>Watchlist: <strong>{watchlist.length}</strong></span></div><div className="overflow-x-auto"><table><thead><tr><th>Watch</th><th>Symbol</th><th>Contract</th><th>Mark</th><th>Bid</th><th>Ask</th><th>Updated</th></tr></thead><tbody>{products.map((p) => { const saved = watchlist.some((item) => item.productId === p.productId); return <tr key={p.productId}><td><button aria-label={`${saved ? "Remove" : "Add"} ${p.symbol} ${saved ? "from" : "to"} watchlist`} className={saved ? "text-amber-600" : "text-slate-400"} onClick={() => void toggle(p)} type="button">{saved ? "★" : "☆"}</button></td><td><strong>{p.symbol}</strong></td><td>{p.contractType}</td><td>{p.markPrice ?? "—"}</td><td>{p.bestBid ?? "—"}</td><td>{p.bestAsk ?? "—"}</td><td>{p.observedAt ?? "No quote"}</td></tr>; })}{products.length === 0 ? <tr><td colSpan={7}>No catalogue has been published by the market worker.</td></tr> : null}</tbody></table></div></Panel>;
+  return <><Panel title="Delta India futures market"><div className="flex items-center justify-between p-4 text-sm"><span>Feed: <strong>{fresh === true ? "Fresh" : fresh === false ? "Unavailable or stale" : "Not published"}</strong></span><span>Watchlist: <strong>{watchlist.length}</strong></span></div><div className="overflow-x-auto"><table><thead><tr><th>Watch</th><th>Symbol</th><th>Contract</th><th>Mark</th><th>Bid</th><th>Ask</th><th>Updated</th></tr></thead><tbody>{products.map((p) => { const saved = watchlist.some((item) => item.productId === p.productId); return <tr key={p.productId}><td><button aria-label={`${saved ? "Remove" : "Add"} ${p.symbol} ${saved ? "from" : "to"} watchlist`} className={saved ? "text-amber-600" : "text-slate-400"} onClick={() => void toggle(p)} type="button">{saved ? "★" : "☆"}</button></td><td><strong>{p.symbol}</strong></td><td>{p.contractType}</td><td>{p.markPrice ?? "—"}</td><td>{p.bestBid ?? "—"}</td><td>{p.bestAsk ?? "—"}</td><td>{p.observedAt ?? "No quote"}</td></tr>; })}{products.length === 0 ? <tr><td colSpan={7}>No catalogue has been published by the market worker.</td></tr> : null}</tbody></table></div></Panel><Panel title="Recent provisional 1-minute candles"><div className="p-4"><select className="rounded border px-3 py-2" onChange={(event) => setCandleProduct(event.target.value)} value={candleProduct}><option value="">Select watchlist contract</option>{watchlist.map((item) => <option key={item.id} value={item.productId}>{item.symbol}</option>)}</select></div><div className="overflow-x-auto"><table><thead><tr><th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th></tr></thead><tbody>{candles.map((row) => <tr key={row.timestamp}><td>{row.timestamp}</td><td>{row.open}</td><td>{row.high}</td><td>{row.low}</td><td>{row.close}</td><td>{row.volume ?? "—"}</td></tr>)}{candles.length === 0 ? <tr><td colSpan={6}>No streamed candle history is available yet.</td></tr> : null}</tbody></table></div></Panel></>;
 }
 
 function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {

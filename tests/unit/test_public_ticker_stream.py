@@ -13,7 +13,7 @@ import pytest
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion
 from hmt_crypto.exchange.delta.catalog_models import CatalogSnapshot, CatalogSource
 from hmt_crypto.exchange.delta.wire_schemas import parse_product
-from hmt_crypto.market_data.contracts import TickerObservation
+from hmt_crypto.market_data.contracts import CandleObservation, TickerObservation
 from hmt_crypto.worker.public_ticker_stream import _connection
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "delta"
@@ -38,13 +38,18 @@ class _Socket:
         self.stop = stop
         self.sent: list[str] = []
         self.frames = [
-            '{"type":"subscriptions","channels":[{"name":"ticker","symbols":["XBTUSD_CAT"]}]}',
+            '{"type":"subscriptions","channels":['
+            '{"name":"candlestick_1m","symbols":["XBTUSD_CAT"]},'
+            '{"name":"ticker","symbols":["XBTUSD_CAT"]}]}',
             '{"type":"ticker","ts":1793872800000000,"sy":"XBTUSD_CAT",'
             '"sp":"100.10","d":[{"i":1101,"s":"XBTUSD_CAT","m":"100.00",'
             '"m24hc":"1.5","ohlc":["90","110","80","100"],"oi":["3","1"],'
             '"pb":["70","130"],"q":["72101","2","72100","3","72100.5"],'
             '"qiv":["0.4","0.5","0.45"],"to":["500","20"],'
             '"g":["0.1","0.2","0.3","0.4","0.5"]}]}',
+            '{"type":"candlestick_1m","sy":"XBTUSD_CAT",'
+            '"ts":1793872740000000,"res":"1m","o":"99","h":"102",'
+            '"l":"98","c":"101","v":"5.5"}',
         ]
 
     async def send(self, value: str) -> None:
@@ -72,7 +77,7 @@ class _ConnectionContext:
 async def test_connection_requires_ack_then_publishes_catalogue_bound_ticker() -> None:
     stop = asyncio.Event()
     socket = _Socket(stop)
-    queue: asyncio.Queue[TickerObservation] = asyncio.Queue(maxsize=10)
+    queue: asyncio.Queue[TickerObservation | CandleObservation] = asyncio.Queue(maxsize=10)
 
     def connect(_url: str, **_options: object) -> _ConnectionContext:
         return _ConnectionContext(socket)
@@ -88,12 +93,19 @@ async def test_connection_requires_ack_then_publishes_catalogue_bound_ticker() -
     )
 
     ticker = queue.get_nowait()
+    assert type(ticker) is TickerObservation
     assert ticker.product_id == 1101
     assert ticker.symbol == "XBTUSD_CAT"
     assert ticker.mark_price == 100
     assert ticker.best_bid == 72100
     assert ticker.best_ask == 72101
+    candle = queue.get_nowait()
+    assert type(candle) is CandleObservation
+    assert candle.resolution == "1m"
+    assert candle.close == 101
     assert socket.sent == [
-        '{"type":"subscribe","payload":{"channels":[{"name":"ticker","symbols":["XBTUSD_CAT"]}]}}',
+        '{"type":"subscribe","payload":{"channels":['
+        '{"name":"candlestick_1m","symbols":["XBTUSD_CAT"]},'
+        '{"name":"ticker","symbols":["XBTUSD_CAT"]}]}}',
         '{"type":"enable_heartbeat"}',
     ]
