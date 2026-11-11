@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 from hmt_crypto.api.account_bootstrap import bootstrap_account
+from hmt_crypto.api.platform_bootstrap import bootstrap_first_admin
+from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.clock import (
     LocalClockDiagnostics,
     SignedProbeEvidence,
@@ -254,6 +257,19 @@ async def database_init_dev_payload(settings: Settings) -> dict[str, JsonValue]:
         "backend": "sqlite-development-only",
         "table_count": table_count,
     }
+
+
+async def platform_admin_bootstrap_payload(
+    *, auth_user_id: UUID, email: str, full_name: str
+) -> dict[str, JsonValue]:
+    """Create the initial admin only after its Supabase Auth identity exists."""
+    profile_id, created = await bootstrap_first_admin(
+        ControlRuntimeSettings(),
+        auth_user_id=auth_user_id,
+        email=email,
+        full_name=full_name,
+    )
+    return {"profile_id": str(profile_id), "created": created, "role": "admin"}
 
 
 def _selector(product_id: str | None, symbol: str | None) -> int | str:

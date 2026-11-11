@@ -15,6 +15,7 @@ dependencies = [
     "argon2-cffi>=23.1,<26",
     "asyncpg>=0.30.0,<0.32",
     "fastapi>=0.115,<1",
+    "boto3>=1.35,<2",
     "httpx>=0.28.1,<0.29",
     "prometheus-client>=0.21,<1",
     "pydantic>=2.14.2,<2.15",

@@ -7,6 +7,7 @@ import json
 import sys
 from collections.abc import Callable, Coroutine, Sequence
 from typing import Annotated, Any
+from uuid import UUID
 
 import typer
 from pydantic import ValidationError
@@ -85,9 +86,19 @@ database_app = typer.Typer(
     pretty_exceptions_enable=False,
     rich_markup_mode=None,
 )
+platform_app = typer.Typer(
+    name="platform",
+    help="Operator-controlled multi-user platform lifecycle.",
+    cls=_JsonBoundaryGroup,
+    add_completion=False,
+    no_args_is_help=True,
+    pretty_exceptions_enable=False,
+    rich_markup_mode=None,
+)
 app.add_typer(products_app, name="products")
 app.add_typer(account_app, name="account")
 app.add_typer(database_app, name="database")
+app.add_typer(platform_app, name="platform")
 
 
 @app.callback()
@@ -159,6 +170,22 @@ def account_bootstrap(
 def database_init_dev() -> None:
     """Create current tables for single-process SQLite development only."""
     _run_async(lambda: cli_runtime.database_init_dev_payload(cli_runtime.load_settings()))
+
+
+@platform_app.command("bootstrap-admin")
+def platform_bootstrap_admin(
+    auth_user_id: Annotated[UUID, typer.Option("--auth-user-id")],
+    email: Annotated[str, typer.Option("--email")],
+    full_name: Annotated[str, typer.Option("--name")],
+) -> None:
+    """Bind the first Supabase Auth user to the sole initial admin profile."""
+    _run_async(
+        lambda: cli_runtime.platform_admin_bootstrap_payload(
+            auth_user_id=auth_user_id,
+            email=email,
+            full_name=full_name,
+        )
+    )
 
 
 @products_app.command("sync")

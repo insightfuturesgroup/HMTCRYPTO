@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import os
 
 from hmt_crypto.config import ExecutionMode, Settings
 from hmt_crypto.errors import ConfigurationError
@@ -18,6 +19,8 @@ from hmt_crypto.oms.paper_kill_backend import DurablePaperKillActionBackend
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.repository_contracts import AccountScope
 from hmt_crypto.worker.settings import PaperWorkerSettings
+from hmt_crypto.api.settings import ControlRuntimeSettings
+from hmt_crypto.worker.market_runner import MarketWorkerSettings, run_market_worker
 
 
 async def run_paper_worker(
@@ -98,8 +101,7 @@ def main() -> None:
     """Load settings, install graceful signal handlers, and run one worker."""
 
     configure_logging(json_output=True)
-    settings = Settings()
-    process = PaperWorkerSettings()  # type: ignore[call-arg]
+    worker_kind = os.environ.get("HMT_WORKER_KIND", "paper")
 
     async def serve() -> None:
         stop = asyncio.Event()
@@ -109,7 +111,20 @@ def main() -> None:
                 loop.add_signal_handler(signum, stop.set)
             except (NotImplementedError, RuntimeError):
                 continue
-        await run_paper_worker(settings, process, stop=stop)
+        if worker_kind == "market":
+            await run_market_worker(
+                ControlRuntimeSettings(),
+                MarketWorkerSettings(),
+                stop=stop,
+            )
+            return
+        if worker_kind != "paper":
+            raise RuntimeError("unsupported worker kind")
+        await run_paper_worker(
+            Settings(),
+            PaperWorkerSettings(),  # type: ignore[call-arg]
+            stop=stop,
+        )
 
     asyncio.run(serve())
 

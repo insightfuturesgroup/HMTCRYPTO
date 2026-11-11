@@ -29,6 +29,8 @@ from hmt_crypto.api.operator_audit import (
     OperatorOutcome,
     UnavailableOperatorAuditSink,
 )
+from hmt_crypto.api.platform_api import install_platform_routes
+from hmt_crypto.api.platform_auth import SupabaseAuthGateway
 from hmt_crypto.api.security import KillPreviewRegistry, LoginRateLimiter
 from hmt_crypto.api.session_store import (
     Argon2PasswordVerifier,
@@ -98,6 +100,7 @@ def create_app(
     operator_audit: OperatorAuditSink | None = None,
     background: Callable[[asyncio.Event], Awaitable[None]] | None = None,
     shutdown: Callable[[], Awaitable[None]] | None = None,
+    platform_database: Database | None = None,
 ) -> FastAPI:
     """Build a fail-closed single-operator API with explicit injected authority."""
     if type(settings) is not ControlApiSettings:
@@ -114,6 +117,7 @@ def create_app(
     login_limiter = LoginRateLimiter(settings.login_attempts_per_five_minutes)
     login_verification_gate = asyncio.Semaphore(2)
     metrics = ApiMetrics()
+    platform_auth: SupabaseAuthGateway | None = None
     secure = settings.cookie_secure
     session_cookie = _SESSION_COOKIE if secure else _LOCAL_SESSION_COOKIE
     csrf_cookie = _CSRF_COOKIE if secure else _LOCAL_CSRF_COOKIE
@@ -156,6 +160,8 @@ def create_app(
                 except Exception:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
+            if platform_auth is not None:
+                await platform_auth.aclose()
             if shutdown is not None:
                 await shutdown()
 
@@ -490,6 +496,15 @@ def create_app(
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 
+    if settings.multi_user_enabled:
+        if platform_database is None:
+            raise RuntimeError("multi-user API requires the runtime database")
+        platform_auth = install_platform_routes(
+            app,
+            settings=settings,
+            database=platform_database,
+        )
+
     return app
 
 
@@ -558,6 +573,7 @@ def create_app_from_environment() -> FastAPI:
         operator_audit=audit_sink,
         background=background,
         shutdown=control.aclose,
+        platform_database=database,
     )
 
 

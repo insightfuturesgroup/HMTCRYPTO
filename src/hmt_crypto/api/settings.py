@@ -107,12 +107,21 @@ class ControlApiSettings(BaseSettings):
     )
     embed_paper_worker: StrictBool = Field(default=False, alias="HMT_API_EMBED_PAPER_WORKER")
     account_id: UUID | None = Field(default=None, alias="HMT_API_ACCOUNT_ID")
+    multi_user_enabled: StrictBool = Field(default=False, alias="HMT_API_MULTI_USER_ENABLED")
+    supabase_url: str | None = Field(default=None, alias="HMT_SUPABASE_URL")
+    supabase_publishable_key: SecretStr | None = Field(
+        default=None, alias="HMT_SUPABASE_PUBLISHABLE_KEY"
+    )
+    supabase_secret_key: SecretStr | None = Field(default=None, alias="HMT_SUPABASE_SECRET_KEY")
+    aws_region: str | None = Field(default=None, alias="HMT_AWS_REGION")
+    delta_secret_prefix: str = Field(default="hmt-crypto/delta", alias="HMT_DELTA_SECRET_PREFIX")
 
     @field_validator(
         "cookie_secure",
         "allow_insecure_loopback",
         "database_control_enabled",
         "embed_paper_worker",
+        "multi_user_enabled",
         mode="before",
     )
     @classmethod
@@ -175,6 +184,26 @@ class ControlApiSettings(BaseSettings):
             raise ConfigurationError() from None
         if self.account_id is not None and self.account_id.int == 0:
             raise ConfigurationError() from None
+        if self.multi_user_enabled:
+            if (
+                self.supabase_url is None
+                or self.supabase_publishable_key is None
+                or self.supabase_secret_key is None
+                or self.aws_region is None
+            ):
+                raise ConfigurationError() from None
+            parsed = urlsplit(self.supabase_url)
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname is None
+                or not parsed.hostname.endswith(".supabase.co")
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ConfigurationError() from None
+            if not self.delta_secret_prefix.startswith("hmt-crypto/"):
+                raise ConfigurationError() from None
         return self
 
 

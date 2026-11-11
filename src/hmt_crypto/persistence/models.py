@@ -24,6 +24,16 @@ from hmt_crypto.persistence.kill_workflow_models import KillWorkflow, KillWorkfl
 from hmt_crypto.persistence.operator_audit_models import OperatorAuditEvent
 from hmt_crypto.persistence.order_models import Order
 from hmt_crypto.persistence.paper_execution_models import PaperExecutionEvent, PaperExecutionHead
+from hmt_crypto.persistence.platform_models import (
+    AccountAssignment,
+    ApplicationSetting,
+    CredentialSecretReference,
+    GttOrder,
+    MarketQuote,
+    PlatformAuditEvent,
+    PlatformUser,
+    WatchlistItem,
+)
 from hmt_crypto.persistence.pnl_models import PnlSnapshot
 from hmt_crypto.persistence.protection_models import (
     ExitIntent,
@@ -91,5 +101,13 @@ __all__ = [
     "WalletTransaction",
     "FundingSnapshot",
     "PnlSnapshot",
+    "PlatformUser",
+    "AccountAssignment",
+    "CredentialSecretReference",
+    "WatchlistItem",
+    "MarketQuote",
+    "PlatformAuditEvent",
+    "ApplicationSetting",
+    "GttOrder",
     "metadata",
 ]
