@@ -218,11 +218,23 @@ async def claim_next_live_submission(
             return None
         submission = await session.scalar(
             select(LiveOrderSubmission)
+            .join(
+                LiveOrderIntent,
+                LiveOrderIntent.id == LiveOrderSubmission.intent_id,
+            )
+            .join(
+                LiveOrderPreview,
+                LiveOrderPreview.id == LiveOrderIntent.preview_id,
+            )
             .where(
                 LiveOrderSubmission.account_id == account_id,
                 LiveOrderSubmission.status == "PENDING",
             )
-            .order_by(LiveOrderSubmission.created_at, LiveOrderSubmission.id)
+            .order_by(
+                desc(LiveOrderPreview.reduce_only),
+                LiveOrderSubmission.created_at,
+                LiveOrderSubmission.id,
+            )
             .limit(1)
             .with_for_update(skip_locked=True)
         )

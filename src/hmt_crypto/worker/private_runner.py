@@ -42,6 +42,7 @@ from hmt_crypto.worker.live_execution import (
     execute_one_live_submission,
 )
 from hmt_crypto.worker.live_recovery import LiveRecoveryResult, recover_one_live_submission
+from hmt_crypto.worker.tradingview_runner import admit_one_tradingview_signal
 
 
 class PrivateWorkerSettings(BaseSettings):
@@ -416,6 +417,28 @@ async def run_private_worker(
                                             if gtt_result.submission_id is None
                                             else str(gtt_result.submission_id)
                                         ),
+                                    )
+                                tradingview_result = await admit_one_tradingview_signal(
+                                    database,
+                                    account_id=claim.account_id,
+                                    owner_id=process.owner_id,
+                                )
+                                if tradingview_result.kind not in {"IDLE", "DEFERRED"}:
+                                    logger.info(
+                                        "tradingview_signal_cycle",
+                                        account_id=str(account_id),
+                                        outcome=tradingview_result.kind,
+                                        signal_id=(
+                                            None
+                                            if tradingview_result.signal_id is None
+                                            else str(tradingview_result.signal_id)
+                                        ),
+                                        submission_id=(
+                                            None
+                                            if tradingview_result.submission_id is None
+                                            else str(tradingview_result.submission_id)
+                                        ),
+                                        reason=tradingview_result.reason,
                                     )
                                 recovery = await _recover_live_submission(
                                     database,
