@@ -216,10 +216,47 @@ class GttOrder(Base):
     __mapper_args__ = {"version_id_col": version}
 
 
+class AccountLiveControl(Base):
+    """Fail-closed Live readiness state; absence and unknown states deny dispatch."""
+
+    __tablename__ = "account_live_controls"
+    __table_args__ = (
+        CheckConstraint(
+            "credential_state IN ('unconfigured','pending','verified','failed')",
+            name="credential_state_allowed",
+        ),
+        CheckConstraint(
+            "reconciliation_state IN ('unknown','running','ready','degraded','blocked')",
+            name="reconciliation_state_allowed",
+        ),
+        CheckConstraint("version >= 1", name="version_positive"),
+        UniqueConstraint("account_id", name="uq_account_live_controls_account"),
+        Index("ix_account_live_controls_readiness", "credential_state", "reconciliation_state"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    credential_state: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    reconciliation_state: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    entries_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    exits_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    reconciled_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_error_code: Mapped[str | None] = mapped_column(NulFreeString(64))
+    version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
 __all__ = [
     "AccountAssignment",
     "ApplicationSetting",
     "GttOrder",
+    "AccountLiveControl",
     "CredentialSecretReference",
     "MarketQuote",
     "PlatformAuditEvent",

@@ -53,6 +53,10 @@ interface Account {
   permission: "view" | "trade" | "manage";
   identityVerified: boolean;
   credentialConfigured: boolean;
+  credentialState: "unconfigured" | "pending" | "verified" | "failed";
+  reconciliationState: "unknown" | "running" | "ready" | "degraded" | "blocked";
+  entriesEnabled: boolean;
+  exitsEnabled: boolean;
 }
 
 interface Product {
@@ -179,6 +183,10 @@ function MarketPage() {
 function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [profileName, setProfileName] = useState("");
+  const [credentialAccount, setCredentialAccount] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [apiSecret, setApiSecret] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
   const load = useCallback(() => { void request<{ accounts: Account[] }>("/api/v1/accounts").then((v) => setAccounts(v.accounts)); }, []);
   useEffect(load, [load]);
   async function create(event: FormEvent) {
@@ -186,7 +194,25 @@ function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csr
     await request("/api/v1/accounts", { method: "POST", body: JSON.stringify({ profile_name: profileName, environment: "prod", owner_user_id: user.id }) }, csrf);
     setProfileName(""); load();
   }
-  return <><Panel title="Delta accounts">{user.role === "admin" ? <form className="flex gap-2 p-4" onSubmit={(event) => void create(event)}><input className="rounded border px-3 py-2" onChange={(e) => setProfileName(e.target.value)} placeholder="Account profile name" required value={profileName}/><button className="rounded bg-blue-600 px-4 py-2 text-white" type="submit">Add Live account</button></form> : null}<div className="overflow-x-auto"><table><thead><tr><th>Profile</th><th>Environment</th><th>Access</th><th>Credentials</th><th>Identity</th></tr></thead><tbody>{accounts.map((a) => <tr key={a.id}><td>{a.profileName}</td><td>{a.environment}</td><td>{a.permission}</td><td>{a.credentialConfigured ? "Configured" : "Required"}</td><td>{a.identityVerified ? "Verified" : "Pending"}</td></tr>)}{accounts.length === 0 ? <tr><td colSpan={5}>No assigned Delta accounts.</td></tr> : null}</tbody></table></div></Panel></>;
+  async function saveCredentials(event: FormEvent) {
+    event.preventDefault();
+    if (credentialAccount === null) return;
+    setNotice(null);
+    try {
+      await request(`/api/v1/accounts/${credentialAccount}/credentials`, { method: "POST", body: JSON.stringify({ api_key: apiKey, api_secret: apiSecret }) }, csrf);
+      setNotice("Credentials stored in AWS Secrets Manager. Verify them from this EC2 static IP.");
+      setApiKey(""); setApiSecret(""); load();
+    } catch { setNotice("Credential storage failed."); }
+  }
+  async function verify(accountId: string) {
+    setNotice(null);
+    try {
+      await request(`/api/v1/accounts/${accountId}/verify`, { method: "POST" }, csrf);
+      setNotice("Delta credentials and static-IP access verified. Entries remain disabled pending reconciliation.");
+    } catch { setNotice("Verification was rejected or Delta was unavailable."); }
+    load();
+  }
+  return <><Panel title="Delta accounts">{user.role === "admin" ? <form className="flex gap-2 p-4" onSubmit={(event) => void create(event)}><input className="rounded border px-3 py-2" onChange={(e) => setProfileName(e.target.value)} placeholder="Account profile name" required value={profileName}/><button className="rounded bg-blue-600 px-4 py-2 text-white" type="submit">Add Live account</button></form> : null}{notice ? <p className="px-4 pb-4 text-sm text-slate-700" role="status">{notice}</p> : null}<div className="overflow-x-auto"><table><thead><tr><th>Profile</th><th>Environment</th><th>Access</th><th>Credentials</th><th>Reconciliation</th><th>Live gates</th><th>Actions</th></tr></thead><tbody>{accounts.map((a) => <tr key={a.id}><td>{a.profileName}</td><td>{a.environment}</td><td>{a.permission}</td><td>{a.credentialState}</td><td>{a.reconciliationState}</td><td>Entries {a.entriesEnabled ? "ON" : "OFF"} · Exits {a.exitsEnabled ? "ON" : "OFF"}</td><td>{user.role === "admin" ? <div className="flex gap-2"><button className="text-blue-700" onClick={() => setCredentialAccount(a.id)} type="button">Configure</button><button className="text-blue-700 disabled:text-slate-400" disabled={!a.credentialConfigured} onClick={() => void verify(a.id)} type="button">Verify</button></div> : "—"}</td></tr>)}{accounts.length === 0 ? <tr><td colSpan={7}>No assigned Delta accounts.</td></tr> : null}</tbody></table></div>{credentialAccount !== null ? <form className="grid gap-3 border-t p-4 md:grid-cols-2" onSubmit={(event) => void saveCredentials(event)}><div className="md:col-span-2"><strong>Replace Delta API credentials</strong><p className="text-xs text-slate-500">Use a production India key with the EC2 Elastic IP whitelisted. Values are never returned.</p></div><input autoComplete="off" className="rounded border px-3 py-2" onChange={(e) => setApiKey(e.target.value)} placeholder="API key" required value={apiKey}/><input autoComplete="new-password" className="rounded border px-3 py-2" onChange={(e) => setApiSecret(e.target.value)} placeholder="API secret" required type="password" value={apiSecret}/><div className="flex gap-2 md:col-span-2"><button className="rounded bg-blue-600 px-4 py-2 text-white" type="submit">Store credentials</button><button className="rounded border px-4 py-2" onClick={() => { setCredentialAccount(null); setApiKey(""); setApiSecret(""); }} type="button">Cancel</button></div></form> : null}</Panel></>;
 }
 
 function UsersPage({ csrf }: { readonly csrf: string }) {

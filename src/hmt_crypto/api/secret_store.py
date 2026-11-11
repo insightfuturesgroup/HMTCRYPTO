@@ -59,5 +59,25 @@ class AwsDeltaSecretStore:
             RecoveryWindowInDays=7,
         )
 
+    async def read(self, arn: str) -> tuple[str, str]:
+        """Return one credential pair solely to an immediate trusted transport boundary."""
+
+        def fetch() -> object:
+            return self._client.get_secret_value(SecretId=arn, VersionStage="AWSCURRENT")
+
+        result = await asyncio.to_thread(fetch)
+        if not isinstance(result, dict) or type(result.get("SecretString")) is not str:
+            raise RuntimeError("credential secret is unavailable")
+        try:
+            value = json.loads(result["SecretString"])
+        except (TypeError, ValueError):
+            raise RuntimeError("credential secret is invalid") from None
+        if not isinstance(value, dict) or set(value) != {"api_key", "api_secret"}:
+            raise RuntimeError("credential secret is invalid")
+        api_key, api_secret = value["api_key"], value["api_secret"]
+        if type(api_key) is not str or type(api_secret) is not str or not api_key or not api_secret:
+            raise RuntimeError("credential secret is invalid")
+        return api_key, api_secret
+
 
 __all__ = ["AwsDeltaSecretStore", "StoredSecret"]

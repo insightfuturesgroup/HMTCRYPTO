@@ -19,6 +19,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.exc import IntegrityError
 
+from hmt_crypto.api.delta_verification import (
+    DeltaIdentityEvidence,
+    DeltaVerificationRejected,
+    DeltaVerificationUnavailable,
+    verify_delta_credentials,
+)
 from hmt_crypto.api.platform_auth import (
     AuthenticationRejected,
     AuthenticationUnavailable,
@@ -30,6 +36,7 @@ from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
     Account,
     AccountAssignment,
+    AccountLiveControl,
     CatalogueProduct,
     CatalogueSnapshot,
     CredentialSecretReference,
@@ -69,7 +76,7 @@ class UpdateUserBody(_Body):
 
 class CreateAccountBody(_Body):
     profile_name: str = Field(min_length=1, max_length=128)
-    environment: Literal["testnet", "prod"]
+    environment: Literal["prod"]
     owner_user_id: UUID
 
 
@@ -450,8 +457,10 @@ def install_platform_routes(
     async def list_accounts(request: Request) -> dict[str, object]:
         actor = await principal(request)
         async with database.transaction() as session:
-            query = select(Account, AccountAssignment.permission).join(
-                AccountAssignment, AccountAssignment.account_id == Account.id
+            query = (
+                select(Account, AccountAssignment.permission, AccountLiveControl)
+                .join(AccountAssignment, AccountAssignment.account_id == Account.id)
+                .outerjoin(AccountLiveControl, AccountLiveControl.account_id == Account.id)
             )
             if actor.role != "admin":
                 query = query.where(AccountAssignment.user_id == actor.profile_id)
@@ -467,8 +476,16 @@ def install_platform_routes(
                         "permission": permission,
                         "identityVerified": account.identity_verified_at is not None,
                         "credentialConfigured": account.current_credential_version is not None,
+                        "credentialState": "unconfigured"
+                        if control is None
+                        else control.credential_state,
+                        "reconciliationState": "unknown"
+                        if control is None
+                        else control.reconciliation_state,
+                        "entriesEnabled": False if control is None else control.entries_enabled,
+                        "exitsEnabled": False if control is None else control.exits_enabled,
                     }
-                    for account, permission in rows
+                    for account, permission, control in rows
                 ]
             }
 
@@ -505,6 +522,22 @@ def install_platform_routes(
                         user_id=owner.id,
                         account_id=account.id,
                         permission="manage",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                session.add(
+                    AccountLiveControl(
+                        id=uuid4(),
+                        account_id=account.id,
+                        credential_state="unconfigured",
+                        reconciliation_state="unknown",
+                        entries_enabled=False,
+                        exits_enabled=False,
+                        verified_at=None,
+                        reconciled_at=None,
+                        last_error_code=None,
+                        version=1,
                         created_at=now,
                         updated_at=now,
                     )
@@ -638,6 +671,21 @@ def install_platform_routes(
                 )
                 account.current_credential_version = version
                 account.updated_at = now
+                control = (
+                    await session.execute(
+                        select(AccountLiveControl).where(
+                            AccountLiveControl.account_id == account.id
+                        )
+                    )
+                ).scalar_one()
+                control.credential_state = "pending"
+                control.reconciliation_state = "unknown"
+                control.entries_enabled = False
+                control.exits_enabled = False
+                control.verified_at = None
+                control.reconciled_at = None
+                control.last_error_code = None
+                control.updated_at = now
                 await append_audit(
                     session,
                     actor=actor,
@@ -657,6 +705,129 @@ def install_platform_routes(
             "fingerprintHint": fingerprint,
             "status": "pending_verification",
         }
+
+    @app.post("/api/v1/accounts/{account_id}/verify")
+    async def verify_account(account_id: UUID, request: Request) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        request_id = _request_id(request)
+        if actor.last_login_at is None or datetime.now(UTC) - actor.last_login_at > timedelta(
+            minutes=15
+        ):
+            raise HTTPException(status_code=403, detail="fresh_authentication_required")
+        async with database.transaction() as session:
+            account = await session.get(Account, account_id)
+            if account is None or account.current_credential_version is None:
+                raise HTTPException(status_code=409, detail="credentials_not_configured")
+            reference = (
+                await session.execute(
+                    select(CredentialSecretReference).where(
+                        CredentialSecretReference.account_id == account.id,
+                        CredentialSecretReference.credential_version
+                        == account.current_credential_version,
+                    )
+                )
+            ).scalar_one_or_none()
+            if reference is None or reference.status == "revoked":
+                raise HTTPException(status_code=409, detail="credentials_not_configured")
+            secret_arn = reference.secret_arn
+            environment = account.environment
+            credential_version = account.current_credential_version
+        failure_code: str | None
+        evidence: DeltaIdentityEvidence | None = None
+        try:
+            api_key, api_secret = await secret_store.read(secret_arn)
+            try:
+                evidence = await verify_delta_credentials(
+                    environment=environment,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                )
+            finally:
+                api_key = ""
+                api_secret = ""
+        except DeltaVerificationRejected:
+            failure_code = "credential_or_ip_rejected"
+        except (DeltaVerificationUnavailable, RuntimeError):
+            failure_code = "verification_unavailable"
+        else:
+            failure_code = None
+        async with database.transaction() as session:
+            account = await session.get(Account, account_id)
+            if account is None or account.current_credential_version != credential_version:
+                raise HTTPException(status_code=409, detail="credential_revision_changed")
+            reference = (
+                await session.execute(
+                    select(CredentialSecretReference).where(
+                        CredentialSecretReference.account_id == account.id,
+                        CredentialSecretReference.credential_version == credential_version,
+                    )
+                )
+            ).scalar_one()
+            credential = (
+                await session.execute(
+                    select(CredentialVersion).where(
+                        CredentialVersion.account_id == account.id,
+                        CredentialVersion.credential_version == credential_version,
+                    )
+                )
+            ).scalar_one()
+            control = (
+                await session.execute(
+                    select(AccountLiveControl).where(AccountLiveControl.account_id == account.id)
+                )
+            ).scalar_one()
+            now = datetime.now(UTC)
+            control.entries_enabled = False
+            control.exits_enabled = False
+            control.reconciliation_state = "unknown"
+            control.reconciled_at = None
+            control.updated_at = now
+            if failure_code is not None:
+                control.credential_state = "failed"
+                control.last_error_code = failure_code
+                reference.status = "pending_verification"
+                await append_audit(
+                    session,
+                    actor=actor,
+                    action="CREDENTIAL_VERIFICATION",
+                    target_type="account",
+                    target_id=str(account.id),
+                    outcome="REJECTED",
+                    request_id=request_id,
+                    details={"errorCode": failure_code},
+                )
+                result = {
+                    "accountId": str(account.id),
+                    "verified": False,
+                    "errorCode": failure_code,
+                }
+            else:
+                if evidence is None:
+                    raise HTTPException(status_code=503, detail="verification_unavailable")
+                control.credential_state = "verified"
+                control.verified_at = now
+                control.last_error_code = None
+                reference.status = "verified"
+                credential.observed_external_user_id = evidence.external_user_id
+                account.external_user_id = evidence.external_user_id
+                account.identity_verified_at = now
+                account.updated_at = now
+                await append_audit(
+                    session,
+                    actor=actor,
+                    action="CREDENTIAL_VERIFICATION",
+                    target_type="account",
+                    target_id=str(account.id),
+                    outcome="SUCCEEDED",
+                    request_id=request_id,
+                    details={"credentialVersion": credential_version},
+                )
+                result = {"accountId": str(account.id), "verified": True, "errorCode": None}
+        if failure_code == "verification_unavailable":
+            raise HTTPException(status_code=503, detail=failure_code)
+        if failure_code is not None:
+            raise HTTPException(status_code=422, detail=failure_code)
+        return result
 
     @app.get("/api/v1/market/products")
     async def market_products(request: Request) -> dict[str, object]:
@@ -857,11 +1028,22 @@ def install_platform_routes(
                 if actor.role == "viewer" or permission == "view":
                     raise HTTPException(status_code=403, detail="trading_permission_required")
                 account = await session.get(Account, body.account_id)
+                control = (
+                    await session.execute(
+                        select(AccountLiveControl).where(
+                            AccountLiveControl.account_id == body.account_id
+                        )
+                    )
+                ).scalar_one_or_none()
                 if (
                     account is None
                     or account.mode != "LIVE"
                     or account.identity_verified_at is None
                     or account.current_credential_version is None
+                    or control is None
+                    or control.credential_state != "verified"
+                    or control.reconciliation_state != "ready"
+                    or not control.exits_enabled
                 ):
                     raise HTTPException(status_code=409, detail="account_not_live_ready")
                 row = GttOrder(

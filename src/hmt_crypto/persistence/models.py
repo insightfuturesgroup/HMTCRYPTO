@@ -26,6 +26,7 @@ from hmt_crypto.persistence.order_models import Order
 from hmt_crypto.persistence.paper_execution_models import PaperExecutionEvent, PaperExecutionHead
 from hmt_crypto.persistence.platform_models import (
     AccountAssignment,
+    AccountLiveControl,
     ApplicationSetting,
     CredentialSecretReference,
     GttOrder,
@@ -102,6 +103,7 @@ __all__ = [
     "FundingSnapshot",
     "PnlSnapshot",
     "PlatformUser",
+    "AccountLiveControl",
     "AccountAssignment",
     "CredentialSecretReference",
     "WatchlistItem",
