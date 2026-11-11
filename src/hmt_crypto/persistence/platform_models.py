@@ -550,6 +550,45 @@ class LiveOrderSubmission(Base):
     __mapper_args__ = {"version_id_col": version}
 
 
+class LiveOrderSubmissionEvent(Base):
+    """Append-only transition evidence for one Live submission."""
+
+    __tablename__ = "live_order_submission_events"
+    __table_args__ = (
+        CheckConstraint("sequence >= 1", name="sequence_positive"),
+        CheckConstraint(
+            "from_status IN ('PENDING','CLAIMED','PREPARED','SENDING','UNCERTAIN',"
+            "'ACCEPTED','REJECTED','BLOCKED')",
+            name="from_status_allowed",
+        ),
+        CheckConstraint(
+            "to_status IN ('PENDING','CLAIMED','PREPARED','SENDING','UNCERTAIN',"
+            "'ACCEPTED','REJECTED','BLOCKED')",
+            name="to_status_allowed",
+        ),
+        UniqueConstraint("submission_id", "sequence", name="uq_submission_events_sequence"),
+        Index("ix_submission_events_account_occurred", "account_id", "occurred_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    submission_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("hmt_crypto.live_order_submissions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    from_status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    to_status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    worker_owner_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    worker_generation: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    credential_version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 __all__ = [
     "AccountAssignment",
     "AccountRiskPolicy",
@@ -558,6 +597,7 @@ __all__ = [
     "LiveOrderIntent",
     "LiveOrderPreview",
     "LiveOrderSubmission",
+    "LiveOrderSubmissionEvent",
     "AccountLiveControl",
     "CredentialSecretReference",
     "MarketQuote",

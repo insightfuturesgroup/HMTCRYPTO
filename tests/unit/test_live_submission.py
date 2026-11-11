@@ -1,5 +1,6 @@
 """Focused deterministic and fencing checks for Live submission recovery."""
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -9,6 +10,7 @@ from hmt_crypto.api.live_submission import (
     SubmissionFence,
     make_live_client_order_id,
     require_transition,
+    submission_event_sha256,
 )
 
 pytestmark = pytest.mark.unit
@@ -51,3 +53,34 @@ def test_transition_graph_rejects_skips_and_terminal_reentry(current: str, targe
     fence = SubmissionFence(OWNER, 4, 2)
     with pytest.raises(LiveSubmissionTransitionError):
         require_transition(current=current, target=target, stored_fence=fence, actor_fence=fence)
+
+
+def test_submission_event_hash_is_deterministic_and_fence_bound() -> None:
+    occurred_at = datetime(2026, 11, 11, 10, 30, tzinfo=UTC)
+    fence = SubmissionFence(OWNER, 4, 2)
+    first = submission_event_sha256(
+        submission_id=INTENT,
+        sequence=1,
+        from_status="PENDING",
+        to_status="CLAIMED",
+        fence=fence,
+        occurred_at=occurred_at,
+    )
+
+    assert first == submission_event_sha256(
+        submission_id=INTENT,
+        sequence=1,
+        from_status="PENDING",
+        to_status="CLAIMED",
+        fence=fence,
+        occurred_at=occurred_at,
+    )
+    assert len(first) == 64
+    assert first != submission_event_sha256(
+        submission_id=INTENT,
+        sequence=1,
+        from_status="PENDING",
+        to_status="CLAIMED",
+        fence=SubmissionFence(OWNER, 5, 2),
+        occurred_at=occurred_at,
+    )

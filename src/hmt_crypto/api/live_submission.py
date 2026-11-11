@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from base64 import b32encode
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import UUID
 
@@ -69,9 +70,42 @@ def require_transition(
         raise LiveSubmissionTransitionError from None
 
 
+def submission_event_sha256(
+    *,
+    submission_id: UUID,
+    sequence: int,
+    from_status: str,
+    to_status: str,
+    fence: SubmissionFence,
+    occurred_at: datetime,
+) -> str:
+    """Hash canonical transition evidence for append-only audit storage."""
+    if (
+        type(submission_id) is not UUID
+        or type(sequence) is not int
+        or sequence < 1
+        or type(from_status) is not str
+        or from_status not in _ALLOWED
+        or type(to_status) is not str
+        or to_status not in _ALLOWED
+        or type(fence) is not SubmissionFence
+        or not isinstance(occurred_at, datetime)
+        or occurred_at.tzinfo is None
+        or occurred_at.utcoffset() is None
+    ):
+        raise LiveSubmissionTransitionError from None
+    timestamp = occurred_at.astimezone(UTC).isoformat(timespec="microseconds")
+    payload = (
+        f"submission-event:v1:{submission_id}:{sequence}:{from_status}:{to_status}:"
+        f"{fence.owner_id}:{fence.generation}:{fence.credential_version}:{timestamp}"
+    )
+    return sha256(payload.encode("ascii")).hexdigest()
+
+
 __all__ = [
     "LiveSubmissionTransitionError",
     "SubmissionFence",
     "make_live_client_order_id",
     "require_transition",
+    "submission_event_sha256",
 ]
