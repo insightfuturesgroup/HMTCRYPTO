@@ -1,9 +1,19 @@
 """Multi-user control-plane records; no secret values are stored here."""
 
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Text, UniqueConstraint, Uuid
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Numeric,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from hmt_crypto.persistence.db import Base
@@ -342,14 +352,72 @@ class PrivateWorkerLease(Base):
     lease_until: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class AccountRiskPolicy(Base):
+    """Admin-owned hard limits required before any Live gate can open."""
+
+    __tablename__ = "account_risk_policies"
+    __table_args__ = (
+        CheckConstraint("max_order_notional > 0", name="max_order_notional_pos"),
+        CheckConstraint("max_position_notional > 0", name="max_position_notional_pos"),
+        CheckConstraint("max_daily_loss > 0", name="max_daily_loss_pos"),
+        CheckConstraint("max_open_orders >= 1", name="max_open_orders_pos"),
+        CheckConstraint("version >= 1", name="version_pos"),
+        UniqueConstraint("account_id", name="uq_account_risk_policies_account"),
+        Index("ix_account_risk_policies_updated_by", "updated_by_user_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    max_order_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    max_position_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    max_daily_loss: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    max_open_orders: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    allowed_product_ids: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_by_user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+class PlatformLiveControl(Base):
+    """Singleton global Live gate; false is the deployment default."""
+
+    __tablename__ = "platform_live_controls"
+    __table_args__ = (
+        CheckConstraint("control_key = 'global'", name="global_key"),
+        CheckConstraint("version >= 1", name="version_pos"),
+        Index("ix_platform_live_controls_updated_by", "updated_by_user_id"),
+    )
+
+    control_key: Mapped[str] = mapped_column(NulFreeString(16), primary_key=True)
+    entries_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reason: Mapped[str] = mapped_column(NulFreeString(256), nullable=False)
+    updated_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT")
+    )
+    version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
 __all__ = [
     "AccountAssignment",
+    "AccountRiskPolicy",
     "ApplicationSetting",
     "GttOrder",
     "AccountLiveControl",
     "CredentialSecretReference",
     "MarketQuote",
     "PlatformAuditEvent",
+    "PlatformLiveControl",
     "PlatformUser",
     "PrivateReconciliationSnapshot",
     "PrivateWorkerLease",

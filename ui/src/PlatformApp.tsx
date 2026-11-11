@@ -86,6 +86,20 @@ interface AuditRow {
   occurredAt: string;
 }
 
+interface HealthAccount {
+  accountId: string;
+  profileName: string;
+  credentialState: string;
+  reconciliationState: string;
+  reconciliationAgeSeconds: number | null;
+  workerLeaseActive: boolean;
+  riskConfigured: boolean;
+  riskEnabled: boolean;
+  entriesEnabled: boolean;
+  exitsEnabled: boolean;
+  lastErrorCode: string | null;
+}
+
 async function request<T>(path: string, init?: RequestInit, csrf?: string): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
@@ -215,6 +229,27 @@ function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csr
   return <><Panel title="Delta accounts">{user.role === "admin" ? <form className="flex gap-2 p-4" onSubmit={(event) => void create(event)}><input className="rounded border px-3 py-2" onChange={(e) => setProfileName(e.target.value)} placeholder="Account profile name" required value={profileName}/><button className="rounded bg-blue-600 px-4 py-2 text-white" type="submit">Add Live account</button></form> : null}{notice ? <p className="px-4 pb-4 text-sm text-slate-700" role="status">{notice}</p> : null}<div className="overflow-x-auto"><table><thead><tr><th>Profile</th><th>Environment</th><th>Access</th><th>Credentials</th><th>Reconciliation</th><th>Live gates</th><th>Actions</th></tr></thead><tbody>{accounts.map((a) => <tr key={a.id}><td>{a.profileName}</td><td>{a.environment}</td><td>{a.permission}</td><td>{a.credentialState}</td><td>{a.reconciliationState}</td><td>Entries {a.entriesEnabled ? "ON" : "OFF"} · Exits {a.exitsEnabled ? "ON" : "OFF"}</td><td>{user.role === "admin" ? <div className="flex gap-2"><button className="text-blue-700" onClick={() => setCredentialAccount(a.id)} type="button">Configure</button><button className="text-blue-700 disabled:text-slate-400" disabled={!a.credentialConfigured} onClick={() => void verify(a.id)} type="button">Verify</button></div> : "—"}</td></tr>)}{accounts.length === 0 ? <tr><td colSpan={7}>No assigned Delta accounts.</td></tr> : null}</tbody></table></div>{credentialAccount !== null ? <form className="grid gap-3 border-t p-4 md:grid-cols-2" onSubmit={(event) => void saveCredentials(event)}><div className="md:col-span-2"><strong>Replace Delta API credentials</strong><p className="text-xs text-slate-500">Use a production India key with the EC2 Elastic IP whitelisted. Values are never returned.</p></div><input autoComplete="off" className="rounded border px-3 py-2" onChange={(e) => setApiKey(e.target.value)} placeholder="API key" required value={apiKey}/><input autoComplete="new-password" className="rounded border px-3 py-2" onChange={(e) => setApiSecret(e.target.value)} placeholder="API secret" required type="password" value={apiSecret}/><div className="flex gap-2 md:col-span-2"><button className="rounded bg-blue-600 px-4 py-2 text-white" type="submit">Store credentials</button><button className="rounded border px-4 py-2" onClick={() => { setCredentialAccount(null); setApiKey(""); setApiSecret(""); }} type="button">Cancel</button></div></form> : null}</Panel></>;
 }
 
+function RiskPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountId, setAccountId] = useState("");
+  const [maxOrder, setMaxOrder] = useState("100");
+  const [maxPosition, setMaxPosition] = useState("500");
+  const [maxLoss, setMaxLoss] = useState("50");
+  const [maxOpen, setMaxOpen] = useState("5");
+  const [products, setProducts] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => { void request<{ accounts: Account[] }>("/api/v1/accounts").then((v) => { setAccounts(v.accounts); setAccountId(v.accounts[0]?.id ?? ""); }); }, []);
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    const allowed = products.split(",").map((v) => Number(v.trim())).filter((v) => Number.isInteger(v) && v > 0);
+    try {
+      await request(`/api/v1/risk/${accountId}`, { method: "PUT", body: JSON.stringify({ max_order_notional: maxOrder, max_position_notional: maxPosition, max_daily_loss: maxLoss, max_open_orders: Number(maxOpen), allowed_product_ids: allowed, enabled: true }) }, csrf);
+      setNotice("Risk policy saved. Live gates were reset and must be enabled separately.");
+    } catch { setNotice("Risk policy was rejected. Confirm catalogue product IDs and limits."); }
+  }
+  return <Panel title="Live risk policy"><form className="grid gap-3 p-4 md:grid-cols-2" onSubmit={(e) => void save(e)}><select className="rounded border px-3 py-2 md:col-span-2" onChange={(e) => setAccountId(e.target.value)} required value={accountId}><option value="">Select Delta account</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.profileName}</option>)}</select><label>Maximum order notional<input className="block w-full rounded border px-3 py-2" onChange={(e) => setMaxOrder(e.target.value)} value={maxOrder}/></label><label>Maximum position notional<input className="block w-full rounded border px-3 py-2" onChange={(e) => setMaxPosition(e.target.value)} value={maxPosition}/></label><label>Maximum daily loss<input className="block w-full rounded border px-3 py-2" onChange={(e) => setMaxLoss(e.target.value)} value={maxLoss}/></label><label>Maximum open orders<input className="block w-full rounded border px-3 py-2" min="1" onChange={(e) => setMaxOpen(e.target.value)} type="number" value={maxOpen}/></label><label className="md:col-span-2">Allowed product IDs, comma separated<input className="block w-full rounded border px-3 py-2" onChange={(e) => setProducts(e.target.value)} placeholder="27, 3136" value={products}/></label>{user.role === "admin" ? <button className="rounded bg-blue-600 px-4 py-2 text-white md:col-span-2" disabled={!accountId} type="submit">Save and enable risk policy</button> : <p>Only an administrator can change limits.</p>}{notice ? <p className="md:col-span-2" role="status">{notice}</p> : null}</form></Panel>;
+}
+
 function UsersPage({ csrf }: { readonly csrf: string }) {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [email, setEmail] = useState("");
@@ -225,10 +260,13 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
   return <Panel title="User management"><form className="grid gap-2 p-4 md:grid-cols-[1fr_1fr_auto]" onSubmit={(e) => void invite(e)}><input className="rounded border px-3 py-2" onChange={(e) => setEmail(e.target.value)} placeholder="Email" required type="email" value={email}/><input className="rounded border px-3 py-2" onChange={(e) => setName(e.target.value)} placeholder="Full name" required value={name}/><button className="rounded bg-blue-600 px-4 py-2 text-white">Invite trader</button></form><div className="overflow-x-auto"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last login</th></tr></thead><tbody>{users.map((u) => <tr key={u.id}><td>{u.fullName}</td><td>{u.email}</td><td>{u.role}</td><td>{u.status}</td><td>{u.lastLoginAt ?? "Never"}</td></tr>)}</tbody></table></div></Panel>;
 }
 
-function AuditPage() {
+function AuditPage({ csrf }: { readonly csrf: string }) {
   const [events, setEvents] = useState<AuditRow[]>([]);
-  useEffect(() => { void request<{ events: AuditRow[] }>("/api/v1/admin/audit").then((v) => setEvents(v.events)); }, []);
-  return <Panel title="Security audit"><div className="overflow-x-auto"><table><thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Outcome</th></tr></thead><tbody>{events.map((e) => <tr key={e.id}><td>{e.occurredAt}</td><td>{e.action}</td><td>{e.targetType}: {e.targetId}</td><td>{e.outcome}</td></tr>)}</tbody></table></div></Panel>;
+  const [health, setHealth] = useState<{ globalEntriesEnabled: boolean; globalReason: string | null; accounts: HealthAccount[] } | null>(null);
+  const load = useCallback(() => { void request<{ events: AuditRow[] }>("/api/v1/admin/audit").then((v) => setEvents(v.events)); void request<{ globalEntriesEnabled: boolean; globalReason: string | null; accounts: HealthAccount[] }>("/api/v1/admin/health/platform").then(setHealth); }, []);
+  useEffect(load, [load]);
+  async function globalGate(enabled: boolean) { await request("/api/v1/admin/live-control", { method: "PUT", body: JSON.stringify({ entries_enabled: enabled, reason: enabled ? "administrator qualification approval" : "administrator emergency disable" }) }, csrf); load(); }
+  return <><Panel title="Live platform health"><div className="flex items-center gap-3 p-4"><strong>Global entries: {health?.globalEntriesEnabled ? "ENABLED" : "DISABLED"}</strong><button className="rounded border px-3 py-2" onClick={() => void globalGate(false)} type="button">Emergency disable entries</button><button className="rounded bg-amber-600 px-3 py-2 text-white" onClick={() => void globalGate(true)} type="button">Enable global entry gate</button></div><div className="overflow-x-auto"><table><thead><tr><th>Account</th><th>Worker</th><th>Reconciliation</th><th>Risk</th><th>Gates</th><th>Error</th></tr></thead><tbody>{health?.accounts.map((a) => <tr key={a.accountId}><td>{a.profileName}</td><td>{a.workerLeaseActive ? "Active" : "Missing"}</td><td>{a.reconciliationState} · {a.reconciliationAgeSeconds ?? "—"}s</td><td>{a.riskEnabled ? "Enabled" : a.riskConfigured ? "Disabled" : "Missing"}</td><td>E {a.entriesEnabled ? "ON" : "OFF"} · X {a.exitsEnabled ? "ON" : "OFF"}</td><td>{a.lastErrorCode ?? "—"}</td></tr>)}</tbody></table></div></Panel><Panel title="Security audit"><div className="overflow-x-auto"><table><thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Outcome</th></tr></thead><tbody>{events.map((e) => <tr key={e.id}><td>{e.occurredAt}</td><td>{e.action}</td><td>{e.targetType}: {e.targetId}</td><td>{e.outcome}</td></tr>)}</tbody></table></div></Panel></>;
 }
 
 function Shell({ session, onLogout }: { readonly session: Session; readonly onLogout: () => void }) {
@@ -236,7 +274,7 @@ function Shell({ session, onLogout }: { readonly session: Session; readonly onLo
   const user = session.user!;
   const csrf = session.csrfToken!;
   const visible = navigation.filter((item) => !item.admin || user.role === "admin");
-  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage/> : null}{["trading","orders","positions","gtt","strategies","risk","performance","notifications","settings"].includes(page) ? <Deferred name={navigation.find((item) => item.page === page)?.label ?? page}/> : null}</div></main></div></div>;
+  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "risk" ? <RiskPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage csrf={csrf}/> : null}{["trading","orders","positions","gtt","strategies","performance","notifications","settings"].includes(page) ? <Deferred name={navigation.find((item) => item.page === page)?.label ?? page}/> : null}</div></main></div></div>;
 }
 
 export default function PlatformApp() {

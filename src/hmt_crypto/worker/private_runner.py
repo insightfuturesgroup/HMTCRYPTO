@@ -159,8 +159,8 @@ async def _claim(
             return None
         if control.reconciliation_state != "ready":
             control.reconciliation_state = "running"
-        control.entries_enabled = False
-        control.exits_enabled = False
+            control.entries_enabled = False
+            control.exits_enabled = False
         control.updated_at = now
         return _Claim(
             account_id,
@@ -246,8 +246,9 @@ async def _publish(
         if control is None:
             return False
         control.reconciliation_state = outcome
-        control.entries_enabled = False
-        control.exits_enabled = False
+        if outcome != "ready":
+            control.entries_enabled = False
+            control.exits_enabled = False
         control.reconciled_at = now
         control.last_error_code = None if outcome == "ready" else "foreign_or_incomplete_state"
         control.updated_at = now

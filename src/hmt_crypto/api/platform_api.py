@@ -41,6 +41,7 @@ from hmt_crypto.persistence.models import (
     Account,
     AccountAssignment,
     AccountLiveControl,
+    AccountRiskPolicy,
     CatalogueProduct,
     CatalogueSnapshot,
     CredentialSecretReference,
@@ -48,6 +49,7 @@ from hmt_crypto.persistence.models import (
     GttOrder,
     MarketQuote,
     PlatformAuditEvent,
+    PlatformLiveControl,
     PlatformUser,
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
@@ -113,6 +115,26 @@ class GttBody(_Body):
     limit_price: str | None = Field(default=None, max_length=64)
 
 
+class RiskPolicyBody(_Body):
+    max_order_notional: str = Field(min_length=1, max_length=64)
+    max_position_notional: str = Field(min_length=1, max_length=64)
+    max_daily_loss: str = Field(min_length=1, max_length=64)
+    max_open_orders: int = Field(ge=1, le=10_000)
+    allowed_product_ids: list[int] = Field(min_length=1, max_length=500)
+    enabled: bool
+
+
+class LiveGateBody(_Body):
+    entries_enabled: bool
+    exits_enabled: bool
+    reason: str = Field(min_length=3, max_length=256)
+
+
+class GlobalEntryGateBody(_Body):
+    entries_enabled: bool
+    reason: str = Field(min_length=3, max_length=256)
+
+
 @dataclass(frozen=True, slots=True)
 class Principal:
     profile_id: UUID
@@ -143,6 +165,17 @@ def _email(value: str) -> str:
     if normalized.count("@") != 1 or any(character.isspace() for character in normalized):
         raise HTTPException(status_code=400, detail="invalid_request")
     return normalized
+
+
+def _positive_decimal(value: str) -> Decimal:
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        raise HTTPException(status_code=400, detail="invalid_risk_limit") from None
+    exponent = parsed.as_tuple().exponent
+    if not parsed.is_finite() or parsed <= 0 or type(exponent) is not int or exponent < -18:
+        raise HTTPException(status_code=400, detail="invalid_risk_limit")
+    return parsed
 
 
 def _user_view(row: PlatformUser) -> dict[str, object]:
@@ -1189,6 +1222,300 @@ def install_platform_routes(
             )
             return {"id": str(row.id), "symbol": row.symbol, "productId": row.product_id}
 
+    @app.get("/api/v1/risk/{account_id}")
+    async def get_risk_policy(account_id: UUID, request: Request) -> dict[str, object]:
+        actor = await principal(request)
+        async with database.transaction() as session:
+            await account_permission(session, actor, account_id)
+            row = await session.scalar(
+                select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
+            )
+            if row is None:
+                return {"accountId": str(account_id), "configured": False, "policy": None}
+            return {
+                "accountId": str(account_id),
+                "configured": True,
+                "policy": {
+                    "maxOrderNotional": str(row.max_order_notional),
+                    "maxPositionNotional": str(row.max_position_notional),
+                    "maxDailyLoss": str(row.max_daily_loss),
+                    "maxOpenOrders": row.max_open_orders,
+                    "allowedProductIds": json.loads(row.allowed_product_ids),
+                    "enabled": row.enabled,
+                    "updatedAt": _utc(row.updated_at),
+                },
+            }
+
+    @app.put("/api/v1/risk/{account_id}")
+    async def put_risk_policy(
+        account_id: UUID, body: RiskPolicyBody, request: Request
+    ) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        request_id = _request_id(request)
+        if actor.last_login_at is None or datetime.now(UTC) - actor.last_login_at > timedelta(
+            minutes=15
+        ):
+            raise HTTPException(status_code=403, detail="fresh_authentication_required")
+        product_ids = tuple(sorted(set(body.allowed_product_ids)))
+        if len(product_ids) != len(body.allowed_product_ids) or any(
+            value <= 0 for value in product_ids
+        ):
+            raise HTTPException(status_code=400, detail="invalid_product_scope")
+        limits = (
+            _positive_decimal(body.max_order_notional),
+            _positive_decimal(body.max_position_notional),
+            _positive_decimal(body.max_daily_loss),
+        )
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            account = await session.get(Account, account_id)
+            if account is None or account.mode != "LIVE" or account.environment != "prod":
+                raise HTTPException(status_code=404, detail="account_not_found")
+            catalogue = await session.scalar(
+                select(CatalogueSnapshot)
+                .where(
+                    CatalogueSnapshot.region == "india",
+                    CatalogueSnapshot.environment == "prod",
+                    CatalogueSnapshot.fresh_until > now,
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            if catalogue is None:
+                raise HTTPException(status_code=409, detail="catalogue_not_ready")
+            known = set(
+                await session.scalars(
+                    select(CatalogueProduct.product_id).where(
+                        CatalogueProduct.snapshot_id == catalogue.id,
+                        CatalogueProduct.product_id.in_(product_ids),
+                    )
+                )
+            )
+            if known != set(product_ids):
+                raise HTTPException(status_code=400, detail="invalid_product_scope")
+            row = await session.scalar(
+                select(AccountRiskPolicy)
+                .where(AccountRiskPolicy.account_id == account_id)
+                .with_for_update()
+            )
+            if row is None:
+                row = AccountRiskPolicy(
+                    id=uuid4(),
+                    account_id=account_id,
+                    max_order_notional=limits[0],
+                    max_position_notional=limits[1],
+                    max_daily_loss=limits[2],
+                    max_open_orders=body.max_open_orders,
+                    allowed_product_ids=json.dumps(product_ids),
+                    enabled=body.enabled,
+                    updated_by_user_id=actor.profile_id,
+                    version=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                row.max_order_notional, row.max_position_notional, row.max_daily_loss = limits
+                row.max_open_orders = body.max_open_orders
+                row.allowed_product_ids = json.dumps(product_ids)
+                row.enabled = body.enabled
+                row.updated_by_user_id = actor.profile_id
+                row.updated_at = now
+            control = await session.scalar(
+                select(AccountLiveControl).where(AccountLiveControl.account_id == account_id)
+            )
+            if control is not None:
+                control.entries_enabled = False
+                control.exits_enabled = False
+                control.updated_at = now
+            await append_audit(
+                session,
+                actor=actor,
+                action="RISK_POLICY_UPDATED",
+                target_type="account",
+                target_id=str(account_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={"enabled": body.enabled, "productCount": len(product_ids)},
+            )
+        return {"accountId": str(account_id), "configured": True, "enabled": body.enabled}
+
+    @app.put("/api/v1/admin/live-control")
+    async def set_global_live_control(
+        body: GlobalEntryGateBody, request: Request
+    ) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        request_id = _request_id(request)
+        if actor.last_login_at is None or datetime.now(UTC) - actor.last_login_at > timedelta(
+            minutes=15
+        ):
+            raise HTTPException(status_code=403, detail="fresh_authentication_required")
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            row = await session.get(PlatformLiveControl, "global", with_for_update=True)
+            if row is None:
+                raise HTTPException(status_code=503, detail="live_control_unavailable")
+            row.entries_enabled = body.entries_enabled
+            row.reason = body.reason
+            row.updated_by_user_id = actor.profile_id
+            row.updated_at = now
+            if not body.entries_enabled:
+                controls = (
+                    await session.execute(select(AccountLiveControl).with_for_update())
+                ).scalars()
+                for control in controls:
+                    control.entries_enabled = False
+                    control.updated_at = now
+            await append_audit(
+                session,
+                actor=actor,
+                action="GLOBAL_ENTRY_GATE_CHANGED",
+                target_type="platform",
+                target_id="global",
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={"enabled": body.entries_enabled, "reason": body.reason},
+            )
+        return {"entriesEnabled": body.entries_enabled, "reason": body.reason}
+
+    @app.put("/api/v1/admin/accounts/{account_id}/live-control")
+    async def set_account_live_control(
+        account_id: UUID, body: LiveGateBody, request: Request
+    ) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        request_id = _request_id(request)
+        now = datetime.now(UTC)
+        if actor.last_login_at is None or now - actor.last_login_at > timedelta(minutes=15):
+            raise HTTPException(status_code=403, detail="fresh_authentication_required")
+        async with database.transaction() as session:
+            control = await session.scalar(
+                select(AccountLiveControl)
+                .where(AccountLiveControl.account_id == account_id)
+                .with_for_update()
+            )
+            if control is None:
+                raise HTTPException(status_code=404, detail="account_not_found")
+            if body.entries_enabled or body.exits_enabled:
+                account = await session.get(Account, account_id)
+                risk = await session.scalar(
+                    select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
+                )
+                lease = await session.scalar(
+                    select(PrivateWorkerLease).where(PrivateWorkerLease.account_id == account_id)
+                )
+                snapshot = await session.scalar(
+                    select(PrivateReconciliationSnapshot)
+                    .where(PrivateReconciliationSnapshot.account_id == account_id)
+                    .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+                    .limit(1)
+                )
+                global_control = await session.get(PlatformLiveControl, "global")
+                product_ids = () if risk is None else tuple(json.loads(risk.allowed_product_ids))
+                fresh_quotes = 0
+                if product_ids:
+                    fresh_quotes = int(
+                        await session.scalar(
+                            select(func.count(MarketQuote.id)).where(
+                                MarketQuote.region == "india",
+                                MarketQuote.environment == "prod",
+                                MarketQuote.product_id.in_(product_ids),
+                                MarketQuote.observed_at >= now - timedelta(seconds=30),
+                            )
+                        )
+                        or 0
+                    )
+                ready = (
+                    account is not None
+                    and account.mode == "LIVE"
+                    and account.environment == "prod"
+                    and account.identity_verified_at is not None
+                    and control.credential_state == "verified"
+                    and control.reconciliation_state == "ready"
+                    and control.reconciled_at is not None
+                    and control.reconciled_at >= now - timedelta(seconds=60)
+                    and risk is not None
+                    and risk.enabled
+                    and bool(product_ids)
+                    and fresh_quotes == len(product_ids)
+                    and lease is not None
+                    and lease.lease_until > now
+                    and snapshot is not None
+                    and snapshot.outcome == "ready"
+                    and snapshot.worker_owner_id == lease.owner_id
+                    and snapshot.worker_generation == lease.generation
+                    and snapshot.credential_version == lease.credential_version
+                )
+                if not ready or (
+                    body.entries_enabled
+                    and (global_control is None or not global_control.entries_enabled)
+                ):
+                    raise HTTPException(status_code=409, detail="live_gate_prerequisites_failed")
+            control.entries_enabled = body.entries_enabled
+            control.exits_enabled = body.exits_enabled
+            control.updated_at = now
+            await append_audit(
+                session,
+                actor=actor,
+                action="ACCOUNT_LIVE_GATE_CHANGED",
+                target_type="account",
+                target_id=str(account_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={
+                    "entriesEnabled": body.entries_enabled,
+                    "exitsEnabled": body.exits_enabled,
+                    "reason": body.reason,
+                },
+            )
+        return {
+            "accountId": str(account_id),
+            "entriesEnabled": body.entries_enabled,
+            "exitsEnabled": body.exits_enabled,
+        }
+
+    @app.get("/api/v1/admin/health/platform")
+    async def platform_health(request: Request) -> dict[str, object]:
+        await admin(request)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            global_control = await session.get(PlatformLiveControl, "global")
+            rows = await session.execute(
+                select(Account, AccountLiveControl, AccountRiskPolicy, PrivateWorkerLease)
+                .join(AccountLiveControl, AccountLiveControl.account_id == Account.id)
+                .outerjoin(AccountRiskPolicy, AccountRiskPolicy.account_id == Account.id)
+                .outerjoin(PrivateWorkerLease, PrivateWorkerLease.account_id == Account.id)
+                .order_by(Account.profile_name)
+            )
+            accounts = []
+            for account, control, risk, lease in rows:
+                reconciliation_age = (
+                    None
+                    if control.reconciled_at is None
+                    else max(0, int((now - control.reconciled_at).total_seconds()))
+                )
+                accounts.append(
+                    {
+                        "accountId": str(account.id),
+                        "profileName": account.profile_name,
+                        "credentialState": control.credential_state,
+                        "reconciliationState": control.reconciliation_state,
+                        "reconciliationAgeSeconds": reconciliation_age,
+                        "workerLeaseActive": lease is not None and lease.lease_until > now,
+                        "workerGeneration": None if lease is None else lease.generation,
+                        "riskConfigured": risk is not None,
+                        "riskEnabled": bool(risk and risk.enabled),
+                        "entriesEnabled": control.entries_enabled,
+                        "exitsEnabled": control.exits_enabled,
+                        "lastErrorCode": control.last_error_code,
+                    }
+                )
+            return {
+                "observedAt": _utc(now),
+                "globalEntriesEnabled": bool(global_control and global_control.entries_enabled),
+                "globalReason": None if global_control is None else global_control.reason,
+                "accounts": accounts,
+            }
+
     @app.get("/api/v1/admin/audit")
     async def audit_log(request: Request) -> dict[str, object]:
         await admin(request)
@@ -1282,6 +1609,31 @@ def install_platform_routes(
                         )
                     )
                 ).scalar_one_or_none()
+                risk = await session.scalar(
+                    select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == body.account_id)
+                )
+                lease = await session.scalar(
+                    select(PrivateWorkerLease).where(
+                        PrivateWorkerLease.account_id == body.account_id
+                    )
+                )
+                snapshot = await session.scalar(
+                    select(PrivateReconciliationSnapshot)
+                    .where(PrivateReconciliationSnapshot.account_id == body.account_id)
+                    .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+                    .limit(1)
+                )
+                quote = await session.scalar(
+                    select(MarketQuote).where(
+                        MarketQuote.region == "india",
+                        MarketQuote.environment == "prod",
+                        MarketQuote.product_id == body.product_id,
+                        MarketQuote.observed_at >= now - timedelta(seconds=30),
+                    )
+                )
+                allowed_products = (
+                    set() if risk is None else set(json.loads(risk.allowed_product_ids))
+                )
                 if (
                     account is None
                     or account.mode != "LIVE"
@@ -1290,7 +1642,20 @@ def install_platform_routes(
                     or control is None
                     or control.credential_state != "verified"
                     or control.reconciliation_state != "ready"
+                    or control.reconciled_at is None
+                    or control.reconciled_at < now - timedelta(seconds=60)
                     or not control.exits_enabled
+                    or risk is None
+                    or not risk.enabled
+                    or body.product_id not in allowed_products
+                    or lease is None
+                    or lease.lease_until <= now
+                    or snapshot is None
+                    or snapshot.outcome != "ready"
+                    or snapshot.worker_owner_id != lease.owner_id
+                    or snapshot.worker_generation != lease.generation
+                    or snapshot.credential_version != lease.credential_version
+                    or quote is None
                 ):
                     raise HTTPException(status_code=409, detail="account_not_live_ready")
                 row = GttOrder(
