@@ -18,7 +18,7 @@ down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-BASELINE_SHA256 = "6abde45cbe6d628cd9d3338c169abad0778822f6090e939918d160a730ddbb24"
+BASELINE_SHA256 = "a61198d3aba414f7708013adc094e6ae1953c8099ca26efc0cc9e957d8083270"
 DOWNGRADE_ACK = "I_ACKNOWLEDGE_EMPTY_DEV_DATABASE"
 UPGRADE_STATEMENTS: tuple[str, ...] = (
     "CREATE SCHEMA hmt_crypto",
@@ -3177,7 +3177,7 @@ UPGRADE_STATEMENTS: tuple[str, ...] = (
     "\tCONSTRAINT ck_api_audit_events_descriptor_slot CHECK ((retention_mode = 'SUMMARY_ONLY') OR "
     "(event_kind IN ('ATTEMPT_STARTED','VENUE_PRE_DISPATCH','SIMULATOR_PRE_DISPATCH') AND "
     "payload_slot = 'REQUEST') OR (event_kind IN ('ATTEMPT_FINISHED','VENUE_ENTERED') AND "
-    "payload_slot = 'RESPONSE') OR (event_kind = 'SIMULATOR_OUTCOME' AND entry_possible = 1 AND "
+    "payload_slot = 'RESPONSE') OR (event_kind = 'SIMULATOR_OUTCOME' AND entry_possible = TRUE AND "
     "payload_slot = 'RESPONSE')), \n"
     "\tCONSTRAINT ck_api_audit_events_summary_shape CHECK ((summary_kind IS NULL AND summary_payload "
     "IS NULL AND summary_sha256 IS NULL) OR (summary_kind IS NOT NULL AND summary_payload IS NOT NULL "
@@ -3238,15 +3238,15 @@ UPGRADE_STATEMENTS: tuple[str, ...] = (
     "AND route_id IN ('place_order','modify_order'))) AND (event_kind <> 'LOCAL_REJECTED' OR (target "
     "= 'VENUE' AND call_kind IN ('READ','DISPATCH','LOCAL_REJECTION')))), \n"
     "\tCONSTRAINT ck_api_audit_events_terminal_truth_shape CHECK ((event_kind <> 'VENUE_NO_ENTRY' OR "
-    "(entry_possible = 0 AND reconciliation_required = 0 AND outcome_kind = 'LOCAL_REJECTED' AND "
+    "(entry_possible = FALSE AND reconciliation_required = FALSE AND outcome_kind = 'LOCAL_REJECTED' AND "
     "((last_phase = 'ISSUED' AND wire_request_evidence_sha256 IS NULL AND "
     "pre_dispatch_audit_receipt_id IS NULL) OR (last_phase = 'CLAIMED_FOR_UNSIGNED_PREPARATION' AND "
     "pre_dispatch_audit_receipt_id IS NULL) OR (last_phase = 'AUDIT_RECORDED' AND "
     "wire_request_evidence_sha256 IS NOT NULL AND pre_dispatch_audit_receipt_id IS NOT NULL)))) AND "
-    "(event_kind <> 'VENUE_ENTERED' OR (entry_possible = 1 AND last_phase IS NULL)) AND (event_kind "
-    "<> 'SIMULATOR_OUTCOME' OR (last_phase IS NULL AND ((entry_possible = 1 AND outcome_kind IN "
+    "(event_kind <> 'VENUE_ENTERED' OR (entry_possible = TRUE AND last_phase IS NULL)) AND (event_kind "
+    "<> 'SIMULATOR_OUTCOME' OR (last_phase IS NULL AND ((entry_possible = TRUE AND outcome_kind IN "
     "('ACCEPTED','REJECTED','AMBIGUOUS') AND pre_dispatch_audit_receipt_id IS NOT NULL) OR "
-    "(entry_possible = 0 AND outcome_kind = 'NOT_SUBMITTED'))))), \n"
+    "(entry_possible = FALSE AND outcome_kind = 'NOT_SUBMITTED'))))), \n"
     "\tCONSTRAINT ck_api_audit_events_http_status_domain CHECK (http_status IS NULL OR http_status "
     "BETWEEN 100 AND 599), \n"
     "\tCONSTRAINT ck_api_audit_events_duration_nonnegative CHECK (duration_ns IS NULL OR duration_ns "
@@ -3297,7 +3297,7 @@ UPGRADE_STATEMENTS: tuple[str, ...] = (
     "\tCONSTRAINT ck_api_audit_events_transfer_prior_bundle CHECK ((prior_dispatch_event_id IS NULL "
     "AND prior_consumption_id IS NULL AND prior_bytes_sent_possible IS NULL) OR "
     "(prior_dispatch_event_id IS NOT NULL AND prior_consumption_id IS NOT NULL AND "
-    "prior_bytes_sent_possible = 1)), \n"
+    "prior_bytes_sent_possible = TRUE)), \n"
     "\tCONSTRAINT ck_api_audit_events_variant_shape CHECK ((event_kind = 'CALL_STARTED' AND call_kind "
     "IS NOT NULL AND correlation_id IS NOT NULL AND logical_call_id IS NOT NULL AND policy_version IS "
     "NOT NULL AND root_event_id IS NOT NULL AND root_event_kind IS NOT NULL AND target IS NOT NULL "

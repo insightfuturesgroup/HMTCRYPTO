@@ -160,7 +160,7 @@ def test_manifest_and_frozen_sql_have_an_exact_pinned_fingerprint() -> None:
     assert manifest["schema"] == "hmt_crypto"
     assert manifest["table_count"] == 37
     # This literal changes only when a reviewed new revision or baseline regeneration is intended.
-    assert actual == "6abde45cbe6d628cd9d3338c169abad0778822f6090e939918d160a730ddbb24"
+    assert actual == "a61198d3aba414f7708013adc094e6ae1953c8099ca26efc0cc9e957d8083270"
 
 
 def test_manifest_freezes_baseline_downgrade_and_both_revision_sources() -> None:
@@ -176,7 +176,7 @@ def test_manifest_freezes_baseline_downgrade_and_both_revision_sources() -> None
     assert manifest["format_version"] == 2
     assert expected_downgrade == "a6cd5a1a0fb008ebecbfbb9da8645026fc1b436ca462dc4b20f4122e8688d946"
     assert manifest["baseline_source_sha256"] == (
-        "3baa1929639527e48c735a58e6a5edc6ddefaeae4d91a1fd59c9db354bc49418"
+        "86a75e6a27e049861c9fab7096d2cbbc06076a44a2e42d55dd00465cdb749209"
     )
     assert manifest["hardening_source_sha256"] == (
         "26aa270c31f3aa8b8a857b2bd4308daefe81ca73c0cfbf7772a27517068f9354"

@@ -1,6 +1,6 @@
 {
   "baseline_downgrade_sha256": "a6cd5a1a0fb008ebecbfbb9da8645026fc1b436ca462dc4b20f4122e8688d946",
-  "baseline_source_sha256": "3baa1929639527e48c735a58e6a5edc6ddefaeae4d91a1fd59c9db354bc49418",
+  "baseline_source_sha256": "86a75e6a27e049861c9fab7096d2cbbc06076a44a2e42d55dd00465cdb749209",
   "format_version": 2,
   "hardening_source_sha256": "26aa270c31f3aa8b8a857b2bd4308daefe81ca73c0cfbf7772a27517068f9354",
   "head_revision": "phase2_hardening_v1",
@@ -2343,5 +2343,5 @@
       ]
     }
   },
-  "upgrade_sha256": "6abde45cbe6d628cd9d3338c169abad0778822f6090e939918d160a730ddbb24"
+  "upgrade_sha256": "a61198d3aba414f7708013adc094e6ae1953c8099ca26efc0cc9e957d8083270"
 }
