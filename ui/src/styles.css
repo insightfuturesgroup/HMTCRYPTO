@@ -333,7 +333,8 @@
 .tv-page__title { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .tv-page__title h1 { margin: 0; color: var(--hmt-text); font-size: 25px; line-height: 1.2; }
 .tv-page__title p { margin: 5px 0 0; color: var(--hmt-muted); font-size: 13px; }
-.tv-primary-button { display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 8px; border-radius: 7px; background: var(--hmt-primary); padding: 0 16px; color: #fff; font-size: 13px; font-weight: 700; }
+.tv-primary-button { display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 8px; border-radius: 7px; background: var(--hmt-blue); padding: 0 16px; color: #fff; font-size: 13px; font-weight: 700; }
+.tv-primary-button:hover:not(:disabled) { background: var(--hmt-blue-dark); }
 .tv-primary-button:disabled { cursor: not-allowed; opacity: 0.5; }
 .tv-guide { overflow: hidden; border: 1px solid #9ec5fe; border-radius: 10px; background: #eff6ff; color: #164194; }
 .tv-guide__title { display: flex; align-items: center; gap: 10px; padding: 17px 20px 0; font-size: 15px; }
@@ -342,7 +343,7 @@
 .tv-guide__body ol { display: grid; gap: 5px; padding-left: 18px; }
 .tv-endpoint { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; border-top: 1px solid #bfd7ff; padding-top: 12px; }
 .tv-endpoint code { overflow: hidden; border: 1px solid #9ec5fe; border-radius: 6px; background: #fff; padding: 8px 10px; color: #27364b; text-overflow: ellipsis; white-space: nowrap; }
-.tv-endpoint button { color: var(--hmt-primary); }
+.tv-endpoint button { color: var(--hmt-blue); }
 .tv-guide__note { border: 1px solid #bfd7ff; border-radius: 6px; background: #fff; padding: 8px 10px; }
 .tv-create, .tv-empty, .tv-secret, .tv-card, .tv-payload { border: 1px solid var(--hmt-border); border-radius: 10px; background: #fff; }
 .tv-create { padding: 18px; }
@@ -366,7 +367,7 @@
 .tv-status { border-radius: 999px; background: #f2f4f7; padding: 3px 8px; color: #667085; font-size: 11px; font-weight: 700; }
 .tv-status.is-active { background: #dcfce7; color: #15803d; }
 .tv-card__actions { display: flex; gap: 5px; }
-.tv-card__actions button { display: inline-grid; width: 34px; height: 34px; place-items: center; border-radius: 7px; color: var(--hmt-primary); }
+.tv-card__actions button { display: inline-grid; width: 34px; height: 34px; place-items: center; border-radius: 7px; color: var(--hmt-blue); }
 .tv-card__actions button:hover:not(:disabled) { background: #eff6ff; }
 .tv-card__actions button.is-danger { color: #dc2626; }
 .tv-card__actions button:disabled { cursor: not-allowed; opacity: 0.35; }

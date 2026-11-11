@@ -201,7 +201,13 @@ class TradingViewStrategyBody(_Body):
 
 
 class TradingViewStrategyStateBody(_Body):
-    enabled: bool
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    product_id: int | None = Field(default=None, gt=0)
+    symbol: str | None = Field(default=None, min_length=1, max_length=128)
+    contracts: int | None = Field(default=None, gt=0, lt=2**63)
+    order_type: Literal["market", "limit"] | None = None
+    reduce_only: bool | None = None
+    enabled: bool | None = None
 
 
 class TradingViewSignalBody(_Body):
@@ -3074,21 +3080,42 @@ def install_platform_routes(
             permission = await account_permission(session, actor, strategy.account_id)
             if actor.role == "viewer" or permission == "view":
                 raise HTTPException(status_code=403, detail="trading_permission_required")
-            strategy.enabled = body.enabled
+            if (body.product_id is None) != (body.symbol is None):
+                raise HTTPException(status_code=400, detail="strategy_product_incomplete")
+            if body.product_id is not None and body.symbol is not None:
+                product = await session.scalar(
+                    select(CatalogueProduct)
+                    .join(CatalogueSnapshot, CatalogueSnapshot.id == CatalogueProduct.snapshot_id)
+                    .where(
+                        CatalogueSnapshot.region == "india",
+                        CatalogueSnapshot.environment == "prod",
+                        CatalogueSnapshot.fresh_until > now,
+                        CatalogueProduct.product_id == body.product_id,
+                        CatalogueProduct.symbol == body.symbol,
+                    )
+                    .order_by(desc(CatalogueSnapshot.validated_at))
+                    .limit(1)
+                )
+                if product is None:
+                    raise HTTPException(status_code=409, detail="strategy_product_not_ready")
+                strategy.product_id = body.product_id
+                strategy.symbol = body.symbol
+            for field in ("name", "contracts", "order_type", "reduce_only", "enabled"):
+                value = getattr(body, field)
+                if value is not None:
+                    setattr(strategy, field, value)
             strategy.version += 1
             strategy.updated_at = now
             await append_audit(
                 session,
                 actor=actor,
-                action="TRADINGVIEW_STRATEGY_ENABLED"
-                if body.enabled
-                else "TRADINGVIEW_STRATEGY_DISABLED",
+                action="TRADINGVIEW_STRATEGY_UPDATED",
                 target_type="strategy",
                 target_id=str(strategy.id),
                 outcome="SUCCEEDED",
                 request_id=_request_id(request),
             )
-        return {"id": str(strategy_id), "enabled": body.enabled}
+        return {"id": str(strategy_id), "enabled": strategy.enabled}
 
     @app.post("/api/v1/strategies/{strategy_id}/webhook-key")
     async def rotate_strategy_key(strategy_id: UUID, request: Request) -> dict[str, object]:

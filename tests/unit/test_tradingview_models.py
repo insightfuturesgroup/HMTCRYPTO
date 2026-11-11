@@ -2,7 +2,11 @@
 
 import pytest
 
-from hmt_crypto.api.platform_api import CreateAccountBody, TradingViewSignalBody
+from hmt_crypto.api.platform_api import (
+    CreateAccountBody,
+    TradingViewSignalBody,
+    TradingViewStrategyStateBody,
+)
 from hmt_crypto.persistence.platform_models import (
     TradingViewSignal,
     TradingViewStrategy,
@@ -58,3 +62,20 @@ def test_account_creation_accepts_human_readable_profile_name() -> None:
     )
 
     assert account.profile_name == "Hitashi Garg"
+
+
+def test_tradingview_strategy_update_accepts_editable_configuration() -> None:
+    update = TradingViewStrategyStateBody.model_validate(
+        {
+            "name": "BTC breakout",
+            "product_id": 27,
+            "symbol": "BTCUSD",
+            "contracts": 2,
+            "order_type": "market",
+            "reduce_only": False,
+        }
+    )
+
+    assert update.name == "BTC breakout"
+    assert update.product_id == 27
+    assert update.enabled is None
