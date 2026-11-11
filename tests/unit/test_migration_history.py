@@ -88,6 +88,7 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions(base="base", head="heads"))
     assert [(revision.revision, revision.down_revision) for revision in revisions] == [
+        ("phase21_credential_identity_binding_v1", "phase20_account_archive_v1"),
         ("phase20_account_archive_v1", "phase19_notifications_v1"),
         ("phase19_notifications_v1", "phase18_market_candles_v1"),
         ("phase18_market_candles_v1", "phase17_platform_sessions_v1"),
@@ -114,7 +115,7 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
         ("phase2_hardening_v1", "phase2_baseline_v1"),
         ("phase2_baseline_v1", None),
     ]
-    assert script.get_current_head() == "phase20_account_archive_v1"
+    assert script.get_current_head() == "phase21_credential_identity_binding_v1"
     assert len("phase8_version_width_v1") <= 32
     assert max(len(revision.revision) for revision in revisions) <= 128
 
@@ -599,4 +600,7 @@ def test_offline_upgrade_renders_without_importing_models_or_leaking_dsn(
     assert "CONSTRAINT ck_kill_workflows_identity_matches_command" in rendered
     assert "ON hmt_crypto.kill_workflow_events" in rendered
     assert "CREATE TRIGGER" in rendered
+    assert "CREATE FUNCTION hmt_crypto.guard_credential_identity_binding()" in rendered
+    assert "OLD.observed_external_user_id IS NULL" in rendered
+    assert "NEW.observed_external_user_id IS NOT NULL" in rendered
     assert secret not in rendered
