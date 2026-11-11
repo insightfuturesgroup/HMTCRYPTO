@@ -34,6 +34,7 @@ from hmt_crypto.persistence.platform_models import (
     PlatformAuditEvent,
     PlatformUser,
     PrivateReconciliationSnapshot,
+    PrivateWorkerLease,
     WatchlistItem,
 )
 from hmt_crypto.persistence.pnl_models import PnlSnapshot
@@ -111,6 +112,7 @@ __all__ = [
     "MarketQuote",
     "PlatformAuditEvent",
     "PrivateReconciliationSnapshot",
+    "PrivateWorkerLease",
     "ApplicationSetting",
     "GttOrder",
     "metadata",

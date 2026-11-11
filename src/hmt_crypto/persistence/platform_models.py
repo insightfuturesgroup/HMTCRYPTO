@@ -285,6 +285,11 @@ class PrivateReconciliationSnapshot(Base):
             "octet_length(wallet_transactions_payload) <= 1048576",
             name="wallet_tx_payload_bounded",
         ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(worker_owner_id IS NULL AND worker_generation IS NULL) OR "
+            "(worker_owner_id IS NOT NULL AND worker_generation >= 1)",
+            name="worker_fence_pair",
+        ),
         UniqueConstraint("account_id", "request_id", name="uq_private_reconciliation_request"),
         Index("ix_private_reconciliation_account_observed", "account_id", "observed_at"),
     )
@@ -309,7 +314,32 @@ class PrivateReconciliationSnapshot(Base):
     open_orders_payload: Mapped[str | None] = mapped_column(Text)
     fills_payload: Mapped[str | None] = mapped_column(Text)
     wallet_transactions_payload: Mapped[str | None] = mapped_column(Text)
+    worker_owner_id: Mapped[UUID | None] = mapped_column(Uuid)
+    worker_generation: Mapped[int | None] = mapped_column(StrictBigInteger())
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class PrivateWorkerLease(Base):
+    """One expiring owner per account; loss of ownership removes read authority."""
+
+    __tablename__ = "private_worker_leases"
+    __table_args__ = (
+        CheckConstraint("credential_version >= 1", name="credential_version_pos"),
+        CheckConstraint("generation >= 1", name="generation_pos"),
+        CheckConstraint("lease_until > heartbeat_at", name="lease_after_heartbeat"),
+        UniqueConstraint("account_id", name="uq_private_worker_leases_account"),
+        Index("ix_private_worker_leases_expiry", "lease_until"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    owner_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    credential_version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    generation: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    lease_until: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
 __all__ = [
@@ -322,5 +352,6 @@ __all__ = [
     "PlatformAuditEvent",
     "PlatformUser",
     "PrivateReconciliationSnapshot",
+    "PrivateWorkerLease",
     "WatchlistItem",
 ]

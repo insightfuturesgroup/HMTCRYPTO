@@ -77,6 +77,29 @@ services:
       - no-new-privileges:true
     networks: [application]
 
+  private-worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    init: true
+    env_file:
+      - deploy/ec2/worker.env
+    environment:
+      HMT_WORKER_KIND: private
+    volumes:
+      - /etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [application]
+
   ui:
     build:
       context: .

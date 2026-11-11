@@ -1,16 +1,16 @@
-"""Long-running PAPER/BACKTEST worker entry point.
+"""Long-running worker entry point selected by an explicit process kind.
 
-This process owns no Delta credentials and cannot construct a LIVE execution
-path.  It currently drains the durable global-kill workflow against the same
-append-only journal used by PAPER execution.
+The market worker is public-only, the private worker is signed-read-only, and
+the legacy PAPER worker owns no Live execution authority.
 """
 
 from __future__ import annotations
 
 import asyncio
-import signal
 import os
+import signal
 
+from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import ExecutionMode, Settings
 from hmt_crypto.errors import ConfigurationError
 from hmt_crypto.logging import configure_logging, get_logger
@@ -18,9 +18,9 @@ from hmt_crypto.oms.kill_worker import KillWorkerError, KillWorkflowWorker
 from hmt_crypto.oms.paper_kill_backend import DurablePaperKillActionBackend
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.repository_contracts import AccountScope
-from hmt_crypto.worker.settings import PaperWorkerSettings
-from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.worker.market_runner import MarketWorkerSettings, run_market_worker
+from hmt_crypto.worker.private_runner import PrivateWorkerSettings, run_private_worker
+from hmt_crypto.worker.settings import PaperWorkerSettings
 
 
 async def run_paper_worker(
@@ -115,6 +115,13 @@ def main() -> None:
             await run_market_worker(
                 ControlRuntimeSettings(),
                 MarketWorkerSettings(),
+                stop=stop,
+            )
+            return
+        if worker_kind == "private":
+            await run_private_worker(
+                ControlRuntimeSettings(),
+                PrivateWorkerSettings(),  # type: ignore[call-arg]
                 stop=stop,
             )
             return

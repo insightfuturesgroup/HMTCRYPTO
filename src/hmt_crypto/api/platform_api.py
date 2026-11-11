@@ -50,6 +50,7 @@ from hmt_crypto.persistence.models import (
     PlatformAuditEvent,
     PlatformUser,
     PrivateReconciliationSnapshot,
+    PrivateWorkerLease,
     WatchlistItem,
 )
 
@@ -1027,6 +1028,11 @@ def install_platform_routes(
                     select(AccountLiveControl).where(AccountLiveControl.account_id == account_id)
                 )
             ).scalar_one_or_none()
+            lease = (
+                await session.execute(
+                    select(PrivateWorkerLease).where(PrivateWorkerLease.account_id == account_id)
+                )
+            ).scalar_one_or_none()
             row = (
                 await session.execute(
                     select(PrivateReconciliationSnapshot)
@@ -1039,6 +1045,11 @@ def install_platform_routes(
                 row is None
                 or control is None
                 or control.reconciliation_state != "ready"
+                or lease is None
+                or lease.lease_until <= datetime.now(UTC)
+                or lease.credential_version != row.credential_version
+                or row.worker_owner_id != lease.owner_id
+                or row.worker_generation != lease.generation
                 or row.outcome != "ready"
                 or row.balances_payload is None
                 or row.positions_payload is None
@@ -1047,10 +1058,14 @@ def install_platform_routes(
                 or row.wallet_transactions_payload is None
             ):
                 raise HTTPException(status_code=409, detail="account_state_not_ready")
-            age_seconds = max(0, int((datetime.now(UTC) - row.observed_at).total_seconds()))
+            reconciled_at = control.reconciled_at
+            if reconciled_at is None:
+                raise HTTPException(status_code=409, detail="account_state_not_ready")
+            age_seconds = max(0, int((datetime.now(UTC) - reconciled_at).total_seconds()))
             return {
                 "accountId": str(account_id),
                 "observedAt": _utc(row.observed_at),
+                "reconciledAt": _utc(reconciled_at),
                 "ageSeconds": age_seconds,
                 "fresh": age_seconds <= 60,
                 "credentialVersion": row.credential_version,
