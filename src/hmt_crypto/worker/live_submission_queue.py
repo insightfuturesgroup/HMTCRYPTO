@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 
+from hmt_crypto.api.live_order_recovery import RecoveryObservation
 from hmt_crypto.api.live_order_transport import (
     LiveOrderResponseOutcome,
     PreparedLiveOrder,
@@ -15,6 +16,7 @@ from hmt_crypto.api.live_order_transport import (
 )
 from hmt_crypto.api.live_submission import (
     SubmissionFence,
+    recovery_check_sha256,
     require_transition,
     submission_event_sha256,
 )
@@ -25,6 +27,7 @@ from hmt_crypto.persistence.models import (
     AccountRiskPolicy,
     LiveOrderIntent,
     LiveOrderPreview,
+    LiveOrderRecoveryCheck,
     LiveOrderSubmission,
     LiveOrderSubmissionEvent,
     PlatformLiveControl,
@@ -436,10 +439,115 @@ async def record_live_submission_outcome(
         )
 
 
+async def record_uncertain_recovery_lookup(
+    database: Database,
+    claim: ClaimedLiveSubmission,
+    observation: RecoveryObservation,
+) -> None:
+    """Record one lookup; only a positive match can resolve uncertainty."""
+    if type(claim) is not ClaimedLiveSubmission or type(observation) is not RecoveryObservation:
+        raise ValueError("invalid live recovery observation")
+    now = datetime.now(UTC)
+    async with database.transaction() as session:
+        submission = await session.scalar(
+            select(LiveOrderSubmission)
+            .where(LiveOrderSubmission.id == claim.submission_id)
+            .with_for_update()
+        )
+        lease = await session.scalar(
+            select(PrivateWorkerLease)
+            .where(PrivateWorkerLease.account_id == claim.account_id)
+            .with_for_update()
+        )
+        if (
+            submission is None
+            or lease is None
+            or submission.status != "UNCERTAIN"
+            or submission.worker_owner_id is None
+            or submission.worker_generation is None
+            or submission.credential_version is None
+            or submission.client_order_id != claim.client_order_id
+        ):
+            raise ValueError("uncertain live submission is unavailable")
+        fence = SubmissionFence(
+            submission.worker_owner_id,
+            submission.worker_generation,
+            submission.credential_version,
+        )
+        active = SubmissionFence(lease.owner_id, lease.generation, lease.credential_version)
+        if fence != claim.fence or active != claim.fence or lease.lease_until <= now:
+            raise ValueError("uncertain recovery fence is stale")
+        prior = await session.scalar(
+            select(func.max(LiveOrderRecoveryCheck.attempt)).where(
+                LiveOrderRecoveryCheck.submission_id == submission.id
+            )
+        )
+        attempt = 1 if prior is None else int(prior) + 1
+        evidence = recovery_check_sha256(
+            submission_id=submission.id,
+            attempt=attempt,
+            result=observation.result,
+            client_order_id=submission.client_order_id,
+            exchange_order_id=observation.exchange_order_id,
+            fence=fence,
+            occurred_at=now,
+        )
+        session.add(
+            LiveOrderRecoveryCheck(
+                id=uuid4(),
+                submission_id=submission.id,
+                account_id=submission.account_id,
+                attempt=attempt,
+                result=observation.result,
+                client_order_id=submission.client_order_id,
+                exchange_order_id=observation.exchange_order_id,
+                worker_owner_id=fence.owner_id,
+                worker_generation=fence.generation,
+                credential_version=fence.credential_version,
+                evidence_sha256=evidence,
+                occurred_at=now,
+            )
+        )
+        if observation.result != "FOUND":
+            return
+        require_transition(
+            current="UNCERTAIN", target="ACCEPTED", stored_fence=fence, actor_fence=claim.fence
+        )
+        submission.status = "ACCEPTED"
+        submission.exchange_order_id = observation.exchange_order_id
+        submission.last_error_code = None
+        submission.resolved_at = now
+        submission.updated_at = now
+        event_hash = submission_event_sha256(
+            submission_id=submission.id,
+            sequence=5,
+            from_status="UNCERTAIN",
+            to_status="ACCEPTED",
+            fence=fence,
+            occurred_at=now,
+        )
+        session.add(
+            LiveOrderSubmissionEvent(
+                id=uuid4(),
+                submission_id=submission.id,
+                account_id=submission.account_id,
+                sequence=5,
+                from_status="UNCERTAIN",
+                to_status="ACCEPTED",
+                worker_owner_id=fence.owner_id,
+                worker_generation=fence.generation,
+                credential_version=fence.credential_version,
+                evidence_sha256=event_hash,
+                occurred_at=now,
+            )
+        )
+
+
 __all__ = [
     "ClaimedLiveSubmission",
     "claim_next_live_submission",
     "mark_live_submission_sending",
     "prepare_claimed_live_submission",
     "record_live_submission_outcome",
+    "record_uncertain_recovery_lookup",
 ]
