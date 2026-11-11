@@ -1,121 +1,85 @@
-# HMT-Crypto phase status
+# HMT Crypto implementation status
 
-Status date: **2026-11-07**
+Status date: **2026-11-11**
 
-This file distinguishes code that is verified offline from behavior that requires credentials,
-testnet observations, PostgreSQL/Supabase, or deployment infrastructure. “Implemented” never means
-“authorized for production.”
+This file separates implemented software from environment qualification and trading authorization.
+An implemented order path is not permission to send a real order. Production entry gates remain
+closed until the operator completes `docs/GO_LIVE_CHECKLIST.md` for the exact release artifact.
 
-> Release-candidate note: the comprehensive offline campaign completed on 2026-11-07. It passed
-> 11,566 backend tests with 22 credential/infrastructure skips and 50 UI tests, plus backend/frontend
-> lint, type-check, and production-build gates. External Delta testnet, Supabase/PostgreSQL, Vercel,
-> and operational qualification gates remain open, so this revision is not live-ready.
+## Product scope
 
-## Phase 0 — audit and architecture
+- Separate invitation-only application for Delta Exchange India futures/perpetuals.
+- Supabase Auth and private Supabase PostgreSQL application data.
+- FastAPI is the only application-data and administrative authority.
+- One EC2 deployment with Elastic IP for all Delta private traffic.
+- Admin, Trader, and Viewer roles with explicit per-account assignments.
+- Live trading only. PAPER, spot, options, Global Delta, copy trading, and portfolio margin are out
+  of scope.
 
-**Delivered**
+## Completed implementation phases
 
-- `AUDIT.md`: full supplied-HMT archive audit, startup/runtime map, Zerodha and Delta findings,
-  strategy/storage/UI/logging/test review, and per-module reuse classification.
-- `PLAN.md`: exchange-neutral target architecture, phased implementation plan, safety invariants,
-  assumptions, and evidence gates.
+### Foundation, identity, and administration
 
-**Verified:** the source archive was treated as read-only; HMT-Crypto has no runtime dependency on
-HMT. **Assumed:** the archive may not match an externally deployed HMT instance.
+- Region/environment-pinned Delta clients, request signing, rate limiting, typed errors, immutable
+  catalogue, exact contract sizing, WebSocket resilience, and fail-closed freshness checks.
+- Supabase Auth session validation, invitation-only users, disabled-user and session-revocation
+  enforcement, Admin/Trader/Viewer authorization, account assignments, and security audit records.
+- Multi-account Delta onboarding with credential metadata in PostgreSQL and secret material isolated
+  behind the AWS Secrets Manager boundary.
+- Admin health, account live controls, emergency global entry disable, user management, account
+  assignments, general settings, and current operational notifications.
 
-## Phase 1 — safe foundation and public REST
+### Market and private-account state
 
-**Implemented and offline-verified**
+- Product catalogue and public quote worker with reconnect, resubscription, bounded persistence, and
+  stale-feed detection.
+- One supervised private runtime per enabled account, lease fencing, credential-version handover,
+  balances, positions, open orders, fills, funding/fees, and REST reconciliation.
+- Account state is unavailable unless reconciliation, credential version, and active worker lease
+  agree. Foreign or uncertain state fails closed.
 
-- Typed settings with region/environment credential slots and fail-fast LIVE gates.
-- Official host allowlists, exact signing, typed errors, bounded HTTP transport, retry policy,
-  weighted limiter, cursor paginator, public products/tickers/orderbook/candles, immutable product
-  catalogue, and exact contract sizing.
-- Read-only CLI commands, structured redaction, package/build boundaries, and contract fixtures.
+### Live order lifecycle
 
-**External verification still required:** current read-only public testnet smoke and the selected
-deployment host's clock/network behavior.
+- Server-side preview and admission with exact tick/lot rules, quote freshness, account assignment,
+  idempotency, risk policy, daily-loss, open-order, and projected-position checks.
+- Durable lease-fenced submission queue, canonical signed Delta order requests, bounded one-shot
+  dispatch, outcome evidence, and client-order-id recovery for uncertain submissions.
+- Durable cancellation and shrink-only modification. Ambiguous actions are reconciled and never
+  blindly retried.
+- GTT-style protected exits with durable trigger state, reduce-only semantics, and controlled
+  submission through the same risk and reconciliation boundaries.
+- Manual trading, orders/fills, positions/balances, funding/fees, and performance UI.
 
-## Phase 2 — private REST, persistence, OMS, risk, reconciliation, PAPER
+### TradingView automation
 
-**Implemented and offline-verified**
+- Versioned strategies and account mappings, one-time webhook keys stored as hashes, rotation and
+  revocation, replay window, idempotent signal deduplication, symbol compatibility, risk admission,
+  and rejection/execution logs.
+- TradingView signals use the same durable live queue and do not bypass account, freshness, risk,
+  or global entry gates.
 
-- Strict private request/response models and positive route allowlist; fund-movement APIs are not
-  represented.
-- Delta India signed private-read runtime for balances, positions, orders, history, fills, and
-  leverage observations behind sealed identity/clock/limiter admission.
-- Mutation codecs/parsers and durable pre-dispatch evidence exist for offline contract testing;
-  production venue dispatch is structurally disabled.
-- SQLAlchemy/Alembic schema for scoped accounts, catalogue, commands, orders/attempts/transitions,
-  fills, balances/positions/PnL/funding, protection, reconciliation, leadership, risk reservations,
-  halts, qualification, and redacted append-only API audit evidence.
-- Strict OMS/order transition kernels, deterministic client order IDs, mandatory risk evaluator,
-  atomic evidence models, reconciliation evidence/query boundaries, sealed credential lifecycle,
-  PAPER order/bracket/portfolio simulation, and durable global-kill admission.
+## Verification evidence
 
-**Not externally verified or activated:** signed reads against the user's account, exact account
-binding, refreshable trusted-clock composition, PostgreSQL/Supabase race acceptance, testnet
-mutations, and the exchange-writing worker. No production order path exists.
+- Each delivered checkpoint passed targeted backend lint/type/tests and the production UI build.
+- Current UI campaign: type-check, lint, **50 tests**, and production build passed.
+- Package/artifact build and targeted architecture/lifecycle tests passed.
+- A sequential broader backend campaign reached **551 passing tests** before it was stopped because
+  the complete suite is very large. This is not represented as a full-suite pass.
+- No real Delta order has been placed by development validation.
 
-## Phase 3 — WebSockets and resilience
+## Remaining work is operational qualification, not feature development
 
-**Implemented and offline-verified**
+The code phases are complete. Release remains **NO-GO for live entries** until all mandatory gates
+in `docs/GO_LIVE_CHECKLIST.md` are evidenced for the exact commit, images, schema head, credentials,
+Elastic IP, account, product allowlist, and risk configuration.
 
-- Exact endpoint policy, bounded frame codec, public channel parsers, subscription registry,
-  connection-attempt governor, heartbeat/ping/inactivity policy, reconnection backoff, and
-  reconciliation barrier contracts.
-- India-testnet private-stream runtime with bounded auth/subscription/ping sends, periodic active
-  authority revalidation, initial snapshot deadline, per-resource REST cutoffs, provisional fill
-  handling, reset-only baseline publication, and fail-closed reconnect behavior.
-- Failure tests cover malformed/oversized frames, sequence issues, backpressure, disconnects,
-  cancellation, reconnect storms, and REST-reconciliation requirements.
-- Private channel names/auth/signing/subscription contracts are represented.
+Required external evidence includes migration and least-privilege verification on Supabase,
+Secrets Manager/IAM checks, current Delta read-contract captures, public/private feed recovery,
+reconciliation stability, backup/restore, restart and lease-handover drills, alerting, rollback,
+emergency-disable rehearsal, and an operator-controlled minimum-size acceptance order. The final
+acceptance order is never executed automatically by tests or deployment.
 
-**Activation blocker:** current private India testnet `key-auth` and account payloads must be
-captured with the user's key before the private stream parser/runtime can be qualified. Global
-streams remain disabled pending an equivalent Global testnet contract capture. Dead-man
-cancellation remains disabled pending protection-preservation proof.
-
-## Phase 4 — strategies, PAPER, and backtesting
-
-**Implemented and offline-verified**
-
-- Broker-independent HMT indicator and Strategy-v2 golden fixtures with explicit India-only
-  exclusions.
-- Deterministic strategy evaluator with UTC eligibility windows and diagnostic trace.
-- Event-driven, exact-Decimal backtester; deterministic replay; latency/liquidity/slippage/fee
-  models; order/stop/trailing/bracket behavior; portfolio accounting; and explicit funding events.
-- Missing required funding evidence makes a report incomplete rather than assuming zero.
-
-**Assumed:** historical datasets and product-specific fee/funding provenance will be supplied for
-real research runs; no profitability claim is made.
-
-## Phase 5 — control API, dashboard, kill control, deployment, documentation
-
-**Implemented and offline-verified**
-
-- Same-origin FastAPI control plane with Argon2id login, bounded server-side sessions, strict
-  cookies, CSRF/origin checks, body/rate bounds, secure headers, authenticated health, metrics,
-  OpenAPI, reconciled dashboard view, kill preview/admission, active-command lookup, and durable
-  status.
-- React/TypeScript/Vite dashboard with exact decimal display, 24×7 UTC/venue/mode status,
-  reconciliation/risk/account views, positions/orders/funding/leverage/liquidation fields, and a
-  guarded idempotent kill workflow with cross-tab coordination.
-- SQLite PAPER bootstrap, PostgreSQL/Supabase migration policy, Docker multi-stage assets,
-  Compose baseline, a credential-free durable PAPER worker, Nginx static proxy, systemd
-  API/worker/migration units, Vercel static configuration, and operator documentation.
-
-**Environment-dependent work:** deploy Supabase roles/migrations, configure the HTTPS API host and
-Vercel same-origin route, install secrets, run container smoke, connect alerts, and execute the
-testnet/read-only production qualification in `docs/GO_LIVE_CHECKLIST.md`.
-
-**Important boundary:** the API queues a kill command; it cannot truthfully report exchange
-cancellation/flattening complete until the separately testnet-qualified execution worker processes
-and reconciles it.
-
-## Verification commands
-
-These commands are designed to make no real Delta write:
+## Safe verification commands
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -128,19 +92,11 @@ cd ui
 npm ci
 npm run typecheck
 npm run lint
-npm test
+npm test -- --run
 npm run build
 npm audit
 ```
 
-Credential/infrastructure tests skip unless their explicit opt-in variables are supplied. Never
-point destructive PostgreSQL migration acceptance at a real Supabase project.
-
-## Open questions for deployment
-
-1. India only, or India plus Global after separate testnet qualification?
-2. Which products and maximum risk limits are approved for the first PAPER/testnet profile?
-3. Which Linux/container host will run the persistent Python API/worker with static egress?
-4. Which alert channel and recipients should be used?
-5. Which Vercel domain and same-origin API proxy will be used?
-6. What backup/PITR retention and restore-time objective should Supabase enforce?
+Credential/infrastructure tests require explicit opt-in. Do not point destructive migration
+acceptance at the production Supabase project, and do not enable entry gates as part of a smoke
+test.

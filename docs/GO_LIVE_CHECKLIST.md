@@ -1,129 +1,103 @@
-# HMT-Crypto go-live checklist
+# Delta India Live activation checklist
 
-This checklist is an activation gate, not an instruction to trade. A checked unit-test box does
-not authorize a Delta request. Production writes remain disabled until a separately reviewed
-activation change is approved by the operator.
+This is an evidence gate, not an instruction to trade. Deployment keeps global and per-account
+entry gates disabled. A real acceptance order requires a separate, contemporaneous operator
+approval after every preceding mandatory item is complete.
 
-## 1. Material to provide securely
+## 1. Release identity and infrastructure
 
-Do not paste secrets into chat, tickets, screenshots, Git, Supabase rows, Vercel variables, or the
-browser. Install them on the server through a secret manager or a root-owned `0600` credential
-file.
+- [ ] Record the reviewed Git commit, image digests, Alembic head, configuration digest, EC2 instance
+      ID, Elastic IP, Supabase project reference, and AWS account.
+- [ ] `crypto.helpmetrade.club` resolves only to the recorded Elastic IP and HTTPS is valid.
+- [ ] Only Caddy publishes ports 80/443; database, API, worker, and Docker are not public.
+- [ ] IMDSv2, Systems Manager access, encrypted EBS, snapshots, host clock synchronization, EC2
+      recovery alarm, memory/disk alarms, and container restart alerts are verified.
+- [ ] Delta confirms the recorded Elastic IP is allowlisted for the exact production API key.
+- [ ] The EC2 instance role can read only this application's Delta secret paths and cannot list or
+      read unrelated secrets.
+- [ ] CloudFront and Vercel are not required for the minimal single-EC2 deployment.
 
-### Delta India testnet first
+## 2. Supabase and identity
 
-- [ ] Delta India demo/testnet account is created and KYC/account prerequisites are complete.
-- [ ] A market-data-only key has **Read Data** permission where a key is needed.
-- [ ] A separate private-account testnet key has **Trading** permission. Current Delta India
-      documentation says Orders, Positions, and Wallet endpoints require Trading even for reads;
-      therefore this key is handled as write-capable while application write gates remain closed.
-- [ ] Mutation opt-in is enabled only for the later bounded testnet-write qualification.
-- [ ] Withdrawal, transfer, deposit-address, and other fund-movement permissions are absent.
-- [ ] Testnet external user/account ID is provided separately from the key.
-- [ ] API key and secret are installed in the India-testnet credential slot.
-- [ ] Static worker egress IPv4 address is allowlisted at Delta, if the account supports it.
-- [ ] A separate production read-only key is created only after testnet qualification.
-- [ ] India, Global, testnet, and production keys remain separate; no key is copied between slots.
+- [ ] Migration owner and `hmt_crypto_app` runtime credentials are distinct.
+- [ ] Runtime uses the supported session pooler with TLS; migration uses the direct owner endpoint
+      with verified CA and host IPv6 where required.
+- [ ] Alembic upgrades a disposable database from empty to the expected head and upgrades the target
+      project once through the migration container.
+- [ ] Runtime role cannot alter schema, bypass private ownership, or mutate append-only audit data.
+- [ ] Supabase Auth public registration is disabled; invitation, password reset, disabled user,
+      session expiry/revocation, Admin/Trader/Viewer boundaries, and account isolation pass.
+- [ ] Backup/PITR is enabled and a restore into an isolated project is completed and timed.
+- [ ] Browser configuration contains no database, service-role, Delta, or AWS secret.
 
-Global is optional. If Global is required, repeat the entire contract capture and qualification on
-Global testnet before enabling its REST or WebSocket private paths.
+## 3. Delta credentials and read qualification
 
-### Supabase
+- [ ] Production key has only the permissions required for trading and reads; withdrawal, transfer,
+      deposit-address, and other fund-movement permissions are absent.
+- [ ] API key and secret exist only in AWS Secrets Manager; PostgreSQL contains ARN/version,
+      fingerprint, status, and timestamps only.
+- [ ] Account onboarding validates the external account identity through the EC2 Elastic IP.
+- [ ] Credential replacement invalidates prior reconciliation evidence and hands over worker lease
+      authority without overlap.
+- [ ] Current official Delta India REST/WebSocket contracts are checked on the qualification date.
+- [ ] Public products/quotes and private balances, positions, orders, fills, funding, and fees agree
+      with read-only REST truth.
+- [ ] Invalid signature, expired signature, wrong environment, revoked key, and IP rejection generate
+      distinct redacted evidence without leaking credentials.
 
-- [ ] Supabase organization/project reference and chosen region are recorded.
-- [ ] Exact direct database URL for the migration owner is supplied server-side.
-- [ ] Exact direct or session-pooler URL for the runtime role is supplied server-side.
-- [ ] Migration-owner and runtime-role credentials are distinct.
-- [ ] TLS/CA requirements and network restrictions are recorded.
-- [ ] Backup/PITR retention and a disposable restore target are selected.
-- [ ] A disposable PostgreSQL database is available for destructive migration acceptance tests.
+## 4. Feed, reconciliation, and failure drills
 
-Supabase is PostgreSQL hosting for the Python services. The browser does not receive database
-credentials, and Delta credentials are never stored in Supabase.
+- [ ] Public WebSocket disconnect/reconnect/resubscribe and stale quote rejection are demonstrated.
+- [ ] Private stream loss forces fail-closed state and REST reconciliation before readiness returns.
+- [ ] Worker restart, host restart, database interruption, lease expiry, and lease handover are
+      exercised without concurrent signing authority.
+- [ ] REST timeout and uncertain submission recovery prove no blind retry or duplicate order.
+- [ ] Partial fill, exchange-side/foreign order, foreign position, cancellation, modification, and
+      credential-version changes reconcile deterministically.
+- [ ] Funding and fee totals are traceable to stored exchange evidence.
+- [ ] A sustained healthy read-only qualification window is recorded with no unexplained readiness
+      gap. Duration is chosen by the operator/risk owner; elapsed time alone is not acceptance.
 
-### Vercel and the API host
+## 5. Trading and risk controls
 
-- [ ] Vercel team/account, project name, and production domain are supplied.
-- [ ] The FastAPI backend has a stable HTTPS origin reachable only through an approved proxy.
-- [ ] `/api/v1/**` is routed on the same browser origin to FastAPI with caching disabled.
-- [ ] `Set-Cookie`, `X-CSRF-Token`, `Origin`, and `Idempotency-Key` are preserved.
-- [ ] Delta and database secrets are absent from Vercel and all `VITE_*` values.
-- [ ] The Python worker/API host is Linux/container capable, uses a non-root service account, and
-      has persistent storage, NTP, a static egress address, and a supported secret store.
-- [ ] TLS certificate/domain ownership and reverse-proxy trust boundaries are documented.
+- [ ] First-live product allowlist, order types, minimum/maximum quantities, tick/lot rules, maximum
+      order notional, projected position notional, daily loss, and open-order limits are approved.
+- [ ] Preview expiry and quote/account/reconciliation freshness thresholds are approved and tested.
+- [ ] Pending same-product orders are included in worst-case projected exposure.
+- [ ] Manual order idempotency, TradingView replay/deduplication, and incompatible-symbol rejection
+      pass without an exchange mutation.
+- [ ] Cancel remains available when entries are disabled; modification cannot increase exposure.
+- [ ] GTT/protected exits are reduce-only, survive restart, handle partial fills, and cannot create a
+      reverse position.
+- [ ] Global entry disable and per-account disable are exercised; disabled gates survive restart.
+- [ ] Emergency procedure is rehearsed: disable entries, preserve/cancel protection as approved,
+      reconcile, assess exposure, and record the incident.
 
-### Operations and alerts
+## 6. TradingView and operations
 
-- [ ] Alert provider is chosen: Telegram bot, email/webhook, or an existing incident system.
-- [ ] Recipient/chat ID and server-side secret location are supplied.
-- [ ] Alert deduplication, retry ceiling, and delivery-failure behavior are approved.
-- [ ] Log retention, audit retention, backup retention, and operator contacts are approved.
+- [ ] Webhook keys are displayed once, stored only as hashes, rotatable/revocable, and never logged.
+- [ ] Strategy versions, account mapping, signal age, replay window, idempotency, symbol routing,
+      preview freshness, and rejection reasons are verified.
+- [ ] Operations contact, log/audit retention, alert channel, escalation owner, and response times are
+      recorded.
+- [ ] Alerts cover stale public/private data, missing lease, reconciliation failure, uncertain
+      actions, credential errors, risk halt, container/host health, certificate expiry, and backup
+      failure.
+- [ ] Deployment, rollback, database restore, credential rotation, and emergency-disable runbooks are
+      rehearsed by an operator other than the implementer where practical.
 
-## 2. Testnet identity and clock qualification
+## 7. Controlled activation
 
-- [ ] Server NTP is enabled and monitored.
-- [ ] Startup clock check is within the configured tolerance.
-- [ ] A signed read proves the key belongs to the selected India-testnet account.
-- [ ] Wrong-region and wrong-environment credentials fail before network I/O.
-- [ ] `SignatureExpired`, invalid key, IP-whitelist rejection, and unauthorized access drills have
-      distinct safe errors and alerts.
-- [ ] The private-request trusted instant is refreshed immediately before every signing attempt.
-- [ ] Credential rotation while flat invalidates old reconciliation and soak evidence.
+- [ ] Independent review approves the exact release artifact and unresolved findings are accepted in
+      writing by the risk owner.
+- [ ] Global and account entry gates are confirmed disabled immediately before activation.
+- [ ] Operator explicitly approves enabling only one account and the first restricted product.
+- [ ] Global gate is enabled, then the approved account gate; all others remain disabled.
+- [ ] The operator separately authorizes one minimum-supported-size order from the normal UI.
+- [ ] Order, fill, fee, position, and protection are reconciled; emergency disable is immediately
+      available.
+- [ ] Expansion to additional products, sizes, accounts, or TradingView automation receives a new
+      explicit approval based on accumulated evidence.
 
-## 3. Exchange contract qualification
-
-- [ ] Current official Delta documentation and changelog are rechecked on the qualification date.
-- [ ] Public and private testnet WebSocket handshakes are captured without secrets.
-- [ ] Current `key-auth` success/failure envelopes are captured.
-- [ ] Orders, positions, margins, and `v2/user_trades` snapshots/incrementals are captured and
-      compared with REST truth.
-- [ ] Sequence reset/gap behavior is proven; gaps poison readiness and force reconciliation.
-- [ ] Product catalogue fields, page limits, filters, rate-limit weights, and reset headers match
-      the frozen contract tests.
-- [ ] Leverage request wire type and every intended mutation response are proven on testnet.
-- [ ] Unsupported product models remain execution-disabled.
-- [ ] Dead-man cancellation stays disabled unless testnet proves it cannot remove required
-      reduce-only protection.
-
-## 4. Database and recovery qualification
-
-- [ ] Alembic upgrades a new disposable PostgreSQL database to the expected head.
-- [ ] Least-privilege runtime and migration grants pass the acceptance suite.
-- [ ] Append-only/audit mutation denial and account/environment isolation pass on PostgreSQL.
-- [ ] Backup and restore are executed and timed.
-- [ ] Startup reconciliation completes from exchange truth.
-- [ ] Periodic and reconnect reconciliation complete without unmanaged exposure.
-- [ ] Crash during submit, ambiguous response, partial fill, and restart are drilled without a
-      duplicate order.
-- [ ] A second worker cannot obtain write authority for the same account.
-- [ ] Leadership/database-session loss stops signing and sending immediately.
-
-## 5. Risk and emergency controls
-
-- [ ] Product position limits, total exposure, leverage, loss-per-trade, daily loss, open-order
-      limit, order rate, price collar, and duplicate window are approved in account units.
-- [ ] Daily-loss reset time and valuation source are approved in UTC.
-- [ ] Every non-flat position has reconciled reduce-only protection or new risk is halted.
-- [ ] Price/catalogue/account/reconciliation staleness thresholds are approved.
-- [ ] Cancel-only kill is drilled on testnet and reaches a reconciled terminal state.
-- [ ] Cancel-and-flatten kill is drilled on testnet, including halted/skipped-product handling.
-- [ ] Kill workflow is restarted at each durable step and resumes idempotently.
-- [ ] UI queue admission is never mistaken for exchange completion.
-
-## 6. Soak and staged activation
-
-- [ ] PAPER runs continuously with live public prices and reconciled private read evidence.
-- [ ] Public/private reconnect, REST fallback, rate limiting, and queue backpressure are soaked.
-- [ ] At least 24 continuous hours of production **read-only** qualification are persisted and
-      bound to account, region/environment, credential, egress, build, config, schema, product
-      allowlist, and risk-policy versions.
-- [ ] No critical gap, unresolved operation, unacknowledged exposure, stale stream, leadership
-      ambiguity, or failed reconciliation occurred during the qualification window.
-- [ ] Alerts, metrics, dashboard, backup, restart, and operator runbook are exercised.
-- [ ] A fresh independent code/security review approves the exact release artifact.
-- [ ] Operator explicitly approves a separate staged activation change.
-- [ ] First live stage uses one allowlisted linear perpetual and the minimum supported size.
-- [ ] Production kill remains immediately available and production activation can be revoked.
-
-This repository deliberately does not check these environment-dependent boxes on behalf of the
-operator.
+If any required evidence is missing, stale, contradictory, or unexplained, the decision is
+**NO-GO** and entry gates remain disabled.
