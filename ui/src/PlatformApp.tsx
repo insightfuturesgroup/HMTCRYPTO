@@ -187,6 +187,38 @@ interface LiveOrderActionRow {
   resolvedAt: string | null;
 }
 
+interface PerformanceSummary {
+  accountId: string;
+  observedAt: string;
+  fresh: boolean;
+  fillCount: number;
+  netWalletChange: string;
+  funding: string;
+  commission: string;
+  liquidationFees: string;
+  settlement: string;
+  totals: Record<string, string>;
+}
+
+interface NotificationRow {
+  id: string;
+  accountName: string;
+  severity: "critical" | "warning";
+  code: string;
+  message: string;
+  observedAt: string;
+}
+
+interface GeneralSettings {
+  venue: string;
+  region: string;
+  environment: string;
+  mode: string;
+  operationsContactEmail: string;
+  displayTimezone: "UTC" | "Asia/Kolkata";
+  editable: boolean;
+}
+
 async function request<T>(path: string, init?: RequestInit, csrf?: string): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
@@ -264,10 +296,6 @@ const navigation: readonly { page: Page; label: string; icon: typeof Activity; a
 
 function Panel({ title, children }: { readonly title: string; readonly children: React.ReactNode }) {
   return <section className="data-panel"><div className="data-panel__header"><h2>{title}</h2></div>{children}</section>;
-}
-
-function Deferred({ name }: { readonly name: string }) {
-  return <Panel title={name}><div className="p-6 text-sm text-slate-600"><strong>Module under qualification.</strong><p className="mt-2">This function remains unavailable until its authorization, replay protection, and operational evidence are complete.</p></div></Panel>;
 }
 
 function MarketPage() {
@@ -500,6 +528,35 @@ function RiskPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: s
   return <Panel title="Live risk policy"><form className="grid gap-3 p-4 md:grid-cols-2" onSubmit={(e) => void save(e)}><select className="rounded border px-3 py-2 md:col-span-2" onChange={(e) => setAccountId(e.target.value)} required value={accountId}><option value="">Select Delta account</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.profileName}</option>)}</select><label>Maximum order notional<input className="block w-full rounded border px-3 py-2" onChange={(e) => setMaxOrder(e.target.value)} value={maxOrder}/></label><label>Maximum position notional<input className="block w-full rounded border px-3 py-2" onChange={(e) => setMaxPosition(e.target.value)} value={maxPosition}/></label><label>Maximum daily loss<input className="block w-full rounded border px-3 py-2" onChange={(e) => setMaxLoss(e.target.value)} value={maxLoss}/></label><label>Maximum open orders<input className="block w-full rounded border px-3 py-2" min="1" onChange={(e) => setMaxOpen(e.target.value)} type="number" value={maxOpen}/></label><label className="md:col-span-2">Allowed product IDs, comma separated<input className="block w-full rounded border px-3 py-2" onChange={(e) => setProducts(e.target.value)} placeholder="27, 3136" value={products}/></label>{user.role === "admin" ? <button className="rounded bg-blue-600 px-4 py-2 text-white md:col-span-2" disabled={!accountId} type="submit">Save and enable risk policy</button> : <p>Only an administrator can change limits.</p>}{notice ? <p className="md:col-span-2" role="status">{notice}</p> : null}</form></Panel>;
 }
 
+function PerformancePage() {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountId, setAccountId] = useState("");
+  const [summary, setSummary] = useState<PerformanceSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback((selected: string) => { if (!selected) return; setError(null); void request<PerformanceSummary>(`/api/v1/performance/${selected}`).then(setSummary).catch(() => { setSummary(null); setError("Fresh reconciled performance data is unavailable."); }); }, []);
+  useEffect(() => { void request<{ accounts: Account[] }>("/api/v1/accounts").then((value) => { const first = value.accounts[0]?.id ?? ""; setAccounts(value.accounts); setAccountId(first); load(first); }); }, [load]);
+  return <Panel title="Performance, funding and fees"><div className="flex gap-3 p-4"><select className="rounded border px-3 py-2" onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} value={accountId}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><button className="rounded border px-3 py-2" onClick={() => load(accountId)} type="button">Refresh</button></div>{error ? <p className="px-4 pb-4" role="alert">{error}</p> : null}{summary ? <><div className="grid gap-4 p-4 md:grid-cols-5"><div><small>Wallet net</small><strong className="block">{summary.netWalletChange}</strong></div><div><small>Funding</small><strong className="block">{summary.funding}</strong></div><div><small>Commission</small><strong className="block">{summary.commission}</strong></div><div><small>Liquidation fees</small><strong className="block">{summary.liquidationFees}</strong></div><div><small>Fills</small><strong className="block">{summary.fillCount}</strong></div></div><div className="overflow-x-auto"><table><thead><tr><th>Wallet transaction type</th><th>Exact total</th></tr></thead><tbody>{Object.entries(summary.totals).map(([kind, amount]) => <tr key={kind}><td>{kind}</td><td>{amount}</td></tr>)}{Object.keys(summary.totals).length === 0 ? <tr><td colSpan={2}>No wallet transactions in the reconciled window.</td></tr> : null}</tbody></table></div></> : <p className="p-4">No performance snapshot.</p>}</Panel>;
+}
+
+function NotificationsPage() {
+  const [rows, setRows] = useState<NotificationRow[]>([]);
+  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const load = useCallback(() => { void request<{ notifications: NotificationRow[]; generatedAt: string }>("/api/v1/notifications").then((value) => { setRows(value.notifications); setGeneratedAt(value.generatedAt); }); }, []);
+  useEffect(load, [load]);
+  return <Panel title="Active operational notifications"><div className="flex items-center gap-3 p-4"><span className="text-sm">Generated {generatedAt ?? "—"}</span><button className="rounded border px-3 py-2" onClick={load} type="button">Refresh</button></div><div className="overflow-x-auto"><table><thead><tr><th>Severity</th><th>Account</th><th>Code</th><th>Message</th><th>Observed</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong className={row.severity === "critical" ? "text-red-700" : "text-amber-700"}>{row.severity}</strong></td><td>{row.accountName}</td><td>{row.code}</td><td>{row.message}</td><td>{row.observedAt}</td></tr>)}{rows.length === 0 ? <tr><td colSpan={5}>No active platform findings.</td></tr> : null}</tbody></table></div></Panel>;
+}
+
+function SettingsPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {
+  const [value, setValue] = useState<GeneralSettings | null>(null);
+  const [email, setEmail] = useState("");
+  const [timezone, setTimezone] = useState<GeneralSettings["displayTimezone"]>("UTC");
+  const [notice, setNotice] = useState<string | null>(null);
+  const load = useCallback(() => { void request<GeneralSettings>("/api/v1/settings").then((settings) => { setValue(settings); setEmail(settings.operationsContactEmail); setTimezone(settings.displayTimezone); }); }, []);
+  useEffect(load, [load]);
+  async function save(event: FormEvent) { event.preventDefault(); setNotice(null); try { await request("/api/v1/settings", { method: "PUT", body: JSON.stringify({ operations_contact_email: email, display_timezone: timezone }) }, csrf); setNotice("General settings saved."); load(); } catch { setNotice("Settings were rejected."); } }
+  return <Panel title="General settings"><div className="grid gap-4 border-b p-4 md:grid-cols-4"><div><small>Venue</small><strong className="block">{value?.venue ?? "—"}</strong></div><div><small>Region</small><strong className="block">{value?.region ?? "—"}</strong></div><div><small>Environment</small><strong className="block">{value?.environment ?? "—"}</strong></div><div><small>Mode</small><strong className="block">{value?.mode ?? "—"}</strong></div></div><form className="grid gap-3 p-4 md:grid-cols-2" onSubmit={(event) => void save(event)}><label>Operations contact<input className="block w-full rounded border px-3 py-2" disabled={user.role !== "admin"} onChange={(event) => setEmail(event.target.value)} required type="email" value={email}/></label><label>Display timezone<select className="block w-full rounded border px-3 py-2" disabled={user.role !== "admin"} onChange={(event) => setTimezone(event.target.value as GeneralSettings["displayTimezone"])} value={timezone}><option value="UTC">UTC</option><option value="Asia/Kolkata">Asia/Kolkata</option></select></label>{user.role === "admin" ? <button className="rounded bg-blue-600 px-4 py-2 text-white md:col-span-2" type="submit">Save general settings</button> : <p className="md:col-span-2">Only administrators can edit platform settings.</p>}{notice ? <p className="md:col-span-2" role="status">{notice}</p> : null}</form></Panel>;
+}
+
 function UsersPage({ csrf }: { readonly csrf: string }) {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -536,7 +593,7 @@ function Shell({ session, onLogout }: { readonly session: Session; readonly onLo
   const user = session.user!;
   const csrf = session.csrfToken!;
   const visible = navigation.filter((item) => !item.admin || user.role === "admin");
-  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "trading" ? <TradingPage csrf={csrf} user={user}/> : null}{page === "orders" ? <AccountStatePage csrf={csrf} mode="orders" user={user}/> : null}{page === "positions" ? <AccountStatePage csrf={csrf} mode="positions" user={user}/> : null}{page === "gtt" ? <GttPage csrf={csrf} user={user}/> : null}{page === "strategies" ? <TradingViewPage csrf={csrf} user={user}/> : null}{page === "risk" ? <RiskPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage csrf={csrf}/> : null}{["performance","notifications","settings"].includes(page) ? <Deferred name={navigation.find((item) => item.page === page)?.label ?? page}/> : null}</div></main></div></div>;
+  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "trading" ? <TradingPage csrf={csrf} user={user}/> : null}{page === "orders" ? <AccountStatePage csrf={csrf} mode="orders" user={user}/> : null}{page === "positions" ? <AccountStatePage csrf={csrf} mode="positions" user={user}/> : null}{page === "gtt" ? <GttPage csrf={csrf} user={user}/> : null}{page === "strategies" ? <TradingViewPage csrf={csrf} user={user}/> : null}{page === "risk" ? <RiskPage csrf={csrf} user={user}/> : null}{page === "performance" ? <PerformancePage/> : null}{page === "notifications" ? <NotificationsPage/> : null}{page === "settings" ? <SettingsPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage csrf={csrf}/> : null}</div></main></div></div>;
 }
 
 export default function PlatformApp() {

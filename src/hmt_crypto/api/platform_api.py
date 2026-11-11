@@ -49,6 +49,7 @@ from hmt_crypto.persistence.models import (
     AccountAssignment,
     AccountLiveControl,
     AccountRiskPolicy,
+    ApplicationSetting,
     CatalogueProduct,
     CatalogueSnapshot,
     CredentialSecretReference,
@@ -170,6 +171,11 @@ class OrderActionBody(_Body):
     product_id: int = Field(gt=0, lt=2**63)
     size: int | None = Field(default=None, gt=0, lt=2**63)
     limit_price: str | None = Field(default=None, max_length=64)
+
+
+class GeneralSettingsBody(_Body):
+    operations_contact_email: str = Field(min_length=3, max_length=320)
+    display_timezone: Literal["UTC", "Asia/Kolkata"]
 
 
 class TradingViewStrategyBody(_Body):
@@ -1236,6 +1242,177 @@ def install_platform_routes(
                 "fills": json.loads(row.fills_payload),
                 "walletTransactions": json.loads(row.wallet_transactions_payload),
             }
+
+    @app.get("/api/v1/performance/{account_id}")
+    async def account_performance(account_id: UUID, request: Request) -> dict[str, object]:
+        state = await account_state(account_id, request)
+        wallet = state["walletTransactions"]
+        fills = state["fills"]
+        if not isinstance(wallet, list) or not isinstance(fills, list):
+            raise HTTPException(status_code=409, detail="account_state_not_ready")
+        totals: dict[str, Decimal] = {}
+        for row in wallet:
+            if not isinstance(row, dict) or type(row.get("transaction_type")) is not str:
+                raise HTTPException(status_code=409, detail="account_state_not_ready")
+            try:
+                amount = Decimal(str(row.get("amount")))
+            except InvalidOperation:
+                raise HTTPException(status_code=409, detail="account_state_not_ready") from None
+            if not amount.is_finite():
+                raise HTTPException(status_code=409, detail="account_state_not_ready")
+            kind = str(row["transaction_type"])
+            totals[kind] = totals.get(kind, Decimal(0)) + amount
+        net = sum(totals.values(), Decimal(0))
+        return {
+            "accountId": str(account_id),
+            "observedAt": state["observedAt"],
+            "fresh": state["fresh"],
+            "fillCount": len(fills),
+            "netWalletChange": format(net, "f"),
+            "funding": format(totals.get("funding", Decimal(0)), "f"),
+            "commission": format(totals.get("commission", Decimal(0)), "f"),
+            "liquidationFees": format(totals.get("liquidation_fee", Decimal(0)), "f"),
+            "settlement": format(totals.get("settlement", Decimal(0)), "f"),
+            "totals": {key: format(value, "f") for key, value in sorted(totals.items())},
+        }
+
+    @app.get("/api/v1/notifications")
+    async def current_notifications(request: Request) -> dict[str, object]:
+        actor = await principal(request)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            query = (
+                select(Account, AccountLiveControl, PrivateWorkerLease, AccountRiskPolicy)
+                .outerjoin(AccountLiveControl, AccountLiveControl.account_id == Account.id)
+                .outerjoin(PrivateWorkerLease, PrivateWorkerLease.account_id == Account.id)
+                .outerjoin(AccountRiskPolicy, AccountRiskPolicy.account_id == Account.id)
+            )
+            if actor.role != "admin":
+                query = query.join(
+                    AccountAssignment, AccountAssignment.account_id == Account.id
+                ).where(AccountAssignment.user_id == actor.profile_id)
+            rows = (await session.execute(query.order_by(Account.profile_name))).all()
+            notifications: list[dict[str, object]] = []
+            for account, control, lease, risk in rows:
+                findings: list[tuple[str, str, str]] = []
+                if control is None or control.credential_state != "verified":
+                    findings.append(
+                        ("critical", "credentials", "Delta credentials are not verified")
+                    )
+                if control is None or control.reconciliation_state != "ready":
+                    findings.append(
+                        ("critical", "reconciliation", "Private reconciliation is not ready")
+                    )
+                elif control.reconciled_at is None or control.reconciled_at < now - timedelta(
+                    seconds=60
+                ):
+                    findings.append(
+                        ("critical", "reconciliation_stale", "Private reconciliation is stale")
+                    )
+                if lease is None or lease.lease_until <= now:
+                    findings.append(("critical", "worker_lease", "No active private worker lease"))
+                if risk is None or not risk.enabled:
+                    findings.append(("warning", "risk_policy", "Live risk policy is not enabled"))
+                if control is not None and control.last_error_code is not None:
+                    findings.append(
+                        ("critical", control.last_error_code, "Account control reported an error")
+                    )
+                for severity, code, message in findings:
+                    notifications.append(
+                        {
+                            "id": f"{account.id}:{code}",
+                            "accountId": str(account.id),
+                            "accountName": account.profile_name,
+                            "severity": severity,
+                            "code": code,
+                            "message": message,
+                            "observedAt": _utc(now),
+                        }
+                    )
+            newest_quote = await session.scalar(select(func.max(MarketQuote.observed_at)))
+            if newest_quote is None or newest_quote < now - timedelta(seconds=15):
+                notifications.append(
+                    {
+                        "id": "platform:market_feed_stale",
+                        "accountId": None,
+                        "accountName": "Platform",
+                        "severity": "critical",
+                        "code": "market_feed_stale",
+                        "message": "Delta public market feed is unavailable or stale",
+                        "observedAt": _utc(now),
+                    }
+                )
+            return {"notifications": notifications, "generatedAt": _utc(now)}
+
+    @app.get("/api/v1/settings")
+    async def get_general_settings(request: Request) -> dict[str, object]:
+        actor = await principal(request)
+        async with database.transaction() as session:
+            rows = (
+                await session.execute(
+                    select(ApplicationSetting).where(
+                        ApplicationSetting.key.in_(
+                            ("operations_contact_email", "display_timezone")
+                        ),
+                        ApplicationSetting.sensitive.is_(False),
+                    )
+                )
+            ).scalars()
+            values = {row.key: row.value for row in rows}
+        return {
+            "venue": "Delta Exchange India",
+            "region": "india",
+            "environment": "prod",
+            "mode": "LIVE",
+            "operationsContactEmail": values.get("operations_contact_email", ""),
+            "displayTimezone": values.get("display_timezone", "UTC"),
+            "editable": actor.role == "admin",
+        }
+
+    @app.put("/api/v1/settings")
+    async def update_general_settings(
+        body: GeneralSettingsBody, request: Request
+    ) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", body.operations_contact_email) is None:
+            raise HTTPException(status_code=400, detail="invalid_operations_contact")
+        now = datetime.now(UTC)
+        updates = {
+            "operations_contact_email": body.operations_contact_email.casefold(),
+            "display_timezone": body.display_timezone,
+        }
+        async with database.transaction() as session:
+            for key, value in updates.items():
+                row = await session.scalar(
+                    select(ApplicationSetting).where(ApplicationSetting.key == key)
+                )
+                if row is None:
+                    session.add(
+                        ApplicationSetting(
+                            id=uuid4(),
+                            key=key,
+                            value=value,
+                            sensitive=False,
+                            updated_by_user_id=actor.profile_id,
+                            updated_at=now,
+                        )
+                    )
+                else:
+                    row.value = value
+                    row.sensitive = False
+                    row.updated_by_user_id = actor.profile_id
+                    row.updated_at = now
+            await append_audit(
+                session,
+                actor=actor,
+                action="GENERAL_SETTINGS_UPDATED",
+                target_type="platform",
+                target_id="general",
+                outcome="SUCCEEDED",
+                request_id=_request_id(request),
+                details={"displayTimezone": body.display_timezone},
+            )
+        return {"updated": True}
 
     @app.get("/api/v1/market/products")
     async def market_products(request: Request) -> dict[str, object]:
