@@ -322,7 +322,7 @@ def _parse_candle(
     required = {"type", "sy", "ts", "res", "o", "h", "l", "c"}
     if not is_mark:
         required.add("v")
-    fields = _keys(message, required)
+    fields = _keys(message, required, {"cst"})
     symbol = _strip_mark_symbol(raw_symbol) if raw_symbol.startswith("MARK:") else raw_symbol
     product = _binding(context, channel=channel, symbol=symbol)
     if isinstance(product, CatalogueMismatchSignal):
@@ -331,12 +331,17 @@ def _parse_candle(
     if channel != f"candlestick_{resolution}":
         raise ValueError("candle resolution")
     volume = None if is_mark else _number(fields["v"])[0]
+    # The current public endpoint includes an undocumented, minute-aligned candle
+    # start (`cst`) in addition to the publish timestamp (`ts`). Prefer the start
+    # when present while retaining compatibility with the documented frame.
+    _microseconds(fields["ts"])
+    candle_timestamp = _microseconds(fields.get("cst", fields["ts"]))
     return CandleObservation(
         source=context.source(channel=channel, symbol=symbol, offset=0),
         product_id=product.id,
         symbol=symbol,
         resolution=resolution,
-        timestamp=_microseconds(fields["ts"]),
+        timestamp=candle_timestamp,
         open=_number(fields["o"])[0],
         high=_number(fields["h"])[0],
         low=_number(fields["l"])[0],

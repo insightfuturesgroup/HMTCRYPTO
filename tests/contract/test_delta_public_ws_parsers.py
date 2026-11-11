@@ -192,6 +192,16 @@ def test_ticker_accepts_documented_nullable_option_fields_without_weakening_shap
     assert ticker.best_bid == 100
 
 
+def test_candle_accepts_current_start_timestamp_and_prefers_it_to_publish_time() -> None:
+    candle = _parse(
+        '{"type":"candlestick_1m","sy":"XBTUSD_CAT",'
+        '"ts":1793872800123456,"cst":1793872800000000,"res":"1m",'
+        '"o":"99","h":"102","l":"98","c":"101","v":"25"}'
+    )[0]
+
+    assert candle.timestamp == datetime(2026, 11, 5, 10, 0, tzinfo=UTC)
+
+
 def test_non_mark_candle_requires_volume_but_mark_candle_documents_absence() -> None:
     with pytest.raises(ExchangeProtocolError):
         _parse(
