@@ -174,7 +174,7 @@ def test_live_bootstrap_requires_and_forwards_explicit_locked_confirmation(
         }
 
     marker = object()
-    monkeypatch.setattr(_api().runtime, "load_settings", lambda: marker)
+    monkeypatch.setattr(_api().cli, "ControlRuntimeSettings", lambda: marker)
     monkeypatch.setattr(_api().runtime, "account_bootstrap_payload", fake_payload)
     result = _invoke(
         "account",

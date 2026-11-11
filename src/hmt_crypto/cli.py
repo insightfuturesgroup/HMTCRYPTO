@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from typer.core import TyperGroup
 
 from hmt_crypto import cli_runtime
+from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.errors import HmtCryptoError
 from hmt_crypto.logging import configure_logging
 from hmt_crypto.persistence.redaction import JsonValue
@@ -160,9 +161,10 @@ def account_bootstrap(
     confirm_locked_live: Annotated[bool, typer.Option("--confirm-locked-live")] = False,
 ) -> None:
     """Create a credential-free profile; LIVE must be explicitly confirmed locked."""
+    settings = ControlRuntimeSettings() if confirm_locked_live else cli_runtime.load_settings()
     _run_async(
         lambda: cli_runtime.account_bootstrap_payload(
-            cli_runtime.load_settings(),
+            settings,
             profile_name=profile_name,
             confirm_locked_live=confirm_locked_live,
         )

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import ExecutionMode, Settings
 from hmt_crypto.errors import ConfigurationError
 from hmt_crypto.persistence.db import Database
@@ -29,7 +30,7 @@ class AccountBootstrapResult:
 
 
 async def bootstrap_account(
-    settings: Settings,
+    settings: Settings | ControlRuntimeSettings,
     *,
     profile_name: str,
     confirm_locked_live: bool = False,
@@ -37,7 +38,7 @@ async def bootstrap_account(
     """Create a credential-free profile; LIVE requires an explicit locked confirmation."""
     live = settings.execution_mode is ExecutionMode.LIVE
     if (
-        type(settings) is not Settings
+        type(settings) not in {Settings, ControlRuntimeSettings}
         or type(profile_name) is not str
         or _PROFILE.fullmatch(profile_name) is None
         or type(confirm_locked_live) is not bool
@@ -45,7 +46,11 @@ async def bootstrap_account(
         or (not live and confirm_locked_live)
     ):
         raise ConfigurationError(context={"operation": "account_bootstrap"}) from None
-    database = Database(settings)
+    database = Database(
+        settings.database_runtime_config()
+        if isinstance(settings, ControlRuntimeSettings)
+        else settings
+    )
     try:
         async with database.transaction() as session:
             now = datetime.now(UTC)

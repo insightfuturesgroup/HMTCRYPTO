@@ -233,7 +233,7 @@ async def products_sync_payload(settings: Settings) -> dict[str, JsonValue]:
 
 
 async def account_bootstrap_payload(
-    settings: Settings,
+    settings: Settings | ControlRuntimeSettings,
     *,
     profile_name: str,
     confirm_locked_live: bool = False,
