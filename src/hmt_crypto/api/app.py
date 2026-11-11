@@ -40,6 +40,7 @@ from hmt_crypto.api.session_store import (
 from hmt_crypto.api.settings import ControlApiSettings, ControlRuntimeSettings
 from hmt_crypto.api.views import command_view, dashboard_view, health_view, utc_text
 from hmt_crypto.config import ExecutionMode
+from hmt_crypto.logging import get_logger
 from hmt_crypto.observability.metrics import ApiMetrics
 from hmt_crypto.oms.kill_worker import KillWorkerError, KillWorkflowWorker
 from hmt_crypto.oms.paper_kill_backend import DurablePaperKillActionBackend
@@ -117,6 +118,7 @@ def create_app(
     login_limiter = LoginRateLimiter(settings.login_attempts_per_five_minutes)
     login_verification_gate = asyncio.Semaphore(2)
     metrics = ApiMetrics()
+    request_logger = get_logger("api.http")
     platform_auth: SupabaseAuthGateway | None = None
     secure = settings.cookie_secure
     session_cookie = _SESSION_COOKIE if secure else _LOCAL_SESSION_COOKIE
@@ -180,6 +182,14 @@ def create_app(
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         started = time.monotonic()
+        supplied_request_id = request.headers.get("x-request-id", "")
+        request_id = (
+            supplied_request_id
+            if len(supplied_request_id) <= 64
+            and supplied_request_id.isascii()
+            and supplied_request_id.replace("-", "").isalnum()
+            else str(uuid4())
+        )
         try:
             response: Response | None = None
             content_length = request.headers.get("content-length")
@@ -218,6 +228,9 @@ def create_app(
         )
         if secure:
             response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        elapsed = float(max(0.0, time.monotonic() - started))
+        response.headers["X-Request-ID"] = request_id
+        response.headers["Server-Timing"] = f"app;dur={elapsed * 1000:.1f}"
         route = getattr(request.scope.get("route"), "path", "/unmatched")
         if type(route) is not str or not route.startswith("/"):
             route = "/unmatched"
@@ -225,7 +238,15 @@ def create_app(
             method=request.method,
             route=route,
             status=response.status_code,
-            elapsed=float(max(0.0, time.monotonic() - started)),
+            elapsed=elapsed,
+        )
+        request_logger.info(
+            "api_request_completed",
+            request_id=request_id,
+            method=request.method,
+            route=route,
+            http_status=response.status_code,
+            duration_ms=round(elapsed * 1000, 3),
         )
         return response
 

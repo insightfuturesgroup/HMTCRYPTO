@@ -16,7 +16,28 @@ closed until the operator completes `docs/GO_LIVE_CHECKLIST.md` for the exact re
 - Live trading only. PAPER, spot, options, Global Delta, copy trading, and portfolio margin are out
   of scope.
 
-## Completed implementation phases
+## Delivery-state matrix
+
+The columns below are intentionally separate. A feature can exist in source without being fully
+tested, deployed, production-verified, or qualified for Live use.
+
+| Capability | Implemented | Tested | Deployed | Production verified | Live qualified |
+| --- | --- | --- | --- | --- | --- |
+| Identity, roles, invitations, and session controls | Yes | Targeted only | Yes | Partial | No |
+| Delta account creation and assignment | Remediation in progress | Pending production-like acceptance | Previous version | No | No |
+| Credential storage and replacement | Yes | Targeted only | Yes | No end-to-end evidence | No |
+| Catalogue and public quotes | Yes | Targeted only | Yes | Partial | No |
+| Private state and reconciliation | Yes | Targeted only | Yes | No sustained window | No |
+| Manual order lifecycle | Yes | Targeted only | Yes, locked | Not exercised | No |
+| GTT protected exits | Yes | Targeted only | Yes, locked | Not exercised | No |
+| TradingView automation | Yes | Targeted only | Yes, locked | Not exercised | No |
+| Shared UI shell, routing, caching, and performance | Remediation in progress | Pending full UI acceptance | No | No | No |
+| Operational and emergency procedures | Documented | Drills pending | N/A | No | No |
+
+The current release decision is **NO-GO**. Entry gates, Live dispatch, and production writes must
+remain locked during remediation and qualification.
+
+## Implemented software surface
 
 ### Foundation, identity, and administration
 
@@ -61,15 +82,21 @@ closed until the operator completes `docs/GO_LIVE_CHECKLIST.md` for the exact re
 ## Verification evidence
 
 - Each delivered checkpoint passed targeted backend lint/type/tests and the production UI build.
-- Current UI campaign: type-check, lint, **50 tests**, and production build passed.
-- Package/artifact build and targeted architecture/lifecycle tests passed.
-- A sequential broader backend campaign reached **551 passing tests** before it was stopped because
-  the complete suite is very large. This is not represented as a full-suite pass.
+- Current UI campaign: type-check, lint, **50 tests**, production build, and dependency audit passed.
+- Modified backend surface: format/lint, mypy across **339 source files**, and **18 targeted tests**
+  passed.
+- The 2026-11-11 complete backend campaign finished with **11,659 passed, 22 skipped, and 15
+  failed**. Three artifact failures were validation-environment setup errors and passed after the
+  declared Hatchling backend was installed. **Twelve baseline architecture/schema contract failures
+  remain unresolved**; the full campaign is therefore a fail, not a pass.
+- Nginx cache policy was added, but deployed response headers remain unverified until the new UI
+  image is built and inspected on EC2.
 - No real Delta order has been placed by development validation.
 
-## Remaining work is operational qualification, not feature development
+## Remaining work
 
-The code phases are complete. Release remains **NO-GO for live entries** until all mandatory gates
+UI parity, workflow stabilization, full-suite verification, production acceptance, and operational
+qualification remain incomplete. Release remains **NO-GO for live entries** until all mandatory gates
 in `docs/GO_LIVE_CHECKLIST.md` are evidenced for the exact commit, images, schema head, credentials,
 Elastic IP, account, product allowlist, and risk configuration.
 
@@ -82,7 +109,7 @@ acceptance order is never executed automatically by tests or deployment.
 ## Safe verification commands
 
 ```bash
-.venv/bin/python -m pytest -q
+PYTHONPATH=.:src .venv/bin/python -m pytest -q
 .venv/bin/ruff format --check .
 .venv/bin/ruff check .
 .venv/bin/mypy src

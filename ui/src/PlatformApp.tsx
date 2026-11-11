@@ -1,4 +1,5 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
   Activity,
   Bell,
@@ -14,6 +15,7 @@ import {
   Target,
   Users,
 } from "lucide-react";
+import { invalidateApplicationQueries, queryClient, queryStaleTime } from "./queryClient";
 
 type Role = "admin" | "trader" | "viewer";
 type Page =
@@ -238,6 +240,20 @@ interface GeneralSettings {
 }
 
 async function request<T>(path: string, init?: RequestInit, csrf?: string): Promise<T> {
+  const method = init?.method?.toUpperCase() ?? "GET";
+  if (method === "GET" && path !== "/api/v1/auth/session") {
+    return queryClient.fetchQuery({
+      queryKey: [path],
+      queryFn: ({ signal }) => networkRequest<T>(path, { ...init, signal }, csrf),
+      staleTime: queryStaleTime(path),
+    });
+  }
+  const value = await networkRequest<T>(path, init, csrf);
+  if (!["GET", "HEAD"].includes(method)) await invalidateApplicationQueries();
+  return value;
+}
+
+async function networkRequest<T>(path: string, init?: RequestInit, csrf?: string): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
   if (init?.body !== undefined) headers.set("Content-Type", "application/json");
@@ -246,13 +262,21 @@ async function request<T>(path: string, init?: RequestInit, csrf?: string): Prom
     headers.set("Idempotency-Key", crypto.randomUUID());
   }
   const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
-  if (!response.ok) throw new RequestError(response.status);
+  if (!response.ok) {
+    let code = "request_failed";
+    try {
+      const body = await response.json() as { detail?: unknown; error?: unknown };
+      const candidate = body.detail ?? body.error;
+      if (typeof candidate === "string" && /^[a-z0-9_]{1,64}$/.test(candidate)) code = candidate;
+    } catch { /* Safe stable fallback; never render server diagnostics. */ }
+    throw new RequestError(response.status, code);
+  }
   return (await response.json()) as T;
 }
 
 class RequestError extends Error {
-  constructor(readonly status: number) {
-    super(`Request failed (${status})`);
+  constructor(readonly status: number, readonly code: string) {
+    super(code);
     this.name = "RequestError";
   }
 }
@@ -311,21 +335,21 @@ function PasswordRecovery({ accessToken, onComplete }: { readonly accessToken: s
   return <main className="hmt-auth-page"><section className="hmt-auth-card"><div className="hmt-auth-brand"><span>HMT</span><strong>CRYPTO</strong></div><h1>Set a new password</h1><p>This recovery link is used once. Existing application sessions will be revoked.</p><form onSubmit={(event) => void submit(event)}><label>New password<input autoComplete="new-password" minLength={12} onChange={(event) => setPassword(event.target.value)} required type="password" value={password}/></label><label>Confirm password<input autoComplete="new-password" minLength={12} onChange={(event) => setConfirmation(event.target.value)} required type="password" value={confirmation}/></label><button className="hmt-auth-submit" disabled={busy} type="submit">{busy ? "Updating…" : "Update password"}</button>{error ? <p className="hmt-auth-error" role="alert">{error}</p> : null}</form></section></main>;
 }
 
-const navigation: readonly { page: Page; label: string; icon: typeof Activity; admin?: boolean }[] = [
-  { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { page: "market", label: "Market", icon: Radio },
-  { page: "accounts", label: "Delta Accounts", icon: KeyRound },
-  { page: "trading", label: "Live Trading", icon: Target },
-  { page: "orders", label: "Orders & Fills", icon: ListChecks },
-  { page: "positions", label: "Positions", icon: BriefcaseBusiness },
-  { page: "gtt", label: "GTT", icon: Target },
-  { page: "strategies", label: "TradingView", icon: BookOpen },
-  { page: "risk", label: "Risk", icon: ShieldCheck },
-  { page: "performance", label: "Performance", icon: Activity },
-  { page: "notifications", label: "Notifications", icon: Bell },
-  { page: "settings", label: "Settings", icon: Settings },
-  { page: "users", label: "User Management", icon: Users, admin: true },
-  { page: "audit", label: "Health & Audit", icon: ShieldCheck, admin: true },
+const navigation: readonly { page: Page; path: string; label: string; icon: typeof Activity; admin?: boolean }[] = [
+  { page: "dashboard", path: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { page: "market", path: "/market", label: "Market", icon: Radio },
+  { page: "accounts", path: "/accounts", label: "Delta Accounts", icon: KeyRound },
+  { page: "trading", path: "/trading", label: "Live Trading", icon: Target },
+  { page: "orders", path: "/orders", label: "Orders & Fills", icon: ListChecks },
+  { page: "positions", path: "/positions", label: "Positions", icon: BriefcaseBusiness },
+  { page: "gtt", path: "/gtt", label: "GTT", icon: Target },
+  { page: "strategies", path: "/tradingview", label: "TradingView", icon: BookOpen },
+  { page: "risk", path: "/risk", label: "Risk", icon: ShieldCheck },
+  { page: "performance", path: "/performance", label: "Performance", icon: Activity },
+  { page: "notifications", path: "/notifications", label: "Notifications", icon: Bell },
+  { page: "settings", path: "/settings", label: "Settings", icon: Settings },
+  { page: "users", path: "/users", label: "User Management", icon: Users, admin: true },
+  { page: "audit", path: "/health", label: "Health & Audit", icon: ShieldCheck, admin: true },
 ];
 
 function Panel({ title, children }: { readonly title: string; readonly children: React.ReactNode }) {
@@ -367,8 +391,10 @@ function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csr
     } catch (error) {
       if (error instanceof RequestError && error.status === 401) {
         setNotice("For security, sign out and sign in again before adding a Live account.");
-      } else if (error instanceof RequestError && error.status === 409) {
+      } else if (error instanceof RequestError && error.code === "account_name_exists") {
         setNotice("An account with this profile name already exists.");
+      } else if (error instanceof RequestError && error.code === "account_create_failed") {
+        setNotice("The account could not be saved. Support can trace this attempt using the server request ID.");
       } else {
         setNotice("Account creation failed. No account was added.");
       }
@@ -471,7 +497,13 @@ function AccountStatePage({ mode, user, csrf }: { readonly mode: "orders" | "pos
       setModifyOrder(null); setModifySize(""); setModifyPrice(""); load(accountId);
     } catch { setError("Action rejected. Refresh account state and verify the Live gates."); }
   }
-  return <><Panel title={mode === "orders" ? "Reconciled orders and fills" : "Reconciled positions and balances"}><div className="flex gap-3 p-4"><select className="rounded border px-3 py-2" onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} value={accountId}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><button className="rounded border px-3 py-2" onClick={() => load(accountId)} type="button">Refresh</button><span className="self-center text-sm">{state ? `${state.fresh ? "Fresh" : "Stale"} · ${state.ageSeconds}s` : "No state"}</span></div>{error ? <p className="px-4 pb-4" role="status">{error}</p> : null}<div className="overflow-x-auto"><table><thead><tr><th>Type</th><th>ID</th><th>Product</th><th>Side / Size</th><th>State</th><th>Price</th>{mode === "orders" ? <th>Action</th> : null}</tr></thead><tbody>{rows.map((row, index) => { const open = mode === "orders" && index < (state?.openOrders.length ?? 0); return <tr key={`${String(row.id ?? index)}-${index}`}><td>{mode === "positions" ? "Position" : open ? "Order" : "Fill"}</td><td>{String(row.id ?? row.order_id ?? "—")}</td><td>{String(row.product_symbol ?? row.product_id ?? "—")}</td><td>{String(row.side ?? "")} {String(row.size ?? row.contracts ?? "")}</td><td>{String(row.state ?? row.role ?? "—")}</td><td>{String(row.limit_price ?? row.price ?? row.entry_price ?? "—")}</td>{mode === "orders" ? <td>{open && canTrade ? <div className="flex gap-2"><button className="text-red-700" onClick={() => void queueAction(row, "cancel")} type="button">Cancel</button><button className="text-blue-700" onClick={() => { setModifyOrder(row); setModifySize(String(row.size ?? "")); setModifyPrice(String(row.limit_price ?? "")); }} type="button">Modify</button></div> : "—"}</td> : null}</tr>; })}{rows.length === 0 ? <tr><td colSpan={mode === "orders" ? 7 : 6}>No reconciled records.</td></tr> : null}</tbody></table></div>{modifyOrder ? <form className="grid gap-3 border-t p-4 md:grid-cols-3" onSubmit={(event) => { event.preventDefault(); void queueAction(modifyOrder, "modify"); }}><div className="md:col-span-3"><strong>Modify order {String(modifyOrder.id ?? modifyOrder.order_id)}</strong><p className="text-xs text-slate-500">For safety, size may only stay the same or decrease and cannot be less than the already-filled size.</p></div><input className="rounded border px-3 py-2" min="1" onChange={(event) => setModifySize(event.target.value)} required type="number" value={modifySize}/><input className="rounded border px-3 py-2" onChange={(event) => setModifyPrice(event.target.value)} placeholder="Limit price (optional)" value={modifyPrice}/><div className="flex gap-2"><button className="rounded bg-blue-600 px-3 py-2 text-white" type="submit">Queue modification</button><button className="rounded border px-3 py-2" onClick={() => setModifyOrder(null)} type="button">Close</button></div></form> : null}{mode === "positions" ? <div className="border-t p-4 text-sm"><strong>Balances</strong><pre className="mt-2 overflow-auto rounded bg-slate-950 p-3 text-slate-100">{JSON.stringify(state?.balances ?? [], null, 2)}</pre></div> : null}</Panel>{mode === "orders" ? <Panel title="Cancel and modification lifecycle"><div className="overflow-x-auto"><table><thead><tr><th>Created</th><th>Action</th><th>Order</th><th>Target</th><th>Status</th><th>Outcome</th></tr></thead><tbody>{actions.map((action) => <tr key={action.id}><td>{action.createdAt}</td><td>{action.action}</td><td>{action.orderId} · {action.productId}</td><td>{action.targetSize ?? "—"} · {action.targetLimitPrice ?? "—"}</td><td>{action.status}</td><td>{action.lastErrorCode ?? action.resolvedAt ?? "Awaiting worker"}</td></tr>)}{actions.length === 0 ? <tr><td colSpan={6}>No order actions.</td></tr> : null}</tbody></table></div></Panel> : null}</>;
+  return <><Panel title={mode === "orders" ? "Reconciled orders and fills" : "Reconciled positions and balances"}><div className="flex gap-3 p-4"><select className="rounded border px-3 py-2" onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} value={accountId}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><button className="rounded border px-3 py-2" onClick={() => load(accountId)} type="button">Refresh</button><span className="self-center text-sm">{state ? `${state.fresh ? "Fresh" : "Stale"} · ${state.ageSeconds}s` : "No state"}</span></div>{error ? <p className="px-4 pb-4" role="status">{error}</p> : null}<div className="overflow-x-auto"><table><thead><tr><th>Type</th><th>ID</th><th>Product</th><th>Side / Size</th><th>State</th><th>Price</th>{mode === "orders" ? <th>Action</th> : null}</tr></thead><tbody>{rows.map((row, index) => { const open = mode === "orders" && index < (state?.openOrders.length ?? 0); return <tr key={`${String(row.id ?? index)}-${index}`}><td>{mode === "positions" ? "Position" : open ? "Order" : "Fill"}</td><td>{String(row.id ?? row.order_id ?? "—")}</td><td>{String(row.product_symbol ?? row.product_id ?? "—")}</td><td>{String(row.side ?? "")} {String(row.size ?? row.contracts ?? "")}</td><td>{String(row.state ?? row.role ?? "—")}</td><td>{String(row.limit_price ?? row.price ?? row.entry_price ?? "—")}</td>{mode === "orders" ? <td>{open && canTrade ? <div className="flex gap-2"><button className="text-red-700" onClick={() => void queueAction(row, "cancel")} type="button">Cancel</button><button className="text-blue-700" onClick={() => { setModifyOrder(row); setModifySize(String(row.size ?? "")); setModifyPrice(String(row.limit_price ?? "")); }} type="button">Modify</button></div> : "—"}</td> : null}</tr>; })}{rows.length === 0 ? <tr><td colSpan={mode === "orders" ? 7 : 6}>No reconciled records.</td></tr> : null}</tbody></table></div>{modifyOrder ? <form className="grid gap-3 border-t p-4 md:grid-cols-3" onSubmit={(event) => { event.preventDefault(); void queueAction(modifyOrder, "modify"); }}><div className="md:col-span-3"><strong>Modify order {String(modifyOrder.id ?? modifyOrder.order_id)}</strong><p className="text-xs text-slate-500">For safety, size may only stay the same or decrease and cannot be less than the already-filled size.</p></div><input className="rounded border px-3 py-2" min="1" onChange={(event) => setModifySize(event.target.value)} required type="number" value={modifySize}/><input className="rounded border px-3 py-2" onChange={(event) => setModifyPrice(event.target.value)} placeholder="Limit price (optional)" value={modifyPrice}/><div className="flex gap-2"><button className="rounded bg-blue-600 px-3 py-2 text-white" type="submit">Queue modification</button><button className="rounded border px-3 py-2" onClick={() => setModifyOrder(null)} type="button">Close</button></div></form> : null}{mode === "positions" ? <RecordTable empty="No reconciled balances." rows={state?.balances ?? []}/> : null}</Panel>{mode === "orders" ? <Panel title="Cancel and modification lifecycle"><div className="overflow-x-auto"><table><thead><tr><th>Created</th><th>Action</th><th>Order</th><th>Target</th><th>Status</th><th>Outcome</th></tr></thead><tbody>{actions.map((action) => <tr key={action.id}><td>{action.createdAt}</td><td>{action.action}</td><td>{action.orderId} · {action.productId}</td><td>{action.targetSize ?? "—"} · {action.targetLimitPrice ?? "—"}</td><td>{action.status}</td><td>{action.lastErrorCode ?? action.resolvedAt ?? "Awaiting worker"}</td></tr>)}{actions.length === 0 ? <tr><td colSpan={6}>No order actions.</td></tr> : null}</tbody></table></div></Panel> : null}</>;
+}
+
+function RecordTable({ rows, empty }: { readonly rows: Record<string, unknown>[]; readonly empty: string }) {
+  const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row)))).slice(0, 10);
+  const text = (value: unknown) => value === null || value === undefined ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value);
+  return <div className="overflow-x-auto border-t"><table><thead><tr>{columns.map((column) => <th key={column}>{column.replaceAll("_", " ")}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={String(row.id ?? row.asset_symbol ?? index)}>{columns.map((column) => <td key={column}>{text(row[column])}</td>)}</tr>)}{rows.length === 0 ? <tr><td colSpan={Math.max(1, columns.length)}>{empty}</td></tr> : null}</tbody></table></div>;
 }
 
 function GttPage({ user, csrf }: { readonly user: SessionUser; readonly csrf: string }) {
@@ -647,20 +679,45 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
   return <><Panel title="Live platform health"><div className="flex items-center gap-3 p-4"><strong>Global entries: {health?.globalEntriesEnabled ? "ENABLED" : "DISABLED"}</strong><button className="rounded border px-3 py-2" onClick={() => void globalGate(false)} type="button">Emergency disable entries</button><button className="rounded bg-amber-600 px-3 py-2 text-white" onClick={() => void globalGate(true)} type="button">Enable global entry gate</button></div><div className="overflow-x-auto"><table><thead><tr><th>Account</th><th>Worker</th><th>Reconciliation</th><th>Risk</th><th>Gates</th><th>Error</th><th>Control</th></tr></thead><tbody>{health?.accounts.map((a) => <tr key={a.accountId}><td>{a.profileName}</td><td>{a.workerLeaseActive ? "Active" : "Missing"}</td><td>{a.reconciliationState} · {a.reconciliationAgeSeconds ?? "—"}s</td><td>{a.riskEnabled ? "Enabled" : a.riskConfigured ? "Disabled" : "Missing"}</td><td>E {a.entriesEnabled ? "ON" : "OFF"} · X {a.exitsEnabled ? "ON" : "OFF"}</td><td>{a.lastErrorCode ?? "—"}</td><td><div className="flex gap-2"><button className="rounded border px-2 py-1 text-xs" onClick={() => void accountGate(a.accountId, false)} type="button">Disable</button><button className="rounded bg-amber-600 px-2 py-1 text-xs text-white disabled:bg-slate-400" disabled={!health?.globalEntriesEnabled || !a.workerLeaseActive || a.reconciliationState !== "ready" || !a.riskEnabled} onClick={() => void accountGate(a.accountId, true)} type="button">Enable</button></div></td></tr>)}</tbody></table></div></Panel><Panel title="Security audit"><div className="overflow-x-auto"><table><thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Outcome</th></tr></thead><tbody>{events.map((e) => <tr key={e.id}><td>{e.occurredAt}</td><td>{e.action}</td><td>{e.targetType}: {e.targetId}</td><td>{e.outcome}</td></tr>)}</tbody></table></div></Panel></>;
 }
 
+function MarketRail({ onOpenMarket }: { readonly onOpenMarket: () => void }) {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [fresh, setFresh] = useState<boolean | null>(null);
+  const load = useCallback(() => {
+    void request<{ snapshot: { fresh: boolean } | null; products: Product[] }>("/api/v1/market/products")
+      .then((value) => { setProducts(value.products.slice(0, 24)); setFresh(value.snapshot?.fresh ?? null); })
+      .catch(() => { setProducts([]); setFresh(false); });
+  }, []);
+  useEffect(() => {
+    load();
+    const timer = window.setInterval(load, 5_000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+  return <aside className="market-rail"><div className="market-rail__heading"><div><p className="market-rail__eyebrow">Delta India</p><h2>Live market</h2></div><button className="market-rail__venue" onClick={onOpenMarket} type="button">Open</button></div><div className="market-rail__evidence"><div className="market-rail__evidence-row"><Radio size={14}/><span>Public feed</span><strong className={fresh ? "is-ready" : "is-blocked"}>{fresh ? "Fresh" : "Unavailable"}</strong></div></div><div className="market-rail__list">{products.map((product) => <button className="market-rail__product" key={product.productId} onClick={onOpenMarket} type="button"><span className="market-rail__product-heading"><span><strong>{product.symbol}</strong><small>{product.contractType}</small></span></span><dl className="market-rail__quotes"><div><dt>Bid</dt><dd>{product.bestBid ?? "—"}</dd></div><div><dt>Mark</dt><dd>{product.markPrice ?? "—"}</dd></div><div><dt>Ask</dt><dd>{product.bestAsk ?? "—"}</dd></div></dl></button>)}{products.length === 0 ? <p className="market-rail__empty">Market evidence is unavailable.</p> : null}</div></aside>;
+}
+
+function DashboardPage({ csrf, user }: { readonly csrf: string; readonly user: SessionUser }) {
+  return <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></>;
+}
+
 function Shell({ session, onLogout }: { readonly session: Session; readonly onLogout: () => void }) {
-  const [page, setPage] = useState<Page>("dashboard");
   const user = session.user!;
   const csrf = session.csrfToken!;
+  const location = useLocation();
+  const navigate = useNavigate();
   const visible = navigation.filter((item) => !item.admin || user.role === "admin");
-  return <div className="hmt-app-shell"><header className="hmt-header"><strong>HMT Crypto</strong><span className="hmt-environment">DELTA INDIA · LIVE</span><div className="hmt-header-actions"><span className="text-sm">{user.fullName} · {user.role}</span><button onClick={onLogout} title="Sign out"><LogOut size={18}/></button></div></header><div className="hmt-workspace"><aside className="hmt-sidebar"><nav>{visible.map(({ page: target, label, icon: Icon }) => <button className={`hmt-sidebar-link ${page === target ? "is-active" : ""}`} key={target} onClick={() => setPage(target)}><Icon size={17}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content">{page === "dashboard" ? <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></> : null}{page === "market" ? <MarketPage csrf={csrf}/> : null}{page === "accounts" ? <AccountsPage csrf={csrf} user={user}/> : null}{page === "trading" ? <TradingPage csrf={csrf} user={user}/> : null}{page === "orders" ? <AccountStatePage csrf={csrf} mode="orders" user={user}/> : null}{page === "positions" ? <AccountStatePage csrf={csrf} mode="positions" user={user}/> : null}{page === "gtt" ? <GttPage csrf={csrf} user={user}/> : null}{page === "strategies" ? <TradingViewPage csrf={csrf} user={user}/> : null}{page === "risk" ? <RiskPage csrf={csrf} user={user}/> : null}{page === "performance" ? <PerformancePage/> : null}{page === "notifications" ? <NotificationsPage/> : null}{page === "settings" ? <SettingsPage csrf={csrf} user={user}/> : null}{page === "users" ? <UsersPage csrf={csrf}/> : null}{page === "audit" ? <AuditPage csrf={csrf}/> : null}</div></main></div></div>;
+  return <div className="hmt-app-shell"><header className="hmt-header"><span className="hmt-brand"><span className="hmt-brand-mark"><Activity size={20}/></span><span className="hmt-brand-copy"><strong>HelpMeTrade</strong><small>Crypto</small></span></span><nav aria-label="Main navigation" className="hmt-primary-navigation">{visible.map(({ path, label, icon: Icon }) => <button className={`hmt-nav-link ${location.pathname === path ? "is-active" : ""}`} key={path} onClick={() => navigate(path)} type="button"><Icon size={16}/><span>{label}</span></button>)}</nav><div className="hmt-header-actions"><span className="hmt-environment is-danger">DELTA INDIA · LIVE</span><span className="hmt-operator"><span>{user.fullName} · {user.role}</span></span><button aria-label="Sign out" className="hmt-signout" onClick={onLogout} title="Sign out" type="button"><LogOut size={17}/><span>Sign out</span></button></div></header><div className="hmt-mobile-bar"><nav aria-label="Mobile navigation" className="hmt-mobile-navigation">{visible.map(({ path, label, icon: Icon }) => <button className={`hmt-nav-link ${location.pathname === path ? "is-active" : ""}`} key={path} onClick={() => navigate(path)} type="button"><Icon size={16}/><span>{label}</span></button>)}</nav></div><div className="hmt-workspace"><MarketRail onOpenMarket={() => navigate("/market")}/><main className="hmt-main"><div className="hmt-main-content"><Routes><Route path="/dashboard" element={<DashboardPage csrf={csrf} user={user}/>}/><Route path="/market" element={<MarketPage csrf={csrf}/>}/><Route path="/accounts" element={<AccountsPage csrf={csrf} user={user}/>}/><Route path="/trading" element={<TradingPage csrf={csrf} user={user}/>}/><Route path="/orders" element={<AccountStatePage csrf={csrf} mode="orders" user={user}/>}/><Route path="/positions" element={<AccountStatePage csrf={csrf} mode="positions" user={user}/>}/><Route path="/gtt" element={<GttPage csrf={csrf} user={user}/>}/><Route path="/tradingview" element={<TradingViewPage csrf={csrf} user={user}/>}/><Route path="/risk" element={<RiskPage csrf={csrf} user={user}/>}/><Route path="/performance" element={<PerformancePage/>}/><Route path="/notifications" element={<NotificationsPage/>}/><Route path="/settings" element={<SettingsPage csrf={csrf} user={user}/>}/><Route path="/users" element={user.role === "admin" ? <UsersPage csrf={csrf}/> : <Navigate replace to="/dashboard"/>}/><Route path="/health" element={user.role === "admin" ? <AuditPage csrf={csrf}/> : <Navigate replace to="/dashboard"/>}/><Route path="*" element={<Navigate replace to="/dashboard"/>}/></Routes></div></main></div></div>;
+}
+
+function SessionSkeleton() {
+  return <div aria-label="Checking secure session" className="hmt-app-shell" role="status"><header className="hmt-header"><span className="hmt-brand-copy"><strong>HelpMeTrade</strong><small>Crypto</small></span></header><div className="hmt-workspace"><aside className="market-rail hmt-skeleton-rail"/><main className="hmt-main"><div className="hmt-main-content"><div className="hmt-skeleton-block"/><div className="hmt-skeleton-block hmt-skeleton-block--large"/></div></main></div></div>;
 }
 
 export default function PlatformApp() {
   const [session, setSession] = useState<Session | null>(null);
   const [recoveryToken, setRecoveryToken] = useState<string | null>(() => { const values = new URLSearchParams(window.location.hash.replace(/^#/, "")); return values.get("type") === "recovery" ? values.get("access_token") : null; });
-  useEffect(() => { void request<Session>("/api/v1/auth/session").then(setSession).catch(() => setSession({ authenticated: false, csrfToken: null, user: null })); }, []);
+  useEffect(() => { performance.mark("hmt-session-check-start"); void request<Session>("/api/v1/auth/session").then((value) => { performance.mark("hmt-session-check-end"); performance.measure("hmt-session-check", "hmt-session-check-start", "hmt-session-check-end"); setSession(value); }).catch(() => setSession({ authenticated: false, csrfToken: null, user: null })); }, []);
   if (recoveryToken !== null) return <PasswordRecovery accessToken={recoveryToken} onComplete={() => { setRecoveryToken(null); setSession({ authenticated: false, csrfToken: null, user: null }); }}/>;
-  if (session === null) return <main className="grid min-h-screen place-items-center">Checking session…</main>;
+  if (session === null) return <SessionSkeleton/>;
   if (!session.authenticated || session.user === null || session.csrfToken === null) return <Login onLogin={setSession}/>;
-  return <Shell session={session} onLogout={() => { void request("/api/v1/auth/session", { method: "DELETE" }, session.csrfToken ?? "").finally(() => setSession({ authenticated: false, csrfToken: null, user: null })); }}/>;
+  return <Shell session={session} onLogout={() => { void request("/api/v1/auth/session", { method: "DELETE" }, session.csrfToken ?? "").finally(() => { queryClient.clear(); setSession({ authenticated: false, csrfToken: null, user: null }); }); }}/>;
 }

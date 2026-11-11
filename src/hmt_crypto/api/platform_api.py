@@ -43,7 +43,9 @@ from hmt_crypto.api.platform_auth import (
 )
 from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlApiSettings
+from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
+from hmt_crypto.persistence.errors import PersistenceError
 from hmt_crypto.persistence.models import (
     Account,
     AccountAssignment,
@@ -79,6 +81,7 @@ _REFRESH_COOKIE = "__Host-hmt_auth_refresh"
 _CSRF_COOKIE = "__Host-hmt_auth_csrf"
 _SESSION_COOKIE = "__Host-hmt_platform_session"
 _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+_LOGGER = get_logger("api.platform")
 
 
 class _Body(BaseModel):
@@ -763,17 +766,30 @@ def install_platform_routes(
         actor = await principal(request)
         async with database.transaction() as session:
             if actor.role == "admin":
-                query = select(
-                    Account,
-                    literal("manage").label("permission"),
-                    AccountLiveControl,
-                ).outerjoin(AccountLiveControl, AccountLiveControl.account_id == Account.id)
+                query = (
+                    select(
+                        Account,
+                        literal("manage").label("permission"),
+                        AccountLiveControl,
+                    )
+                    .outerjoin(AccountLiveControl, AccountLiveControl.account_id == Account.id)
+                    .where(
+                        Account.region == "india",
+                        Account.environment == "prod",
+                        Account.mode == "LIVE",
+                    )
+                )
             else:
                 query = (
                     select(Account, AccountAssignment.permission, AccountLiveControl)
                     .join(AccountAssignment, AccountAssignment.account_id == Account.id)
                     .outerjoin(AccountLiveControl, AccountLiveControl.account_id == Account.id)
-                    .where(AccountAssignment.user_id == actor.profile_id)
+                    .where(
+                        AccountAssignment.user_id == actor.profile_id,
+                        Account.region == "india",
+                        Account.environment == "prod",
+                        Account.mode == "LIVE",
+                    )
                 )
             rows = (await session.execute(query.order_by(Account.profile_name))).all()
             return {
@@ -807,11 +823,22 @@ def install_platform_routes(
         if _PROFILE.fullmatch(body.profile_name) is None:
             raise HTTPException(status_code=400, detail="invalid_profile_name")
         now, account_id = datetime.now(UTC), uuid4()
+        stage = "owner_lookup"
         try:
             async with database.transaction() as session:
                 owner = await session.get(PlatformUser, body.owner_user_id)
                 if owner is None or owner.status == "disabled":
                     raise HTTPException(status_code=404, detail="owner_not_found")
+                existing = await session.scalar(
+                    select(Account.id).where(
+                        Account.region == "india",
+                        Account.environment == body.environment,
+                        Account.mode == "LIVE",
+                        Account.profile_name == body.profile_name,
+                    )
+                )
+                if existing is not None:
+                    raise HTTPException(status_code=409, detail="account_name_exists")
                 account = Account(
                     id=account_id,
                     region="india",
@@ -831,6 +858,7 @@ def install_platform_routes(
                 # readiness rows.  The Account mapper also participates in the
                 # credential-version FK cycle, so relying on implicit unit-of-work
                 # ordering can send its dependants first on PostgreSQL.
+                stage = "account_parent"
                 await session.flush()
                 session.add(
                     AccountAssignment(
@@ -861,7 +889,9 @@ def install_platform_routes(
                 # Keep the audit record after all account-owned FK rows.  This
                 # makes a failed child write roll back the whole operation while
                 # preserving deterministic insertion order.
+                stage = "account_children"
                 await session.flush()
+                stage = "account_audit"
                 await append_audit(
                     session,
                     actor=actor,
@@ -873,7 +903,16 @@ def install_platform_routes(
                     details={"environment": body.environment, "mode": "LIVE"},
                 )
         except IntegrityError:
-            raise HTTPException(status_code=409, detail="account_already_exists") from None
+            raise HTTPException(status_code=409, detail="account_name_exists") from None
+        except PersistenceError:
+            _LOGGER.error(
+                "account_create_failed",
+                request_id=request_id,
+                operation="account_create",
+                stage=stage,
+                error_code="account_create_failed",
+            )
+            raise HTTPException(status_code=503, detail="account_create_failed") from None
         return {"id": str(account_id), "status": "credential_required", "mode": "LIVE"}
 
     @app.put("/api/v1/accounts/{account_id}/assignments")
