@@ -80,7 +80,7 @@ _ACCESS_COOKIE = "__Host-hmt_auth_access"
 _REFRESH_COOKIE = "__Host-hmt_auth_refresh"
 _CSRF_COOKIE = "__Host-hmt_auth_csrf"
 _SESSION_COOKIE = "__Host-hmt_platform_session"
-_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.: -]{0,127}\Z")
 _LOGGER = get_logger("api.platform")
 
 
@@ -823,7 +823,8 @@ def install_platform_routes(
     async def create_account(body: CreateAccountBody, request: Request) -> dict[str, object]:
         actor = await admin(request, mutation=True)
         request_id = _request_id(request)
-        if _PROFILE.fullmatch(body.profile_name) is None:
+        profile_name = " ".join(body.profile_name.strip().split())
+        if _PROFILE.fullmatch(profile_name) is None:
             raise HTTPException(status_code=400, detail="invalid_profile_name")
         now, account_id = datetime.now(UTC), uuid4()
         stage = "owner_lookup"
@@ -837,7 +838,7 @@ def install_platform_routes(
                         Account.region == "india",
                         Account.environment == body.environment,
                         Account.mode == "LIVE",
-                        Account.profile_name == body.profile_name,
+                        Account.profile_name == profile_name,
                     )
                 )
                 if existing is not None:
@@ -847,7 +848,7 @@ def install_platform_routes(
                     region="india",
                     environment=body.environment,
                     mode="LIVE",
-                    profile_name=body.profile_name,
+                    profile_name=profile_name,
                     external_user_id=None,
                     external_account_id=None,
                     identity_verified_at=None,

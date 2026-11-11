@@ -11,6 +11,7 @@ import {
   LayoutDashboard,
   ListChecks,
   LogOut,
+  Menu,
   Pause,
   Play,
   Plus,
@@ -21,6 +22,7 @@ import {
   Target,
   Trash2,
   Users,
+  X,
 } from "lucide-react";
 import { invalidateApplicationQueries, queryClient, queryStaleTime } from "./queryClient";
 
@@ -391,8 +393,9 @@ function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csr
     setCreating(true);
     setNotice(null);
     try {
-      await request("/api/v1/accounts", { method: "POST", body: JSON.stringify({ profile_name: profileName, environment: "prod" }) }, csrf);
+      const created = await request<{ id: string }>("/api/v1/accounts", { method: "POST", body: JSON.stringify({ profile_name: profileName.trim(), environment: "prod" }) }, csrf);
       setProfileName("");
+      setCredentialAccount(created.id);
       setNotice("Live account profile created. Configure its Delta credentials next.");
       load();
     } catch (error) {
@@ -402,6 +405,8 @@ function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csr
         setNotice("An account with this profile name already exists.");
       } else if (error instanceof RequestError && error.code === "account_create_failed") {
         setNotice("The account could not be saved. Support can trace this attempt using the server request ID.");
+      } else if (error instanceof RequestError && error.code === "invalid_profile_name") {
+        setNotice("Use letters, numbers, spaces, hyphens, dots, colons, or underscores for the profile name.");
       } else {
         setNotice("Account creation failed. No account was added.");
       }
@@ -417,7 +422,11 @@ function AccountsPage({ user, csrf }: { readonly user: SessionUser; readonly csr
       await request(`/api/v1/accounts/${credentialAccount}/credentials`, { method: "POST", body: JSON.stringify({ api_key: apiKey, api_secret: apiSecret }) }, csrf);
       setNotice("Credentials stored in AWS Secrets Manager. Verify them from this EC2 static IP.");
       setApiKey(""); setApiSecret(""); load();
-    } catch { setNotice("Credential storage failed."); }
+    } catch (error) {
+      if (error instanceof RequestError && error.status === 401) setNotice("For security, sign out and sign in again before storing credentials.");
+      else if (error instanceof RequestError && error.status === 403) setNotice("Your account does not have permission to manage these credentials.");
+      else setNotice("Credential storage failed. Confirm the AWS secret policy and retry; no credential was saved in the application database.");
+    }
   }
   async function verify(accountId: string) {
     setNotice(null);
@@ -712,22 +721,6 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
   return <><Panel title="Live platform health"><div className="flex items-center gap-3 p-4"><strong>Global entries: {health?.globalEntriesEnabled ? "ENABLED" : "DISABLED"}</strong><button className="rounded border px-3 py-2" onClick={() => void globalGate(false)} type="button">Emergency disable entries</button><button className="rounded bg-amber-600 px-3 py-2 text-white" onClick={() => void globalGate(true)} type="button">Enable global entry gate</button></div><div className="overflow-x-auto"><table><thead><tr><th>Account</th><th>Worker</th><th>Reconciliation</th><th>Risk</th><th>Gates</th><th>Error</th><th>Control</th></tr></thead><tbody>{health?.accounts.map((a) => <tr key={a.accountId}><td>{a.profileName}</td><td>{a.workerLeaseActive ? "Active" : "Missing"}</td><td>{a.reconciliationState} · {a.reconciliationAgeSeconds ?? "—"}s</td><td>{a.riskEnabled ? "Enabled" : a.riskConfigured ? "Disabled" : "Missing"}</td><td>E {a.entriesEnabled ? "ON" : "OFF"} · X {a.exitsEnabled ? "ON" : "OFF"}</td><td>{a.lastErrorCode ?? "—"}</td><td><div className="flex gap-2"><button className="rounded border px-2 py-1 text-xs" onClick={() => void accountGate(a.accountId, false)} type="button">Disable</button><button className="rounded bg-amber-600 px-2 py-1 text-xs text-white disabled:bg-slate-400" disabled={!health?.globalEntriesEnabled || !a.workerLeaseActive || a.reconciliationState !== "ready" || !a.riskEnabled} onClick={() => void accountGate(a.accountId, true)} type="button">Enable</button></div></td></tr>)}</tbody></table></div></Panel><Panel title="Security audit"><div className="overflow-x-auto"><table><thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Outcome</th></tr></thead><tbody>{events.map((e) => <tr key={e.id}><td>{e.occurredAt}</td><td>{e.action}</td><td>{e.targetType}: {e.targetId}</td><td>{e.outcome}</td></tr>)}</tbody></table></div></Panel></>;
 }
 
-function MarketRail({ onOpenMarket }: { readonly onOpenMarket: () => void }) {
-  const [products, setProducts] = useState<Product[]>([]);
-  const [fresh, setFresh] = useState<boolean | null>(null);
-  const load = useCallback(() => {
-    void request<{ snapshot: { fresh: boolean } | null; products: Product[] }>("/api/v1/market/products")
-      .then((value) => { setProducts(value.products.slice(0, 24)); setFresh(value.snapshot?.fresh ?? null); })
-      .catch(() => { setProducts([]); setFresh(false); });
-  }, []);
-  useEffect(() => {
-    load();
-    const timer = window.setInterval(load, 5_000);
-    return () => window.clearInterval(timer);
-  }, [load]);
-  return <aside className="market-rail"><div className="market-rail__heading"><div><p className="market-rail__eyebrow">Delta India</p><h2>Live market</h2></div><button className="market-rail__venue" onClick={onOpenMarket} type="button">Open</button></div><div className="market-rail__evidence"><div className="market-rail__evidence-row"><Radio size={14}/><span>Public feed</span><strong className={fresh ? "is-ready" : "is-blocked"}>{fresh ? "Fresh" : "Unavailable"}</strong></div></div><div className="market-rail__list">{products.map((product) => <button className="market-rail__product" key={product.productId} onClick={onOpenMarket} type="button"><span className="market-rail__product-heading"><span><strong>{product.symbol}</strong><small>{product.contractType}</small></span></span><dl className="market-rail__quotes"><div><dt>Bid</dt><dd>{product.bestBid ?? "—"}</dd></div><div><dt>Mark</dt><dd>{product.markPrice ?? "—"}</dd></div><div><dt>Ask</dt><dd>{product.bestAsk ?? "—"}</dd></div></dl></button>)}{products.length === 0 ? <p className="market-rail__empty">Market evidence is unavailable.</p> : null}</div></aside>;
-}
-
 function DashboardPage({ csrf, user }: { readonly csrf: string; readonly user: SessionUser }) {
   return <><Panel title="Live platform status"><div className="grid gap-4 p-5 md:grid-cols-3"><div><small>Trading mode</small><strong className="block">LIVE — entries locked</strong></div><div><small>User role</small><strong className="block">{user.role}</strong></div><div><small>Venue</small><strong className="block">Delta Exchange India</strong></div></div></Panel><AccountsPage csrf={csrf} user={user}/></>;
 }
@@ -737,12 +730,14 @@ function Shell({ session, onLogout }: { readonly session: Session; readonly onLo
   const csrf = session.csrfToken!;
   const location = useLocation();
   const navigate = useNavigate();
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const visible = navigation.filter((item) => !item.admin || user.role === "admin");
-  return <div className="hmt-app-shell"><header className="hmt-header"><span className="hmt-brand"><span className="hmt-brand-mark"><Activity size={20}/></span><span className="hmt-brand-copy"><strong>HelpMeTrade</strong><small>Crypto</small></span></span><nav aria-label="Main navigation" className="hmt-primary-navigation">{visible.map(({ path, label, icon: Icon }) => <button className={`hmt-nav-link ${location.pathname === path ? "is-active" : ""}`} key={path} onClick={() => navigate(path)} type="button"><Icon size={16}/><span>{label}</span></button>)}</nav><div className="hmt-header-actions"><span className="hmt-environment is-danger">DELTA INDIA · LIVE</span><span className="hmt-operator"><span>{user.fullName} · {user.role}</span></span><button aria-label="Sign out" className="hmt-signout" onClick={onLogout} title="Sign out" type="button"><LogOut size={17}/><span>Sign out</span></button></div></header><div className="hmt-mobile-bar"><nav aria-label="Mobile navigation" className="hmt-mobile-navigation">{visible.map(({ path, label, icon: Icon }) => <button className={`hmt-nav-link ${location.pathname === path ? "is-active" : ""}`} key={path} onClick={() => navigate(path)} type="button"><Icon size={16}/><span>{label}</span></button>)}</nav></div><div className="hmt-workspace"><MarketRail onOpenMarket={() => navigate("/market")}/><main className="hmt-main"><div className="hmt-main-content"><Routes><Route path="/dashboard" element={<DashboardPage csrf={csrf} user={user}/>}/><Route path="/market" element={<MarketPage csrf={csrf}/>}/><Route path="/accounts" element={<AccountsPage csrf={csrf} user={user}/>}/><Route path="/trading" element={<TradingPage csrf={csrf} user={user}/>}/><Route path="/orders" element={<AccountStatePage csrf={csrf} mode="orders" user={user}/>}/><Route path="/positions" element={<AccountStatePage csrf={csrf} mode="positions" user={user}/>}/><Route path="/gtt" element={<GttPage csrf={csrf} user={user}/>}/><Route path="/tradingview" element={<TradingViewPage csrf={csrf} user={user}/>}/><Route path="/risk" element={<RiskPage csrf={csrf} user={user}/>}/><Route path="/performance" element={<PerformancePage/>}/><Route path="/notifications" element={<NotificationsPage/>}/><Route path="/settings" element={<SettingsPage csrf={csrf} user={user}/>}/><Route path="/users" element={user.role === "admin" ? <UsersPage csrf={csrf}/> : <Navigate replace to="/dashboard"/>}/><Route path="/health" element={user.role === "admin" ? <AuditPage csrf={csrf}/> : <Navigate replace to="/dashboard"/>}/><Route path="*" element={<Navigate replace to="/dashboard"/>}/></Routes></div></main></div></div>;
+  const open = (path: string) => { navigate(path); setNavigationOpen(false); };
+  return <div className="hmt-app-shell"><header className="hmt-header"><button aria-label={navigationOpen ? "Close navigation" : "Open navigation"} className="hmt-menu-button" onClick={() => setNavigationOpen((value) => !value)} type="button">{navigationOpen ? <X size={20}/> : <Menu size={20}/>}</button><span className="hmt-brand"><span className="hmt-brand-mark"><Activity size={20}/></span><span className="hmt-brand-copy"><strong>HelpMeTrade</strong><small>Crypto</small></span></span><div className="hmt-header-actions"><span className="hmt-environment is-danger">DELTA INDIA · LIVE</span><span className="hmt-operator"><span>{user.fullName} · {user.role}</span></span><button aria-label="Sign out" className="hmt-signout" onClick={onLogout} title="Sign out" type="button"><LogOut size={17}/><span>Sign out</span></button></div></header><div className="hmt-workspace"><button aria-label="Close navigation" className={`hmt-navigation-backdrop ${navigationOpen ? "is-open" : ""}`} onClick={() => setNavigationOpen(false)} type="button"/><aside className={`hmt-sidebar ${navigationOpen ? "is-open" : ""}`}><nav aria-label="Main navigation">{visible.map(({ path, label, icon: Icon }) => <button className={`hmt-sidebar-link ${location.pathname === path ? "is-active" : ""}`} key={path} onClick={() => open(path)} type="button"><Icon size={18}/><span>{label}</span></button>)}</nav></aside><main className="hmt-main"><div className="hmt-main-content"><Routes><Route path="/dashboard" element={<DashboardPage csrf={csrf} user={user}/>}/><Route path="/market" element={<MarketPage csrf={csrf}/>}/><Route path="/accounts" element={<AccountsPage csrf={csrf} user={user}/>}/><Route path="/trading" element={<TradingPage csrf={csrf} user={user}/>}/><Route path="/orders" element={<AccountStatePage csrf={csrf} mode="orders" user={user}/>}/><Route path="/positions" element={<AccountStatePage csrf={csrf} mode="positions" user={user}/>}/><Route path="/gtt" element={<GttPage csrf={csrf} user={user}/>}/><Route path="/tradingview" element={<TradingViewPage csrf={csrf} user={user}/>}/><Route path="/risk" element={<RiskPage csrf={csrf} user={user}/>}/><Route path="/performance" element={<PerformancePage/>}/><Route path="/notifications" element={<NotificationsPage/>}/><Route path="/settings" element={<SettingsPage csrf={csrf} user={user}/>}/><Route path="/users" element={user.role === "admin" ? <UsersPage csrf={csrf}/> : <Navigate replace to="/dashboard"/>}/><Route path="/health" element={user.role === "admin" ? <AuditPage csrf={csrf}/> : <Navigate replace to="/dashboard"/>}/><Route path="*" element={<Navigate replace to="/dashboard"/>}/></Routes></div></main></div></div>;
 }
 
 function SessionSkeleton() {
-  return <div aria-label="Checking secure session" className="hmt-app-shell" role="status"><header className="hmt-header"><span className="hmt-brand-copy"><strong>HelpMeTrade</strong><small>Crypto</small></span></header><div className="hmt-workspace"><aside className="market-rail hmt-skeleton-rail"/><main className="hmt-main"><div className="hmt-main-content"><div className="hmt-skeleton-block"/><div className="hmt-skeleton-block hmt-skeleton-block--large"/></div></main></div></div>;
+  return <div aria-label="Checking secure session" className="hmt-app-shell" role="status"><header className="hmt-header"><span className="hmt-brand-copy"><strong>HelpMeTrade</strong><small>Crypto</small></span></header><div className="hmt-workspace"><aside className="hmt-sidebar hmt-skeleton-rail"/><main className="hmt-main"><div className="hmt-main-content"><div className="hmt-skeleton-block"/><div className="hmt-skeleton-block hmt-skeleton-block--large"/></div></main></div></div>;
 }
 
 export default function PlatformApp() {

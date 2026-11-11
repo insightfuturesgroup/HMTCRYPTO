@@ -50,3 +50,11 @@ def test_account_creation_assigns_authenticated_admin_without_owner_input() -> N
     )
 
     assert account.profile_name == "delta-primary"
+
+
+def test_account_creation_accepts_human_readable_profile_name() -> None:
+    account = CreateAccountBody.model_validate_json(
+        '{"profile_name":"Hitashi Garg","environment":"prod"}'
+    )
+
+    assert account.profile_name == "Hitashi Garg"
