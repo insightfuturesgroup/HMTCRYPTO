@@ -181,7 +181,9 @@ async def run_market_worker(
                     in {ContractType.PERPETUAL_FUTURES, ContractType.FUTURES}
                 }
                 stage = "ticker_fetch"
-                tickers = await client.get_tickers()
+                tickers = await client.get_tickers(
+                    contract_types=("perpetual_futures", "futures")
+                )
                 observed = datetime.now(UTC)
                 stage = "quote_persist"
                 async with database.transaction() as session:

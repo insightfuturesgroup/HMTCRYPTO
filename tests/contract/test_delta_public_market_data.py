@@ -210,6 +210,52 @@ async def test_all_tickers_uses_collection_route_and_requires_list_shape() -> No
 
 
 @pytest.mark.asyncio
+async def test_all_tickers_filters_futures_and_accepts_observed_microsecond_timestamp() -> None:
+    payload = fixture_json("public_ticker.json")
+    payload["result"]["timestamp"] = 1_700_000_000_123_456
+    payload["result"] = [payload["result"]]
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return json_response(request, json.dumps(payload).encode())
+
+    client = new_client(handler)
+    try:
+        tickers = await client.get_tickers(
+            contract_types=("perpetual_futures", "futures")
+        )
+    finally:
+        await client.aclose()
+    assert tickers[0].timestamp == datetime(
+        2023, 11, 14, 22, 13, 20, 123456, tzinfo=UTC
+    )
+    assert list(seen[0].url.params.multi_items()) == [
+        ("contract_types", "perpetual_futures,futures")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ticker_allows_absent_optional_quote_and_band_objects() -> None:
+    payload = fixture_json("public_ticker.json")
+    payload["result"]["quotes"] = None
+    payload["result"]["price_band"] = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(request, json.dumps(payload).encode())
+
+    client = new_client(handler)
+    try:
+        ticker = await client.get_ticker(public_api().base.ProductRef(symbol="XBTUSD_TEST"))
+    finally:
+        await client.aclose()
+    assert ticker.best_bid is None
+    assert ticker.best_ask is None
+    assert ticker.lower_price_limit is None
+    assert ticker.upper_price_limit is None
+
+
+@pytest.mark.asyncio
 async def test_l2_requires_explicit_inferred_microsecond_policy() -> None:
     called = False
 

@@ -219,13 +219,31 @@ class DeltaPublicClient:
         return ticker
 
     async def get_tickers(
-        self, products: tuple[ProductRef, ...] | None = None
+        self,
+        products: tuple[ProductRef, ...] | None = None,
+        *,
+        contract_types: tuple[str, ...] | None = None,
     ) -> tuple[Ticker, ...]:
         """Return all tickers, or an ordered subset of at most ten symbols."""
         if products is None:
+            if contract_types is not None and (
+                not isinstance(contract_types, tuple)
+                or not contract_types
+                or len(set(contract_types)) != len(contract_types)
+                or any(
+                    type(value) is not str
+                    or value not in {"futures", "perpetual_futures"}
+                    for value in contract_types
+                )
+            ):
+                raise _config("ticker_contract_types")
             path = "/v2/tickers"
             response = await self._transport._get_json(  # noqa: SLF001
-                resolve_public_request("GET", path), path=path
+                resolve_public_request("GET", path),
+                path=path,
+                params=()
+                if contract_types is None
+                else (("contract_types", ",".join(contract_types)),),
             )
             try:
                 if not isinstance(response.result, list):
@@ -233,7 +251,7 @@ class DeltaPublicClient:
                 return parse_ticker_collection(response.result, endpoint_id="tickers")
             except ExchangeProtocolError:
                 raise _response_protocol(response) from None
-        if (
+        if contract_types is not None or (
             not isinstance(products, tuple)
             or not 1 <= len(products) <= _MAX_TICKER_SYMBOLS
             or any(not isinstance(product, ProductRef) for product in products)

@@ -15,6 +15,7 @@ from websockets.asyncio.client import connect as websocket_connect
 
 from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import ExecutionMode
+from hmt_crypto.errors import ExchangeProtocolError
 from hmt_crypto.exchange.delta.catalog_models import CatalogSnapshot
 from hmt_crypto.exchange.delta.endpoints import get_delta_endpoints
 from hmt_crypto.exchange.delta.websocket_codec import (
@@ -165,6 +166,7 @@ async def _connection(
     expected = desired_subscriptions(revision=1, entries=(subscription, candles))
     parser = DeltaPublicFrameParser()
     backoff = 1
+    rejected_frames = 0
     while not stop.is_set():
         generation = uuid4()
         sequence = 1
@@ -207,7 +209,19 @@ async def _connection(
                         received_at=datetime.now(UTC),
                         spot_asset_ids={},
                     )
-                    outcomes = parser.parse(message, context=context)
+                    try:
+                        outcomes = parser.parse(message, context=context)
+                    except ExchangeProtocolError:
+                        rejected_frames += 1
+                        if rejected_frames == 1 or rejected_frames % 100 == 0:
+                            logger.warning(
+                                "public_ticker_frame_rejected",
+                                channel=message_type
+                                if isinstance(message_type, str)
+                                else "unknown",
+                                rejected_count=rejected_frames,
+                            )
+                        continue
                     sequence += len(outcomes)
                     for outcome in outcomes:
                         if isinstance(outcome, (TickerObservation, CandleObservation)):

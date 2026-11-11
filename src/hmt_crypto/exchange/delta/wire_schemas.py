@@ -100,6 +100,19 @@ def _timestamp_seconds(value: object, endpoint_id: str) -> datetime:
         raise _protocol(endpoint_id) from None
 
 
+def _ticker_timestamp(value: object, endpoint_id: str) -> datetime:
+    """Accept only documented seconds or observed microseconds, never ambiguous units."""
+    raw = _integer(value, endpoint_id)
+    if raw <= 253_402_300_799:
+        return _timestamp_seconds(raw, endpoint_id)
+    if raw < 1_000_000_000_000_000 or raw > 253_402_300_799_999_999:
+        raise _protocol(endpoint_id)
+    try:
+        return _EPOCH + timedelta(microseconds=raw)
+    except OverflowError:
+        raise _protocol(endpoint_id) from None
+
+
 def _asset(value: object, endpoint_id: str) -> Asset:
     item = _object(value, endpoint_id)
     precision = (
@@ -176,12 +189,14 @@ def parse_ticker(value: object, *, endpoint_id: str) -> Ticker:
     """Parse one ticker; trading status is deliberately not inferred from REST."""
     try:
         item = _object(value, endpoint_id)
-        quotes = _object(item.get("quotes", {}), endpoint_id)
-        band = _object(item.get("price_band", {}), endpoint_id)
+        quotes_value = item.get("quotes")
+        band_value = item.get("price_band")
+        quotes = {} if quotes_value is None else _object(quotes_value, endpoint_id)
+        band = {} if band_value is None else _object(band_value, endpoint_id)
         return Ticker(
             product_id=_integer(item.get("product_id"), endpoint_id, minimum=1),
             symbol=ProductRef(symbol=_text(item.get("symbol"), endpoint_id)).symbol,
-            timestamp=_timestamp_seconds(item.get("timestamp"), endpoint_id),
+            timestamp=_ticker_timestamp(item.get("timestamp"), endpoint_id),
             contract_type=_enum(item.get("contract_type", "unknown"), ContractType, endpoint_id),
             product_trading_status=TradingStatus.UNKNOWN,
             mark_price=_optional_decimal(item, "mark_price", endpoint_id),
