@@ -9,6 +9,7 @@ from hmt_crypto.api.live_submission import (
     LiveSubmissionTransitionError,
     SubmissionFence,
     make_live_client_order_id,
+    recovery_check_sha256,
     require_transition,
     submission_event_sha256,
 )
@@ -84,3 +85,29 @@ def test_submission_event_hash_is_deterministic_and_fence_bound() -> None:
         fence=SubmissionFence(OWNER, 5, 2),
         occurred_at=occurred_at,
     )
+
+
+def test_recovery_check_hash_binds_lookup_result_and_never_infers_rejection() -> None:
+    occurred_at = datetime(2026, 11, 11, 10, 31, tzinfo=UTC)
+    fence = SubmissionFence(OWNER, 4, 2)
+    missing = recovery_check_sha256(
+        submission_id=INTENT,
+        attempt=1,
+        result="NOT_FOUND",
+        client_order_id="HML1_ABCDEFGHIJKLMNOPQRSTUVWXYZA",
+        exchange_order_id=None,
+        fence=fence,
+        occurred_at=occurred_at,
+    )
+    unavailable = recovery_check_sha256(
+        submission_id=INTENT,
+        attempt=1,
+        result="UNAVAILABLE",
+        client_order_id="HML1_ABCDEFGHIJKLMNOPQRSTUVWXYZA",
+        exchange_order_id=None,
+        fence=fence,
+        occurred_at=occurred_at,
+    )
+
+    assert len(missing) == 64
+    assert missing != unavailable

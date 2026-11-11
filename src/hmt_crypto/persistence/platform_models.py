@@ -612,12 +612,49 @@ class LiveOrderSubmissionEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class LiveOrderRecoveryCheck(Base):
+    """Append-only evidence from client-order-ID uncertainty lookup."""
+
+    __tablename__ = "live_order_recovery_checks"
+    __table_args__ = (
+        CheckConstraint("attempt >= 1", name="attempt_positive"),
+        CheckConstraint("result IN ('FOUND','NOT_FOUND','UNAVAILABLE')", name="result_allowed"),
+        CheckConstraint(
+            "(result = 'FOUND' AND exchange_order_id IS NOT NULL) OR "
+            "(result <> 'FOUND' AND exchange_order_id IS NULL)",
+            name="found_order_required",
+        ),
+        UniqueConstraint("submission_id", "attempt", name="uq_recovery_checks_attempt"),
+        Index("ix_recovery_checks_account_occurred", "account_id", "occurred_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    submission_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("hmt_crypto.live_order_submissions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    attempt: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    result: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    client_order_id: Mapped[str] = mapped_column(NulFreeString(32), nullable=False)
+    exchange_order_id: Mapped[int | None] = mapped_column(StrictBigInteger())
+    worker_owner_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    worker_generation: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    credential_version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 __all__ = [
     "AccountAssignment",
     "AccountRiskPolicy",
     "ApplicationSetting",
     "GttOrder",
     "LiveOrderIntent",
+    "LiveOrderRecoveryCheck",
     "LiveOrderPreview",
     "LiveOrderSubmission",
     "LiveOrderSubmissionEvent",

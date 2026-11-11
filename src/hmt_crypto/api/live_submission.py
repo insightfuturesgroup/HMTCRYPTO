@@ -102,10 +102,46 @@ def submission_event_sha256(
     return sha256(payload.encode("ascii")).hexdigest()
 
 
+def recovery_check_sha256(
+    *,
+    submission_id: UUID,
+    attempt: int,
+    result: str,
+    client_order_id: str,
+    exchange_order_id: int | None,
+    fence: SubmissionFence,
+    occurred_at: datetime,
+) -> str:
+    """Hash one bounded client-order lookup observation."""
+    if (
+        type(submission_id) is not UUID
+        or type(attempt) is not int
+        or attempt < 1
+        or result not in {"FOUND", "NOT_FOUND", "UNAVAILABLE"}
+        or type(client_order_id) is not str
+        or len(client_order_id) != 32
+        or (result == "FOUND" and (type(exchange_order_id) is not int or exchange_order_id < 1))
+        or (result != "FOUND" and exchange_order_id is not None)
+        or type(fence) is not SubmissionFence
+        or not isinstance(occurred_at, datetime)
+        or occurred_at.tzinfo is None
+        or occurred_at.utcoffset() is None
+    ):
+        raise LiveSubmissionTransitionError from None
+    timestamp = occurred_at.astimezone(UTC).isoformat(timespec="microseconds")
+    payload = (
+        f"recovery-check:v1:{submission_id}:{attempt}:{result}:{client_order_id}:"
+        f"{exchange_order_id or '-'}:{fence.owner_id}:{fence.generation}:"
+        f"{fence.credential_version}:{timestamp}"
+    )
+    return sha256(payload.encode("ascii")).hexdigest()
+
+
 __all__ = [
     "LiveSubmissionTransitionError",
     "SubmissionFence",
     "make_live_client_order_id",
     "require_transition",
+    "recovery_check_sha256",
     "submission_event_sha256",
 ]
