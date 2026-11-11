@@ -42,6 +42,9 @@ from hmt_crypto.persistence.platform_models import (
     PlatformUser,
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
+    TradingViewSignal,
+    TradingViewStrategy,
+    TradingViewWebhookKey,
     WatchlistItem,
 )
 from hmt_crypto.persistence.pnl_models import PnlSnapshot
@@ -122,6 +125,9 @@ __all__ = [
     "PlatformLiveControl",
     "PrivateReconciliationSnapshot",
     "PrivateWorkerLease",
+    "TradingViewSignal",
+    "TradingViewStrategy",
+    "TradingViewWebhookKey",
     "ApplicationSetting",
     "GttOrder",
     "LiveOrderIntent",

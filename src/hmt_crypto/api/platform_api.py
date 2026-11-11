@@ -62,6 +62,9 @@ from hmt_crypto.persistence.models import (
     PlatformUser,
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
+    TradingViewSignal,
+    TradingViewStrategy,
+    TradingViewWebhookKey,
     WatchlistItem,
 )
 
@@ -156,6 +159,24 @@ class OrderPreviewBody(_Body):
 
 class OrderIntentBody(_Body):
     preview_id: UUID
+
+
+class TradingViewStrategyBody(_Body):
+    account_id: UUID
+    name: str = Field(min_length=1, max_length=128)
+    product_id: int = Field(gt=0)
+    symbol: str = Field(min_length=1, max_length=128)
+    contracts: int = Field(gt=0, lt=2**63)
+    order_type: Literal["market", "limit"]
+    reduce_only: bool
+    enabled: bool = False
+
+
+class TradingViewSignalBody(_Body):
+    signal_id: str = Field(min_length=1, max_length=128)
+    side: Literal["buy", "sell"]
+    timestamp: int = Field(gt=0)
+    limit_price: str | None = Field(default=None, max_length=64)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1983,6 +2004,219 @@ def install_platform_routes(
                     for row in rows
                 ]
             }
+
+    @app.get("/api/v1/strategies")
+    async def list_strategies(request: Request, account_id: UUID) -> dict[str, object]:
+        actor = await principal(request)
+        async with database.transaction() as session:
+            await account_permission(session, actor, account_id)
+            rows = (
+                await session.execute(
+                    select(TradingViewStrategy)
+                    .where(TradingViewStrategy.account_id == account_id)
+                    .order_by(desc(TradingViewStrategy.created_at))
+                )
+            ).scalars()
+            return {
+                "strategies": [
+                    {
+                        "id": str(row.id),
+                        "accountId": str(row.account_id),
+                        "name": row.name,
+                        "productId": row.product_id,
+                        "symbol": row.symbol,
+                        "contracts": row.contracts,
+                        "orderType": row.order_type,
+                        "reduceOnly": row.reduce_only,
+                        "enabled": row.enabled,
+                        "version": row.version,
+                        "updatedAt": _utc(row.updated_at),
+                    }
+                    for row in rows
+                ]
+            }
+
+    @app.post("/api/v1/strategies")
+    async def create_strategy(body: TradingViewStrategyBody, request: Request) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        request_id = _request_id(request)
+        now, strategy_id = datetime.now(UTC), uuid4()
+        async with database.transaction() as session:
+            permission = await account_permission(session, actor, body.account_id)
+            if actor.role == "viewer" or permission == "view":
+                raise HTTPException(status_code=403, detail="trading_permission_required")
+            product = await session.scalar(
+                select(CatalogueProduct)
+                .join(CatalogueSnapshot, CatalogueSnapshot.id == CatalogueProduct.snapshot_id)
+                .where(
+                    CatalogueSnapshot.region == "india",
+                    CatalogueSnapshot.environment == "prod",
+                    CatalogueSnapshot.fresh_until > now,
+                    CatalogueProduct.product_id == body.product_id,
+                    CatalogueProduct.symbol == body.symbol,
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            if product is None:
+                raise HTTPException(status_code=409, detail="strategy_product_not_ready")
+            session.add(
+                TradingViewStrategy(
+                    id=strategy_id,
+                    account_id=body.account_id,
+                    created_by_user_id=actor.profile_id,
+                    name=body.name,
+                    product_id=body.product_id,
+                    symbol=body.symbol,
+                    contracts=body.contracts,
+                    order_type=body.order_type,
+                    reduce_only=body.reduce_only,
+                    enabled=body.enabled,
+                    version=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await append_audit(
+                session,
+                actor=actor,
+                action="TRADINGVIEW_STRATEGY_CREATED",
+                target_type="strategy",
+                target_id=str(strategy_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={"accountId": str(body.account_id), "enabled": body.enabled},
+            )
+        return {"id": str(strategy_id), "enabled": body.enabled}
+
+    @app.post("/api/v1/strategies/{strategy_id}/webhook-key")
+    async def rotate_strategy_key(strategy_id: UUID, request: Request) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        if actor.last_login_at is None or datetime.now(UTC) - actor.last_login_at > timedelta(
+            minutes=15
+        ):
+            raise HTTPException(status_code=403, detail="fresh_session_required")
+        raw_key = secrets.token_urlsafe(32)
+        digest = hashlib.sha256(raw_key.encode("ascii")).hexdigest()
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            strategy = await session.get(TradingViewStrategy, strategy_id)
+            if strategy is None:
+                raise HTTPException(status_code=404, detail="strategy_not_found")
+            permission = await account_permission(session, actor, strategy.account_id)
+            if actor.role == "viewer" or permission == "view":
+                raise HTTPException(status_code=403, detail="trading_permission_required")
+            active = (
+                await session.execute(
+                    select(TradingViewWebhookKey).where(
+                        TradingViewWebhookKey.strategy_id == strategy_id,
+                        TradingViewWebhookKey.revoked_at.is_(None),
+                    )
+                )
+            ).scalars()
+            for row in active:
+                row.revoked_at = now
+            session.add(
+                TradingViewWebhookKey(
+                    id=uuid4(),
+                    strategy_id=strategy_id,
+                    key_sha256=digest,
+                    key_fingerprint=digest[:12],
+                    created_by_user_id=actor.profile_id,
+                    created_at=now,
+                    revoked_at=None,
+                )
+            )
+            await append_audit(
+                session,
+                actor=actor,
+                action="TRADINGVIEW_KEY_ROTATED",
+                target_type="strategy",
+                target_id=str(strategy_id),
+                outcome="SUCCEEDED",
+                request_id=_request_id(request),
+                details={"fingerprint": digest[:12]},
+            )
+        return {
+            "webhookPath": f"/api/v1/webhooks/tradingview/{raw_key}",
+            "fingerprint": digest[:12],
+            "shownOnce": True,
+        }
+
+    @app.post("/api/v1/webhooks/tradingview/{key}")
+    async def tradingview_webhook(key: str, body: TradingViewSignalBody) -> JSONResponse:
+        if len(key) < 32 or len(key) > 128 or re.fullmatch(r"[A-Za-z0-9_-]+", key) is None:
+            raise HTTPException(status_code=404, detail="webhook_not_found")
+        now = datetime.now(UTC)
+        if abs(int(now.timestamp()) - body.timestamp) > 60:
+            raise HTTPException(status_code=409, detail="stale_signal")
+        if re.fullmatch(r"[A-Za-z0-9_.:-]+", body.signal_id) is None:
+            raise HTTPException(status_code=400, detail="invalid_signal_id")
+        if body.limit_price is not None:
+            try:
+                limit = Decimal(body.limit_price)
+            except InvalidOperation:
+                raise HTTPException(status_code=400, detail="invalid_limit_price") from None
+            if not limit.is_finite() or limit <= 0:
+                raise HTTPException(status_code=400, detail="invalid_limit_price")
+        digest = hashlib.sha256(key.encode("ascii")).hexdigest()
+        payload_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "limitPrice": body.limit_price,
+                    "side": body.side,
+                    "signalId": body.signal_id,
+                    "timestamp": body.timestamp,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest()
+        async with database.transaction() as session:
+            webhook_key = await session.scalar(
+                select(TradingViewWebhookKey).where(
+                    TradingViewWebhookKey.key_sha256 == digest,
+                    TradingViewWebhookKey.revoked_at.is_(None),
+                )
+            )
+            strategy = (
+                None
+                if webhook_key is None
+                else await session.get(TradingViewStrategy, webhook_key.strategy_id)
+            )
+            if strategy is None or not strategy.enabled:
+                raise HTTPException(status_code=404, detail="webhook_not_found")
+            if (strategy.order_type == "limit") != (body.limit_price is not None):
+                raise HTTPException(status_code=409, detail="strategy_signal_incompatible")
+            existing = await session.scalar(
+                select(TradingViewSignal).where(
+                    TradingViewSignal.strategy_id == strategy.id,
+                    TradingViewSignal.external_signal_id == body.signal_id,
+                )
+            )
+            if existing is not None:
+                if existing.payload_sha256 != payload_digest:
+                    raise HTTPException(status_code=409, detail="signal_id_conflict")
+                return JSONResponse(status_code=202, content={"status": "duplicate"})
+            signal_id = uuid4()
+            session.add(
+                TradingViewSignal(
+                    id=signal_id,
+                    strategy_id=strategy.id,
+                    account_id=strategy.account_id,
+                    external_signal_id=body.signal_id,
+                    side=body.side,
+                    limit_price=body.limit_price,
+                    payload_sha256=payload_digest,
+                    status="received",
+                    rejection_code=None,
+                    intent_id=None,
+                    received_at=now,
+                    processed_at=None,
+                )
+            )
+        return JSONResponse(status_code=202, content={"status": "received"})
 
     @app.post("/api/v1/gtt")
     async def create_gtt(body: GttBody, request: Request) -> dict[str, object]:

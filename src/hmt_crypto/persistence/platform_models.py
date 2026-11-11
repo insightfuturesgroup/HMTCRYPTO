@@ -242,6 +242,91 @@ class GttOrder(Base):
     __mapper_args__ = {"version_id_col": version}
 
 
+class TradingViewStrategy(Base):
+    __tablename__ = "tradingview_strategies"
+    __table_args__ = (
+        CheckConstraint("contracts > 0", name="contracts_positive"),
+        CheckConstraint("order_type IN ('market','limit')", name="order_type_allowed"),
+        CheckConstraint("version >= 1", name="version_positive"),
+        UniqueConstraint("account_id", "name", name="uq_tv_strategies_account_name"),
+        Index("ix_tv_strategies_account_enabled", "account_id", "enabled"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    contracts: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    order_type: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
+    reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+class TradingViewWebhookKey(Base):
+    __tablename__ = "tradingview_webhook_keys"
+    __table_args__ = (
+        UniqueConstraint("key_sha256", name="uq_tv_webhook_keys_digest"),
+        Index("ix_tv_webhook_keys_strategy_active", "strategy_id", "revoked_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    strategy_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("hmt_crypto.tradingview_strategies.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    key_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    key_fingerprint: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class TradingViewSignal(Base):
+    __tablename__ = "tradingview_signals"
+    __table_args__ = (
+        CheckConstraint("side IN ('buy','sell')", name="side_allowed"),
+        CheckConstraint(
+            "status IN ('received','admitted','rejected','duplicate')", name="status_allowed"
+        ),
+        UniqueConstraint("strategy_id", "external_signal_id", name="uq_tv_signals_external"),
+        Index("ix_tv_signals_strategy_received", "strategy_id", "received_at"),
+        Index("ix_tv_signals_account_status", "account_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    strategy_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("hmt_crypto.tradingview_strategies.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    external_signal_id: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    side: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
+    limit_price: Mapped[str | None] = mapped_column(NulFreeString(64))
+    payload_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    rejection_code: Mapped[str | None] = mapped_column(NulFreeString(64))
+    intent_id: Mapped[UUID | None] = mapped_column(Uuid)
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
 class AccountLiveControl(Base):
     """Fail-closed Live readiness state; absence and unknown states deny dispatch."""
 
@@ -682,5 +767,8 @@ __all__ = [
     "PlatformUser",
     "PrivateReconciliationSnapshot",
     "PrivateWorkerLease",
+    "TradingViewSignal",
+    "TradingViewStrategy",
+    "TradingViewWebhookKey",
     "WatchlistItem",
 ]
