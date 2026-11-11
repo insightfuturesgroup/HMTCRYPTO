@@ -408,8 +408,11 @@ async def run_private_worker(
                 async with database.transaction() as session:
                     account_ids = tuple(
                         await session.scalars(
-                            select(AccountLiveControl.account_id).where(
-                                AccountLiveControl.credential_state == "verified"
+                            select(AccountLiveControl.account_id)
+                            .join(Account, Account.id == AccountLiveControl.account_id)
+                            .where(
+                                AccountLiveControl.credential_state == "verified",
+                                Account.archived_at.is_(None),
                             )
                         )
                     )

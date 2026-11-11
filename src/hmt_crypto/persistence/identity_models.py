@@ -129,6 +129,7 @@ class Account(Base):
     external_account_id: Mapped[str | None] = mapped_column(NulFreeString(128))
     identity_verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     current_credential_version: Mapped[int | None] = mapped_column(StrictBigInteger())
+    archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     version: Mapped[int] = mapped_column(StrictBigInteger())
     created_at: Mapped[datetime] = mapped_column(UTCDateTime())
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime())

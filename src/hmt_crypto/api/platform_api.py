@@ -114,6 +114,10 @@ class CreateAccountBody(_Body):
     environment: Literal["prod"]
 
 
+class UpdateAccountBody(_Body):
+    profile_name: str = Field(min_length=1, max_length=128)
+
+
 class AssignmentBody(_Body):
     user_id: UUID
     permission: Literal["view", "trade", "manage"]
@@ -392,6 +396,11 @@ def install_platform_routes(
         )
 
     async def account_permission(session: object, actor: Principal, account_id: UUID) -> str:
+        active = await session.scalar(  # type: ignore[attr-defined]
+            select(Account.id).where(Account.id == account_id, Account.archived_at.is_(None))
+        )
+        if active is None:
+            raise HTTPException(status_code=404, detail="account_not_found")
         if actor.role == "admin":
             return "manage"
         permission = await session.scalar(  # type: ignore[attr-defined]
@@ -786,6 +795,7 @@ def install_platform_routes(
                         Account.region == "india",
                         Account.environment == "prod",
                         Account.mode == "LIVE",
+                        Account.archived_at.is_(None),
                     )
                 )
             else:
@@ -798,6 +808,7 @@ def install_platform_routes(
                         Account.region == "india",
                         Account.environment == "prod",
                         Account.mode == "LIVE",
+                        Account.archived_at.is_(None),
                     )
                 )
             rows = (await session.execute(query.order_by(Account.profile_name))).all()
@@ -924,6 +935,87 @@ def install_platform_routes(
             )
             raise HTTPException(status_code=503, detail="account_create_failed") from None
         return {"id": str(account_id), "status": "credential_required", "mode": "LIVE"}
+
+    @app.patch("/api/v1/accounts/{account_id}")
+    async def update_account(
+        account_id: UUID, body: UpdateAccountBody, request: Request
+    ) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        now = datetime.now(UTC)
+        if actor.last_login_at is None or now - actor.last_login_at > timedelta(minutes=15):
+            raise HTTPException(status_code=403, detail="fresh_authentication_required")
+        profile_name = " ".join(body.profile_name.strip().split())
+        if _PROFILE.fullmatch(profile_name) is None:
+            raise HTTPException(status_code=400, detail="invalid_profile_name")
+        try:
+            async with database.transaction() as session:
+                account = await session.get(Account, account_id, with_for_update=True)
+                if account is None or account.archived_at is not None:
+                    raise HTTPException(status_code=404, detail="account_not_found")
+                account.profile_name = profile_name
+                account.updated_at = now
+                await append_audit(
+                    session,
+                    actor=actor,
+                    action="ACCOUNT_RENAMED",
+                    target_type="account",
+                    target_id=str(account.id),
+                    outcome="SUCCEEDED",
+                    request_id=_request_id(request),
+                    details={"profileName": profile_name},
+                )
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail="account_name_exists") from None
+        return {"id": str(account_id), "profileName": profile_name}
+
+    @app.delete("/api/v1/accounts/{account_id}")
+    async def archive_account(account_id: UUID, request: Request) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        now = datetime.now(UTC)
+        if actor.last_login_at is None or now - actor.last_login_at > timedelta(minutes=15):
+            raise HTTPException(status_code=403, detail="fresh_authentication_required")
+        async with database.transaction() as session:
+            account = await session.get(Account, account_id, with_for_update=True)
+            if account is None or account.archived_at is not None:
+                raise HTTPException(status_code=404, detail="account_not_found")
+            control = await session.scalar(
+                select(AccountLiveControl)
+                .where(AccountLiveControl.account_id == account_id)
+                .with_for_update()
+            )
+            lease = await session.scalar(
+                select(PrivateWorkerLease)
+                .where(PrivateWorkerLease.account_id == account_id)
+                .with_for_update()
+            )
+            if control is None or control.entries_enabled or control.exits_enabled:
+                raise HTTPException(status_code=409, detail="account_gates_must_be_disabled")
+            if lease is not None and lease.lease_until > now:
+                raise HTTPException(status_code=409, detail="account_worker_active")
+            strategies = (
+                await session.execute(
+                    select(TradingViewStrategy).where(
+                        TradingViewStrategy.account_id == account_id
+                    )
+                )
+            ).scalars()
+            for strategy in strategies:
+                strategy.enabled = False
+                strategy.version += 1
+                strategy.updated_at = now
+            account.archived_at = now
+            account.updated_at = now
+            await append_audit(
+                session,
+                actor=actor,
+                action="ACCOUNT_ARCHIVED",
+                target_type="account",
+                target_id=str(account.id),
+                outcome="SUCCEEDED",
+                request_id=_request_id(request),
+                details={"profileName": account.profile_name},
+            )
+        return {"id": str(account_id), "archived": True}
 
     @app.put("/api/v1/accounts/{account_id}/assignments")
     async def assign_account(
@@ -2832,6 +2924,7 @@ def install_platform_routes(
                 .join(AccountLiveControl, AccountLiveControl.account_id == Account.id)
                 .outerjoin(AccountRiskPolicy, AccountRiskPolicy.account_id == Account.id)
                 .outerjoin(PrivateWorkerLease, PrivateWorkerLease.account_id == Account.id)
+                .where(Account.archived_at.is_(None))
                 .order_by(Account.profile_name)
             )
             accounts = []

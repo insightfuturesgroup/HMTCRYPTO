@@ -779,6 +779,8 @@ function AccountsPage({
   const [credentialAccount, setCredentialAccount] = useState<string | null>(
     null,
   );
+  const [editingAccount, setEditingAccount] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
@@ -912,6 +914,77 @@ function AccountsPage({
     }
     load();
   }
+  async function renameAccount(event: FormEvent) {
+    event.preventDefault();
+    if (editingAccount === null) return;
+    setNotice(null);
+    try {
+      await request(
+        `/api/v1/accounts/${editingAccount}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ profile_name: editingName.trim() }),
+        },
+        csrf,
+      );
+      setEditingAccount(null);
+      setEditingName("");
+      setNotice(
+        "Account profile renamed. Trading history and assignments were preserved.",
+      );
+      load();
+    } catch (error) {
+      if (
+        error instanceof RequestError &&
+        error.code === "fresh_authentication_required"
+      )
+        setNotice("Sign out and sign in again before editing an account.");
+      else if (
+        error instanceof RequestError &&
+        error.code === "account_name_exists"
+      )
+        setNotice("An account with this profile name already exists.");
+      else setNotice("The account profile could not be renamed.");
+    }
+  }
+  async function archiveAccount(account: Account) {
+    if (
+      !window.confirm(
+        `Archive ${account.profileName}? It will disappear from active account lists, but its audit and trading history will be preserved.`,
+      )
+    )
+      return;
+    setNotice(null);
+    try {
+      await request(
+        `/api/v1/accounts/${account.id}`,
+        { method: "DELETE" },
+        csrf,
+      );
+      if (credentialAccount === account.id) setCredentialAccount(null);
+      setNotice("Account archived. Historical evidence was preserved.");
+      load();
+    } catch (error) {
+      if (
+        error instanceof RequestError &&
+        error.code === "fresh_authentication_required"
+      )
+        setNotice("Sign out and sign in again before archiving an account.");
+      else if (
+        error instanceof RequestError &&
+        error.code === "account_gates_must_be_disabled"
+      )
+        setNotice("Disable both account Live gates before archiving.");
+      else if (
+        error instanceof RequestError &&
+        error.code === "account_worker_active"
+      )
+        setNotice(
+          "The private worker still owns an active lease. Wait for it to expire before archiving.",
+        );
+      else setNotice("The account could not be archived safely.");
+    }
+  }
   return (
     <>
       <Panel title="Delta accounts">
@@ -985,6 +1058,23 @@ function AccountsPage({
                         >
                           Verify
                         </button>
+                        <button
+                          className="text-blue-700"
+                          onClick={() => {
+                            setEditingAccount(a.id);
+                            setEditingName(a.profileName);
+                          }}
+                          type="button"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="text-red-700"
+                          onClick={() => void archiveAccount(a)}
+                          type="button"
+                        >
+                          Archive
+                        </button>
                       </div>
                     ) : (
                       "—"
@@ -1000,6 +1090,36 @@ function AccountsPage({
             </tbody>
           </table>
         </div>
+        {editingAccount !== null ? (
+          <form
+            className="flex flex-wrap gap-2 border-t p-4"
+            onSubmit={(event) => void renameAccount(event)}
+          >
+            <input
+              className="min-w-64 flex-1 rounded border px-3 py-2"
+              maxLength={128}
+              onChange={(event) => setEditingName(event.target.value)}
+              required
+              value={editingName}
+            />
+            <button
+              className="rounded bg-blue-600 px-4 py-2 text-white"
+              type="submit"
+            >
+              Save account name
+            </button>
+            <button
+              className="rounded border px-4 py-2"
+              onClick={() => {
+                setEditingAccount(null);
+                setEditingName("");
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+          </form>
+        ) : null}
         {credentialAccount !== null ? (
           <form
             className="grid gap-3 border-t p-4 md:grid-cols-2"
@@ -2142,7 +2262,9 @@ function TradingViewPage({
       ) : null}
       {showCreate ? (
         <section className="tv-create">
-          <h2>{editingId === null ? "Create" : "Edit"} webhook configuration</h2>
+          <h2>
+            {editingId === null ? "Create" : "Edit"} webhook configuration
+          </h2>
           <form
             className="grid gap-3 md:grid-cols-2"
             onSubmit={(event) => void saveStrategy(event)}
