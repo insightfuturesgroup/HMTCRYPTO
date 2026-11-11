@@ -14,6 +14,7 @@ from hmt_crypto.exchange.delta.signer import DeltaSigner
 
 _ORIGIN = "https://api.india.delta.exchange"
 _MAX_BODY = 4 * 1024 * 1024
+_MAX_PROJECTION = 1024 * 1024
 _ROUTES = (
     ("balances", "/v2/wallet/balances", b""),
     ("positions", "/v2/positions/margined", b""),
@@ -22,6 +23,8 @@ _ROUTES = (
         "/v2/orders",
         b"?states=open%2Cpending&contract_types=futures%2Cperpetual_futures&page_size=50",
     ),
+    ("fills", "/v2/fills", b"?page_size=50"),
+    ("transactions", "/v2/wallet/transactions", b"?page_size=50"),
 )
 
 
@@ -34,9 +37,108 @@ class PrivateReconciliationEvidence:
     balance_count: int
     position_count: int
     open_order_count: int
+    fill_count: int
+    wallet_transaction_count: int
     foreign_product_ids: tuple[int, ...]
     complete: bool
     content_sha256: str
+    balances_payload: str
+    positions_payload: str
+    open_orders_payload: str
+    fills_payload: str
+    wallet_transactions_payload: str
+
+
+_PROJECTION_FIELDS = {
+    "balances": frozenset(
+        {"asset_id", "asset_symbol", "available_balance", "balance", "blocked_margin"}
+    ),
+    "positions": frozenset(
+        {
+            "product_id",
+            "product_symbol",
+            "size",
+            "entry_price",
+            "mark_price",
+            "liquidation_price",
+            "margin",
+            "realized_pnl",
+            "realized_funding",
+            "unrealized_pnl",
+            "margin_mode",
+            "updated_at",
+        }
+    ),
+    "orders": frozenset(
+        {
+            "id",
+            "client_order_id",
+            "product_id",
+            "product_symbol",
+            "side",
+            "state",
+            "order_type",
+            "size",
+            "unfilled_size",
+            "limit_price",
+            "stop_price",
+            "reduce_only",
+            "created_at",
+            "updated_at",
+        }
+    ),
+    "fills": frozenset(
+        {
+            "id",
+            "order_id",
+            "product_id",
+            "product_symbol",
+            "side",
+            "size",
+            "price",
+            "commission",
+            "fill_type",
+            "role",
+            "settling_asset_id",
+            "settling_asset_symbol",
+            "created_at",
+        }
+    ),
+    "transactions": frozenset(
+        {
+            "id",
+            "transaction_type",
+            "product_id",
+            "asset_id",
+            "asset_symbol",
+            "amount",
+            "balance",
+            "created_at",
+        }
+    ),
+}
+
+
+def _projection_payload(name: str, items: list[object]) -> str:
+    fields = _PROJECTION_FIELDS[name]
+    projected: list[dict[str, object]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ReconciliationReadError()
+        row: dict[str, object] = {}
+        for key in fields:
+            value = item.get(key)
+            if value is not None and type(value) not in {str, int, bool}:
+                raise ReconciliationReadError()
+            if key in item:
+                row[key] = value
+        projected.append(row)
+    payload = json.dumps(
+        projected, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True
+    )
+    if not 2 <= len(payload.encode("ascii")) <= _MAX_PROJECTION:
+        raise ReconciliationReadError()
+    return payload
 
 
 def _items(payload: object) -> tuple[list[object], object]:
@@ -86,7 +188,9 @@ async def read_private_reconciliation(
                 except (UnicodeDecodeError, ValueError):
                     raise ReconciliationReadError() from None
                 items, meta = _items(payload)
-                if name == "orders" and isinstance(meta, dict) and meta.get("after") is not None:
+                if name in {"orders", "fills", "transactions"} and (
+                    not isinstance(meta, dict) or meta.get("after") is not None
+                ):
                     complete = False
                 resources[name] = items
     except httpx.HTTPError:
@@ -104,7 +208,13 @@ async def read_private_reconciliation(
             user_id = item.get("user_id")
             if user_id is not None and user_id != expected:
                 raise ReconciliationReadError()
-            if name != "balances":
+            if name not in {"balances", "transactions"}:
+                product_id = item.get("product_id")
+                if type(product_id) is not int or product_id <= 0:
+                    raise ReconciliationReadError()
+                if product_id not in allowed_product_ids:
+                    foreign.add(product_id)
+            elif name == "transactions" and item.get("product_id") is not None:
                 product_id = item.get("product_id")
                 if type(product_id) is not int or product_id <= 0:
                     raise ReconciliationReadError()
@@ -117,9 +227,16 @@ async def read_private_reconciliation(
         balance_count=len(resources["balances"]),
         position_count=len(resources["positions"]),
         open_order_count=len(resources["orders"]),
+        fill_count=len(resources["fills"]),
+        wallet_transaction_count=len(resources["transactions"]),
         foreign_product_ids=tuple(sorted(foreign)),
         complete=complete,
         content_sha256=hashlib.sha256(canonical.encode("ascii")).hexdigest(),
+        balances_payload=_projection_payload("balances", resources["balances"]),
+        positions_payload=_projection_payload("positions", resources["positions"]),
+        open_orders_payload=_projection_payload("orders", resources["orders"]),
+        fills_payload=_projection_payload("fills", resources["fills"]),
+        wallet_transactions_payload=_projection_payload("transactions", resources["transactions"]),
     )
 
 

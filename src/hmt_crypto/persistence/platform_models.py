@@ -261,7 +261,30 @@ class PrivateReconciliationSnapshot(Base):
         CheckConstraint("balance_count >= 0", name="balance_count_nonneg"),
         CheckConstraint("position_count >= 0", name="position_count_nonneg"),
         CheckConstraint("open_order_count >= 0", name="open_order_count_nonneg"),
+        CheckConstraint("fill_count >= 0", name="fill_count_nonneg"),
+        CheckConstraint("wallet_transaction_count >= 0", name="wallet_tx_count_nonneg"),
         CheckConstraint("outcome IN ('ready','blocked','unavailable')", name="outcome_allowed"),
+        CheckConstraint(
+            "balances_payload IS NULL OR octet_length(balances_payload) <= 1048576",
+            name="balances_payload_bounded",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "positions_payload IS NULL OR octet_length(positions_payload) <= 1048576",
+            name="positions_payload_bounded",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "open_orders_payload IS NULL OR octet_length(open_orders_payload) <= 1048576",
+            name="open_orders_payload_bounded",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "fills_payload IS NULL OR octet_length(fills_payload) <= 1048576",
+            name="fills_payload_bounded",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "wallet_transactions_payload IS NULL OR "
+            "octet_length(wallet_transactions_payload) <= 1048576",
+            name="wallet_tx_payload_bounded",
+        ).ddl_if(dialect="postgresql"),
         UniqueConstraint("account_id", "request_id", name="uq_private_reconciliation_request"),
         Index("ix_private_reconciliation_account_observed", "account_id", "observed_at"),
     )
@@ -275,10 +298,17 @@ class PrivateReconciliationSnapshot(Base):
     balance_count: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     position_count: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     open_order_count: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    fill_count: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    wallet_transaction_count: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     foreign_product_ids: Mapped[str] = mapped_column(Text, nullable=False)
     complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
     content_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
     outcome: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    balances_payload: Mapped[str | None] = mapped_column(Text)
+    positions_payload: Mapped[str | None] = mapped_column(Text)
+    open_orders_payload: Mapped[str | None] = mapped_column(Text)
+    fills_payload: Mapped[str | None] = mapped_column(Text)
+    wallet_transactions_payload: Mapped[str | None] = mapped_column(Text)
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 

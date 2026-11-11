@@ -970,10 +970,17 @@ def install_platform_routes(
                     balance_count=evidence.balance_count,
                     position_count=evidence.position_count,
                     open_order_count=evidence.open_order_count,
+                    fill_count=evidence.fill_count,
+                    wallet_transaction_count=evidence.wallet_transaction_count,
                     foreign_product_ids=json.dumps(evidence.foreign_product_ids),
                     complete=evidence.complete,
                     content_sha256=evidence.content_sha256,
                     outcome=outcome,
+                    balances_payload=evidence.balances_payload,
+                    positions_payload=evidence.positions_payload,
+                    open_orders_payload=evidence.open_orders_payload,
+                    fills_payload=evidence.fills_payload,
+                    wallet_transactions_payload=evidence.wallet_transactions_payload,
                     observed_at=observed_at,
                 )
             )
@@ -1005,8 +1012,54 @@ def install_platform_routes(
             "balanceCount": evidence.balance_count,
             "positionCount": evidence.position_count,
             "openOrderCount": evidence.open_order_count,
+            "fillCount": evidence.fill_count,
+            "walletTransactionCount": evidence.wallet_transaction_count,
             "observedAt": _utc(observed_at),
         }
+
+    @app.get("/api/v1/accounts/{account_id}/state")
+    async def account_state(account_id: UUID, request: Request) -> dict[str, object]:
+        actor = await principal(request)
+        async with database.transaction() as session:
+            await account_permission(session, actor, account_id)
+            control = (
+                await session.execute(
+                    select(AccountLiveControl).where(AccountLiveControl.account_id == account_id)
+                )
+            ).scalar_one_or_none()
+            row = (
+                await session.execute(
+                    select(PrivateReconciliationSnapshot)
+                    .where(PrivateReconciliationSnapshot.account_id == account_id)
+                    .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if (
+                row is None
+                or control is None
+                or control.reconciliation_state != "ready"
+                or row.outcome != "ready"
+                or row.balances_payload is None
+                or row.positions_payload is None
+                or row.open_orders_payload is None
+                or row.fills_payload is None
+                or row.wallet_transactions_payload is None
+            ):
+                raise HTTPException(status_code=409, detail="account_state_not_ready")
+            age_seconds = max(0, int((datetime.now(UTC) - row.observed_at).total_seconds()))
+            return {
+                "accountId": str(account_id),
+                "observedAt": _utc(row.observed_at),
+                "ageSeconds": age_seconds,
+                "fresh": age_seconds <= 60,
+                "credentialVersion": row.credential_version,
+                "balances": json.loads(row.balances_payload),
+                "positions": json.loads(row.positions_payload),
+                "openOrders": json.loads(row.open_orders_payload),
+                "fills": json.loads(row.fills_payload),
+                "walletTransactions": json.loads(row.wallet_transactions_payload),
+            }
 
     @app.get("/api/v1/market/products")
     async def market_products(request: Request) -> dict[str, object]:
