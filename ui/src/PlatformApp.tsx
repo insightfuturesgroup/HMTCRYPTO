@@ -47,6 +47,7 @@ type Page =
   | "positions"
   | "gtt"
   | "strategies"
+  | "tradingview"
   | "risk"
   | "performance"
   | "notifications"
@@ -551,8 +552,9 @@ const navigation: readonly {
     icon: BriefcaseBusiness,
   },
   { page: "gtt", path: "/gtt", label: "GTT", icon: Target },
+  { page: "strategies", path: "/strategies", label: "Strategies", icon: Settings },
   {
-    page: "strategies",
+    page: "tradingview",
     path: "/tradingview",
     label: "TradingView",
     icon: BookOpen,
@@ -1215,9 +1217,11 @@ function AccountsPage({
 function TradingPage({
   user,
   csrf,
+  readOnlyMode,
 }: {
   readonly user: SessionUser;
   readonly csrf: string;
+  readonly readOnlyMode: boolean;
 }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -1290,10 +1294,16 @@ function TradingPage({
     }
   }
   const selected = accounts.find((account) => account.id === accountId);
-  const canTrade = user.role !== "viewer" && selected?.permission !== "view";
+  const canTrade =
+    !readOnlyMode && user.role !== "viewer" && selected?.permission !== "view";
   return (
     <>
       <Panel title="Manual Live trading">
+        {readOnlyMode ? (
+          <p className="mx-4 mt-4 rounded border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
+            Qualification mode — order previews and submissions remain disabled.
+          </p>
+        ) : null}
         <form
           className="grid gap-3 p-4 md:grid-cols-2"
           onSubmit={(event) => void createPreview(event)}
@@ -1429,6 +1439,7 @@ function TradingPage({
             </div>
             <button
               className="rounded bg-red-700 px-4 py-2 text-white md:col-span-2"
+              disabled={readOnlyMode}
               onClick={() => void submitIntent()}
               type="button"
             >
@@ -1842,9 +1853,11 @@ function RecordTable({
 function GttPage({
   user,
   csrf,
+  readOnlyMode,
 }: {
   readonly user: SessionUser;
   readonly csrf: string;
+  readonly readOnlyMode: boolean;
 }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -1914,10 +1927,16 @@ function GttPage({
     load(accountId);
   }
   const canTrade =
+    !readOnlyMode &&
     user.role !== "viewer" &&
     accounts.find((account) => account.id === accountId)?.permission !== "view";
   return (
     <Panel title="Application-managed GTT protected exits">
+      {readOnlyMode ? (
+        <p className="mx-4 mt-4 rounded border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
+          Qualification mode — protected exits can be reviewed, but cannot be armed or cancelled.
+        </p>
+      ) : null}
       <form
         className="grid gap-3 p-4 md:grid-cols-3"
         onSubmit={(event) => void create(event)}
@@ -2037,6 +2056,7 @@ function GttPage({
                   {["armed", "triggered"].includes(row.status) ? (
                     <button
                       className="text-red-700"
+                      disabled={readOnlyMode}
                       onClick={() => void cancel(row.id)}
                       type="button"
                     >
@@ -3710,10 +3730,7 @@ function Shell({
   const navigate = useNavigate();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const visible = navigation.filter(
-    (item) =>
-      (!item.admin || user.role === "admin") &&
-      (!session.readOnlyMode ||
-        !["/trading", "/gtt", "/tradingview", "/risk"].includes(item.path)),
+    (item) => !item.admin || user.role === "admin",
   );
   const open = (path: string) => {
     navigate(path);
@@ -3806,11 +3823,11 @@ function Shell({
               <Route
                 path="/trading"
                 element={
-                  session.readOnlyMode ? (
-                    <Navigate replace to="/dashboard" />
-                  ) : (
-                    <TradingPage csrf={csrf} user={user} />
-                  )
+                  <TradingPage
+                    csrf={csrf}
+                    readOnlyMode={session.readOnlyMode}
+                    user={user}
+                  />
                 }
               />
               <Route
@@ -3838,32 +3855,24 @@ function Shell({
               <Route
                 path="/gtt"
                 element={
-                  session.readOnlyMode ? (
-                    <Navigate replace to="/dashboard" />
-                  ) : (
-                    <GttPage csrf={csrf} user={user} />
-                  )
+                  <GttPage
+                    csrf={csrf}
+                    readOnlyMode={session.readOnlyMode}
+                    user={user}
+                  />
                 }
+              />
+              <Route
+                path="/strategies"
+                element={<TradingViewPage csrf={csrf} user={user} />}
               />
               <Route
                 path="/tradingview"
-                element={
-                  session.readOnlyMode ? (
-                    <Navigate replace to="/dashboard" />
-                  ) : (
-                    <TradingViewPage csrf={csrf} user={user} />
-                  )
-                }
+                element={<TradingViewPage csrf={csrf} user={user} />}
               />
               <Route
                 path="/risk"
-                element={
-                  session.readOnlyMode ? (
-                    <Navigate replace to="/dashboard" />
-                  ) : (
-                    <RiskPage csrf={csrf} user={user} />
-                  )
-                }
+                element={<RiskPage csrf={csrf} user={user} />}
               />
               <Route path="/performance" element={<PerformancePage />} />
               <Route path="/notifications" element={<NotificationsPage />} />
