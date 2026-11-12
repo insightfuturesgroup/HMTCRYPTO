@@ -4009,11 +4009,24 @@ function DashboardPage({
   const [loading, setLoading] = useState(true);
   const load = useCallback(() => {
     setLoading(true);
-    void request<DashboardOverview>("/api/v1/dashboard/overview")
+    void networkRequest<DashboardOverview>("/api/v1/dashboard/overview")
       .then(setOverview)
       .finally(() => setLoading(false));
   }, []);
   useEffect(load, [load]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 15_000);
+    const refreshVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    document.addEventListener("visibilitychange", refreshVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshVisible);
+    };
+  }, [load]);
   const totals = overview?.totals;
   return (
     <div className="hmt-page">

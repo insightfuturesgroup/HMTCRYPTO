@@ -671,3 +671,12 @@
   .hmt-header-actions .kill-switch-trigger svg { display: none; }
   .hmt-auth-card { padding: 22px; }
 }
+
+/* Account actions must escape the scroll/table clipping context on desktop. */
+@media (min-width: 1280px) {
+  .data-panel.hmt-account-panel { overflow: visible; }
+  .data-panel.hmt-account-panel > .overflow-x-auto {
+    max-height: none;
+    overflow: visible;
+  }
+}

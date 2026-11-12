@@ -1060,6 +1060,7 @@ def install_platform_routes(
                     or 0
                 )
                 observed = None if snapshot is None else snapshot.observed_at
+                reconciled = None if control is None else control.reconciled_at
                 payload.append(
                     {
                         "id": str(account.id),
@@ -1085,8 +1086,8 @@ def install_platform_routes(
                         "leaseActive": bool(lease is not None and lease.lease_until > now),
                         "leaseUntil": None if lease is None else _utc(lease.lease_until),
                         "fresh": bool(
-                            observed is not None
-                            and observed >= now - timedelta(seconds=60)
+                            reconciled is not None
+                            and reconciled >= now - timedelta(seconds=60)
                             and control is not None
                             and control.reconciliation_state == "ready"
                         ),
@@ -1965,9 +1966,10 @@ def install_platform_routes(
                     or 0
                 )
                 observed = None if snapshot is None else snapshot.observed_at
+                reconciled = control.reconciled_at
                 fresh = bool(
-                    observed is not None
-                    and observed >= now - timedelta(seconds=60)
+                    reconciled is not None
+                    and reconciled >= now - timedelta(seconds=60)
                     and control.reconciliation_state == "ready"
                 )
                 card = {
@@ -2375,7 +2377,7 @@ def install_platform_routes(
                         "observedAt": None if quote is None else _utc(quote.observed_at),
                         "receivedAt": None if quote is None else _utc(quote.updated_at),
                         "quoteFresh": bool(
-                            quote is not None and quote.updated_at >= now - timedelta(seconds=15)
+                            quote is not None and quote.updated_at >= now - timedelta(seconds=30)
                         ),
                     }
                 )
