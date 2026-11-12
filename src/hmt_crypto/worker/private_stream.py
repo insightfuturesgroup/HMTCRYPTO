@@ -23,6 +23,44 @@ from hmt_crypto.persistence.models import (
 
 _ORIGIN = "wss://socket.india.delta.exchange"
 _CHANNELS = ("orders", "positions", "margins", "v2/user_trades")
+_SYMBOLS = ("BTCUSD", "ETHUSD")
+
+
+def _subscription_payload() -> dict[str, object]:
+    return {
+        "type": "subscribe",
+        "payload": {
+            "channels": [
+                {"name": "orders", "symbols": list(_SYMBOLS)},
+                {"name": "positions", "symbols": list(_SYMBOLS)},
+                {"name": "margins"},
+                {"name": "v2/user_trades", "symbols": list(_SYMBOLS)},
+            ]
+        },
+    }
+
+
+def _acknowledged_channels(frame: object) -> set[str]:
+    if not isinstance(frame, dict) or frame.get("type") != "subscriptions":
+        raise ValueError("private websocket subscription acknowledgement missing")
+    channels = frame.get("channels")
+    if not isinstance(channels, list):
+        raise ValueError("private websocket subscription acknowledgement invalid")
+    acknowledged: set[str] = set()
+    for item in channels:
+        if not isinstance(item, dict) or item.get("error") is not None:
+            raise ValueError("private websocket subscription rejected")
+        name = item.get("name")
+        if isinstance(name, str):
+            acknowledged.add(name)
+    if acknowledged != set(_CHANNELS):
+        raise ValueError("private websocket subscription incomplete")
+    return acknowledged
+
+
+def _stream_key(channel: str, frame: dict[str, object]) -> tuple[str, str]:
+    symbol = frame.get("symbol") or frame.get("sy")
+    return channel, symbol if isinstance(symbol, str) else "account"
 
 
 async def _persist(
@@ -137,16 +175,25 @@ async def run_private_stream(
                 if not isinstance(auth, dict) or auth.get("success") is not True:
                     raise ValueError("private websocket authentication rejected")
                 await socket.send(json.dumps({"type": "enable_heartbeat"}))
-                subscription = {
-                    "type": "subscribe",
-                    "payload": {
-                        "channels": [{"name": channel, "symbols": ["all"]} for channel in _CHANNELS]
-                    },
-                }
+                subscription = _subscription_payload()
                 await socket.send(json.dumps(subscription, separators=(",", ":")))
+                acknowledgement = json.loads(await asyncio.wait_for(socket.recv(), timeout=10))
+                acknowledged = _acknowledged_channels(acknowledgement)
+                for channel in acknowledged:
+                    if not await _persist(
+                        database,
+                        account_id=account_id,
+                        owner_id=owner_id,
+                        generation=generation,
+                        credential_version=credential_version,
+                        channel=channel,
+                        state="live",
+                        sequence=None,
+                    ):
+                        return
                 logger.info("private_stream_authenticated", account_id=str(account_id))
-                sequences: dict[str, int] = {}
-                baselined: set[str] = set()
+                sequences: dict[tuple[str, str], int] = {}
+                baselined: set[str] = set(acknowledged)
                 last_heartbeat_persisted = 0.0
                 backoff = 1
                 async for raw in socket:
@@ -165,24 +212,32 @@ async def run_private_stream(
                                     credential_version=credential_version,
                                     channel=channel,
                                     state="live",
-                                    sequence=sequences.get(channel),
+                                    sequence=max(
+                                        (
+                                            value
+                                            for (stream_channel, _), value in sequences.items()
+                                            if stream_channel == channel
+                                        ),
+                                        default=None,
+                                    ),
                                 )
                             last_heartbeat_persisted = monotonic
                         continue
                     if frame.get("type") not in _CHANNELS:
                         continue
                     channel = str(frame["type"])
+                    stream_key = _stream_key(channel, frame)
                     meta = frame.get("meta")
                     candidate = frame.get("sequence_id")
                     if candidate is None and isinstance(meta, dict):
                         candidate = meta.get("seq_no")
                     sequence = candidate if type(candidate) is int and candidate >= 0 else None
-                    prior = sequences.get(channel)
+                    prior = sequences.get(stream_key)
                     state = "snapshot" if frame.get("action") == "snapshot" else "live"
                     if sequence is not None and prior is not None and sequence != prior + 1:
                         state = "gap"
                     if sequence is not None:
-                        sequences[channel] = sequence
+                        sequences[stream_key] = sequence
                     if state != "gap":
                         baselined.add(channel)
                     persisted = await _persist(
@@ -217,4 +272,9 @@ async def run_private_stream(
             backoff = min(backoff * 2, 30)
 
 
-__all__ = ["run_private_stream"]
+__all__ = [
+    "_acknowledged_channels",
+    "_stream_key",
+    "_subscription_payload",
+    "run_private_stream",
+]
