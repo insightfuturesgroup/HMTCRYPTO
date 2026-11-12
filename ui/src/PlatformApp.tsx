@@ -1,4 +1,5 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Navigate,
   Route,
@@ -1478,11 +1479,24 @@ function AccountsPage({
           </form>
         ) : null}
       </section>
-      {editingAccount !== null ? (
-        <div className="hmt-modal-backdrop" role="presentation">
-          <form className="hmt-modal" onSubmit={(event) => void renameAccount(event)}>
+      {editingAccount !== null
+        ? createPortal(
+            <div
+              className="hmt-modal-backdrop"
+              onClick={(event) => {
+                if (event.currentTarget === event.target) setEditingAccount(null);
+              }}
+              role="presentation"
+            >
+          <form
+            aria-labelledby="edit-account-title"
+            aria-modal="true"
+            className="hmt-modal"
+            onSubmit={(event) => void renameAccount(event)}
+            role="dialog"
+          >
             <div className="hmt-modal__heading">
-              <div><h2>Edit account</h2><p>Renaming only changes display metadata. Credentials and history remain linked.</p></div>
+              <div><h2 id="edit-account-title">Edit account</h2><p>Renaming only changes display metadata. Credentials and history remain linked.</p></div>
               <button aria-label="Close" onClick={() => setEditingAccount(null)} type="button"><X size={20} /></button>
             </div>
             <label>Account name<input autoFocus className="hmt-input" maxLength={128} minLength={1} onChange={(event) => setEditingName(event.target.value)} required value={editingName} /></label>
@@ -1491,8 +1505,10 @@ function AccountsPage({
               <button className="hmt-primary-button" disabled={renaming || editingName.trim().length === 0} type="submit">{renaming ? "Saving…" : "Save changes"}</button>
             </div>
           </form>
-        </div>
-      ) : null}
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

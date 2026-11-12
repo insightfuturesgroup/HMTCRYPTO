@@ -230,6 +230,8 @@
   .hmt-header-actions { flex: 0 0 auto; margin-left: 0; }
   .hmt-sidebar { display: none; }
   .hmt-navigation-backdrop { display: none !important; }
+  .hmt-account-panel { overflow: visible; }
+  .hmt-account-panel > .overflow-x-auto { overflow: visible; }
 }
 .hmt-nav-dropdown { position: relative; }
 .hmt-nav-dropdown > summary { cursor: pointer; list-style: none; }
