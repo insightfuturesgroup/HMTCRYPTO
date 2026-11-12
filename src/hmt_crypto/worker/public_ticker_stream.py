@@ -42,8 +42,17 @@ from hmt_crypto.persistence.models import MarketQuote
 _MAX_FRAME_BYTES = 16 * 1024 * 1024
 _SYMBOLS_PER_CONNECTION = 100
 _QUEUE_LIMIT = 10_000
-_BATCH_LIMIT = 500
+_COALESCE_SECONDS = 0.25
 _ConnectFactory = Callable[..., Any]
+
+
+def _coalesce_latest(rows: list[TickerObservation]) -> list[TickerObservation]:
+    """Keep only the newest queued observation for each Delta product."""
+
+    latest: dict[int, TickerObservation] = {}
+    for row in rows:
+        latest[row.product_id] = row
+    return [latest[product_id] for product_id in sorted(latest)]
 
 
 async def _persist_batch(
@@ -105,17 +114,23 @@ async def _consume(
             first = await asyncio.wait_for(queue.get(), timeout=1)
         except TimeoutError:
             continue
-        batch = [first]
-        while len(batch) < _BATCH_LIMIT:
-            try:
-                batch.append(queue.get_nowait())
-            except asyncio.QueueEmpty:
+        pending = [first]
+        deadline = asyncio.get_running_loop().time() + _COALESCE_SECONDS
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
                 break
+            try:
+                pending.append(await asyncio.wait_for(queue.get(), timeout=remaining))
+            except TimeoutError:
+                break
+        batch = _coalesce_latest(pending)
         try:
             await _persist_batch(database, runtime, batch, persistence_lock)
             logger.info(
                 "public_market_batch_published",
-                observation_count=len(batch),
+                observation_count=len(pending),
+                product_count=len(batch),
             )
         except asyncio.CancelledError:
             raise

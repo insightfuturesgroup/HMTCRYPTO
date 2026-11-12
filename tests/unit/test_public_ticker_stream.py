@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -14,9 +15,44 @@ from hmt_crypto.config import DeltaEnvironment, DeltaRegion
 from hmt_crypto.exchange.delta.catalog_models import CatalogSnapshot, CatalogSource
 from hmt_crypto.exchange.delta.wire_schemas import parse_product
 from hmt_crypto.market_data.contracts import TickerObservation
-from hmt_crypto.worker.public_ticker_stream import _connection
+from hmt_crypto.market_data.primitives import MarketSource
+from hmt_crypto.worker.public_ticker_stream import _coalesce_latest, _connection
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "delta"
+
+
+def _ticker(product_id: int, sequence: int, price: str) -> TickerObservation:
+    symbol = f"PRODUCT-{product_id}"
+    return TickerObservation(
+        source=MarketSource(
+            region="india",
+            environment="prod",
+            connection_generation=UUID("10000000-0000-4000-8000-000000000001"),
+            local_sequence=sequence,
+            catalogue_snapshot_id=UUID("20000000-0000-4000-8000-000000000002"),
+            channel="ticker",
+            symbol=symbol,
+            venue_sequence=None,
+            observed_at=datetime(2026, 11, 11, 10, 0, tzinfo=UTC),
+        ),
+        product_id=product_id,
+        symbol=symbol,
+        mark_price=Decimal(price),
+    )
+
+
+def test_coalesce_latest_discards_backlog_without_losing_newest_product_value() -> None:
+    rows = [
+        _ticker(2, 1, "20"),
+        _ticker(1, 2, "10"),
+        _ticker(2, 3, "21"),
+        _ticker(1, 4, "11"),
+    ]
+
+    coalesced = _coalesce_latest(rows)
+
+    assert [row.product_id for row in coalesced] == [1, 2]
+    assert [row.mark_price for row in coalesced] == [Decimal("11"), Decimal("21")]
 
 
 def _catalogue() -> CatalogSnapshot:
