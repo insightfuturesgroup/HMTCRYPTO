@@ -150,7 +150,10 @@ def _guard_account_scope(mapper: object, connection: object, target: Account) ->
     state = inspect(target)
     if any(
         state.attrs[name].history.has_changes()
-        for name in ("id", "region", "environment", "mode", "profile_name", "version")
+        # profile_name is display metadata.  It may be renamed through the
+        # authorised account API while the operational venue scope remains
+        # immutable.
+        for name in ("id", "region", "environment", "mode", "version")
     ):
         raise PersistenceValueError()
 

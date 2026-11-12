@@ -45,7 +45,6 @@ async def test_stale_account_projection_update_cannot_overwrite_committed_versio
         ("region", "global"),
         ("environment", "prod"),
         ("mode", "LIVE"),
-        ("profile_name", "adopt-other-profile"),
     ],
 )
 async def test_account_operational_identity_cannot_be_reassigned_by_orm(schema_db, column, value):
@@ -56,6 +55,24 @@ async def test_account_operational_identity_cannot_be_reassigned_by_orm(schema_d
         async with schema_db.transaction() as session:
             stored = await session.get(schema_api().Account, owner.id)
             setattr(stored, column, value)
+
+
+@pytest.mark.asyncio
+async def test_account_display_name_can_be_renamed_without_changing_scope(schema_db):
+    owner = account()
+    async with schema_db.transaction() as session:
+        session.add(owner)
+    async with schema_db.transaction() as session:
+        stored = await session.get(schema_api().Account, owner.id)
+        stored.profile_name = "Hitashi Garg"
+    async with schema_db.transaction() as session:
+        stored = await session.get(schema_api().Account, owner.id)
+        assert stored.profile_name == "Hitashi Garg"
+        assert (stored.region, stored.environment, stored.mode) == (
+            owner.region,
+            owner.environment,
+            owner.mode,
+        )
 
 
 @pytest.mark.asyncio

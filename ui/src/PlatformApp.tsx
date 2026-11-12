@@ -43,7 +43,6 @@ import {
 type Role = "admin" | "trader" | "viewer";
 type Page =
   | "dashboard"
-  | "market"
   | "accounts"
   | "trading"
   | "orders"
@@ -575,7 +574,6 @@ const navigation: readonly {
     label: "Dashboard",
     icon: LayoutDashboard,
   },
-  { page: "market", path: "/market", label: "Market", icon: Radio },
   {
     page: "accounts",
     path: "/accounts",
@@ -635,7 +633,6 @@ const navigation: readonly {
 
 const desktopNavigation = [
   { label: "Dashboard", path: "/dashboard" },
-  { label: "Market", path: "/market" },
   { label: "Delta Accounts", path: "/accounts" },
   { label: "Orders", path: "/orders" },
   { label: "Positions", path: "/positions" },
@@ -742,8 +739,15 @@ function CryptoMarketRail({
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") load();
-    }, 5_000);
+    }, 2_000);
     return () => window.clearInterval(timer);
+  }, [load]);
+  useEffect(() => {
+    const refreshVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    document.addEventListener("visibilitychange", refreshVisible);
+    return () => document.removeEventListener("visibilitychange", refreshVisible);
   }, [load]);
 
   const group = groups.find((item) => item.id === activeGroup) ?? groups[0];
@@ -893,7 +897,9 @@ function CryptoMarketRail({
   );
 }
 
-function MarketPage({ csrf }: { readonly csrf: string }) {
+// Retained temporarily for backwards-compatible code splitting only. The
+// /market route now redirects to the dashboard and no candle request is made.
+function _MarketPage({ csrf }: { readonly csrf: string }) {
   const [products, setProducts] = useState<Product[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistRow[]>([]);
   const [candleProduct, setCandleProduct] = useState("");
@@ -2132,6 +2138,10 @@ function GttPage({
   const [trail, setTrail] = useState("");
   const [limit, setLimit] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [kindFilter, setKindFilter] = useState("all");
+  const [showCreate, setShowCreate] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const load = useCallback((selected: string) => {
     if (selected)
       void request<{ orders: GttRow[] }>(
@@ -2151,6 +2161,12 @@ function GttPage({
       load(first);
     });
   }, [load]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible" && accountId) load(accountId);
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [accountId, load]);
   async function create(event: FormEvent) {
     event.preventDefault();
     const product = products.find(
@@ -2176,6 +2192,7 @@ function GttPage({
         csrf,
       );
       setNotice("Protected exit armed.");
+      setShowCreate(false);
       load(accountId);
     } catch {
       setNotice(
@@ -2191,19 +2208,44 @@ function GttPage({
     !readOnlyMode &&
     user.role !== "viewer" &&
     accounts.find((account) => account.id === accountId)?.permission !== "view";
+  const accountName =
+    accounts.find((account) => account.id === accountId)?.profileName ?? "—";
+  const filteredRows = rows.filter(
+    (row) =>
+      (kindFilter === "all" || row.triggerKind === kindFilter) &&
+      row.symbol.toLowerCase().includes(search.trim().toLowerCase()),
+  );
+  const quoteFor = (row: GttRow) =>
+    products.find((product) => product.productId === row.productId);
+  const allSelected =
+    filteredRows.length > 0 && filteredRows.every((row) => selected.has(row.id));
   return (
-    <Panel title="Application-managed GTT protected exits">
-      {readOnlyMode ? (
-        <p className="mx-4 mt-4 rounded border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
-          Qualification mode — protected exits can be reviewed, but cannot be armed or cancelled.
-        </p>
-      ) : null}
-      <form
-        className="grid gap-3 p-4 md:grid-cols-3"
-        onSubmit={(event) => void create(event)}
-      >
+    <div className="hmt-page gtt-page">
+      <div className="hmt-page-heading gtt-page__heading">
+        <div className="gtt-page__title-row">
+          <h1>HMT GTT ({rows.length})</h1>
+          <button className="hmt-primary-button" disabled={!canTrade} onClick={() => setShowCreate(true)} type="button">
+            <Plus size={18} /> New HMT GTT
+          </button>
+        </div>
+        <div className="gtt-page__bulk-actions">
+          <button disabled={selected.size === 0 || !canTrade} type="button"><Pencil size={16} /> Edit selected</button>
+          <button disabled={selected.size === 0 || !canTrade} onClick={() => void Promise.all([...selected].map(cancel)).then(() => { setSelected(new Set()); load(accountId); })} type="button"><Trash2 size={16} /> Cancel selected</button>
+          <span>Selected actions&nbsp; {selected.size}</span>
+        </div>
+      </div>
+
+      <div className="gtt-page__engine-bar">
+        <span><Activity size={16} /> GTT engine {readOnlyMode ? "monitoring" : "active"}</span>
+        <span>Heartbeat: {new Date().toLocaleTimeString()}</span>
+        <span className={products.some((product) => product.quoteFresh) ? "is-ready" : "is-blocked"}><Radio size={16} /> Prices {products.some((product) => product.quoteFresh) ? "connected" : "stale"}</span>
+        {readOnlyMode ? <strong>Qualification mode · no exchange writes</strong> : null}
+      </div>
+
+      <div className="gtt-page__filters">
+        <label className="gtt-search"><Search size={18} /><input aria-label="Search instrument" onChange={(event) => setSearch(event.target.value)} placeholder="Search instrument" value={search} /></label>
         <select
-          className="rounded border px-3 py-2"
+          aria-label="Account"
           onChange={(event) => {
             setAccountId(event.target.value);
             load(event.target.value);
@@ -2216,8 +2258,45 @@ function GttPage({
             </option>
           ))}
         </select>
+        <select aria-label="Trade type" onChange={(event) => setKindFilter(event.target.value)} value={kindFilter}>
+          <option value="all">All protection types</option>
+          <option value="stop_loss">Stop loss</option>
+          <option value="target">Target</option>
+          <option value="trailing_stop">Trailing stop</option>
+        </select>
+        <select aria-label="Instrument" onChange={(event) => setSearch(event.target.value)} value={products.some((product) => product.symbol === search) ? search : ""}>
+          <option value="">All instruments</option>
+          {products.map((product) => <option key={product.productId} value={product.symbol}>{product.symbol}</option>)}
+        </select>
+      </div>
+
+      {notice ? <p className="gtt-page__notice" role="status">{notice}</p> : null}
+
+      <div className="gtt-table-wrap">
+        <table className="gtt-table">
+          <thead><tr><th><input aria-label="Select all" checked={allSelected} onChange={(event) => setSelected(event.target.checked ? new Set(filteredRows.map((row) => row.id)) : new Set())} type="checkbox" /></th><th>Instrument</th><th>Account</th><th>Trigger / protection</th><th>Qty.</th><th>LTP / mark</th><th>Status</th><th aria-label="Actions" /></tr></thead>
+          <tbody>
+            {filteredRows.map((row) => {
+              const quote = quoteFor(row);
+              return <tr key={row.id}>
+                <td><input aria-label={`Select ${row.symbol}`} checked={selected.has(row.id)} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(row.id); else next.delete(row.id); return next; })} type="checkbox" /></td>
+                <td><strong>{row.symbol}</strong><small>Delta India · perpetual</small><div className="gtt-tags"><span>OCO</span><span className={`is-${row.side}`}>{row.side.toUpperCase()}</span></div></td>
+                <td><strong>{accountName}</strong><small>Production</small></td>
+                <td><strong>{row.triggerKind.replaceAll("_", " ")}</strong><small>{row.triggerKind === "trailing_stop" ? `Trail ${row.trailOffset ?? "—"}` : `Trigger ${row.triggerPrice ?? "—"}`}{row.limitPrice ? ` · Limit ${row.limitPrice}` : ""}</small></td>
+                <td className={row.side === "sell" ? "is-negative" : "is-positive"}>{row.side === "sell" ? "−" : "+"}{row.contracts}</td>
+                <td><strong>{quote?.markPrice ?? "—"}</strong><small className={quote?.quoteFresh ? "is-ready" : "is-blocked"}>{quote?.quoteFresh ? "Live" : "Stale"}</small></td>
+                <td><StatusBadge good={row.status === "armed"} value={row.status} /><small>{new Date(row.updatedAt).toLocaleString()}</small></td>
+                <td><button aria-label={`Actions for ${row.symbol}`} className="gtt-row-action" disabled={!canTrade || !["armed", "triggered"].includes(row.status)} onClick={() => void cancel(row.id)} title="Cancel protected exit" type="button"><MoreVertical size={18} /></button></td>
+              </tr>;
+            })}
+            {filteredRows.length === 0 ? <tr><td className="gtt-empty" colSpan={8}>No protected exits match these filters.</td></tr> : null}
+          </tbody>
+        </table>
+      </div>
+
+      {showCreate ? <div aria-modal="true" className="hmt-modal-backdrop" role="dialog"><form className="hmt-modal gtt-create-modal" onSubmit={(event) => void create(event)}><div className="hmt-modal__header"><div><h2>New HMT GTT</h2><p>Create a reduce-only protected exit for a Delta position.</p></div><button aria-label="Close" onClick={() => setShowCreate(false)} type="button"><X size={20} /></button></div><div className="gtt-create-grid">
         <select
-          className="rounded border px-3 py-2"
+          aria-label="Product"
           onChange={(event) => setProductId(event.target.value)}
           value={productId}
         >
@@ -2228,7 +2307,7 @@ function GttPage({
           ))}
         </select>
         <select
-          className="rounded border px-3 py-2"
+          aria-label="Exit side"
           onChange={(event) => setSide(event.target.value as "buy" | "sell")}
           value={side}
         >
@@ -2236,14 +2315,14 @@ function GttPage({
           <option value="buy">Buy to close short</option>
         </select>
         <input
-          className="rounded border px-3 py-2"
+          aria-label="Contracts"
           min="1"
           onChange={(event) => setContracts(event.target.value)}
           type="number"
           value={contracts}
         />
         <select
-          className="rounded border px-3 py-2"
+          aria-label="Protection type"
           onChange={(event) =>
             setKind(event.target.value as GttRow["triggerKind"])
           }
@@ -2255,7 +2334,7 @@ function GttPage({
         </select>
         {kind === "trailing_stop" ? (
           <input
-            className="rounded border px-3 py-2"
+            aria-label="Trail offset"
             onChange={(event) => setTrail(event.target.value)}
             placeholder="Trail offset"
             required
@@ -2263,7 +2342,7 @@ function GttPage({
           />
         ) : (
           <input
-            className="rounded border px-3 py-2"
+            aria-label="Trigger price"
             onChange={(event) => setTrigger(event.target.value)}
             placeholder="Trigger price"
             required
@@ -2271,73 +2350,13 @@ function GttPage({
           />
         )}
         <input
-          className="rounded border px-3 py-2"
+          aria-label="Limit price"
           onChange={(event) => setLimit(event.target.value)}
           placeholder="Optional limit price"
           value={limit}
         />
-        <button
-          className="rounded bg-blue-600 px-4 py-2 text-white disabled:bg-slate-400"
-          disabled={!canTrade}
-          type="submit"
-        >
-          Arm protected exit
-        </button>
-        {notice ? (
-          <p className="self-center" role="status">
-            {notice}
-          </p>
-        ) : null}
-      </form>
-      <div className="overflow-x-auto">
-        <table>
-          <thead>
-            <tr>
-              <th>Symbol</th>
-              <th>Exit</th>
-              <th>Trigger</th>
-              <th>Status</th>
-              <th>Updated</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.id}>
-                <td>{row.symbol}</td>
-                <td>
-                  {row.side} {row.contracts}
-                </td>
-                <td>
-                  {row.triggerKind} · {row.triggerPrice ?? row.trailOffset}
-                </td>
-                <td>{row.status}</td>
-                <td>{row.updatedAt}</td>
-                <td>
-                  {["armed", "triggered"].includes(row.status) ? (
-                    <button
-                      className="text-red-700"
-                      disabled={readOnlyMode}
-                      onClick={() => void cancel(row.id)}
-                      type="button"
-                    >
-                      Cancel
-                    </button>
-                  ) : (
-                    "—"
-                  )}
-                </td>
-              </tr>
-            ))}
-            {rows.length === 0 ? (
-              <tr>
-                <td colSpan={6}>No protected exits.</td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
-    </Panel>
+      </div><div className="hmt-modal__actions"><button onClick={() => setShowCreate(false)} type="button">Cancel</button><button className="hmt-primary-button" disabled={!canTrade} type="submit">Arm protected exit</button></div></form></div> : null}
+    </div>
   );
 }
 
@@ -4138,7 +4157,7 @@ function Shell({
                   />
                 }
               />
-              <Route path="/market" element={<MarketPage csrf={csrf} />} />
+              <Route path="/market" element={<Navigate replace to="/dashboard" />} />
               <Route
                 path="/accounts"
                 element={<AccountsPage csrf={csrf} user={user} />}

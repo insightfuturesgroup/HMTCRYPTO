@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from websockets.asyncio.client import connect as websocket_connect
@@ -24,7 +23,6 @@ from hmt_crypto.exchange.delta.websocket_codec import (
     encode_subscribe,
 )
 from hmt_crypto.exchange.delta.websocket_contracts import (
-    WsCandleResolution,
     WsChannel,
     WsPlane,
     require_delta_ws_endpoint,
@@ -37,9 +35,9 @@ from hmt_crypto.exchange.delta.websocket_subscriptions import (
     parse_subscriptions_ack,
 )
 from hmt_crypto.logging import get_logger
-from hmt_crypto.market_data.contracts import CandleObservation, TickerObservation
+from hmt_crypto.market_data.contracts import TickerObservation
 from hmt_crypto.persistence.db import Database
-from hmt_crypto.persistence.models import MarketCandle, MarketQuote
+from hmt_crypto.persistence.models import MarketQuote
 
 _MAX_FRAME_BYTES = 16 * 1024 * 1024
 _SYMBOLS_PER_CONNECTION = 100
@@ -51,15 +49,10 @@ _ConnectFactory = Callable[..., Any]
 async def _persist_batch(
     database: Database,
     runtime: ControlRuntimeSettings,
-    rows: list[TickerObservation | CandleObservation],
+    rows: list[TickerObservation],
     persistence_lock: asyncio.Lock,
 ) -> None:
-    latest = {row.product_id: row for row in rows if type(row) is TickerObservation}
-    candles = {
-        (row.product_id, row.resolution, row.timestamp): row
-        for row in rows
-        if type(row) is CandleObservation
-    }
+    latest = {row.product_id: row for row in rows}
     updated = datetime.now(UTC)
     async with persistence_lock:
         async with database.transaction() as session:
@@ -97,62 +90,12 @@ async def _persist_batch(
                     },
                 )
                 await session.execute(statement)
-            candle_values = [
-                {
-                    "id": uuid4(),
-                    "region": "india",
-                    "environment": runtime.delta_env.value,
-                    "product_id": candle.product_id,
-                    "symbol": candle.symbol,
-                    "resolution": candle.resolution,
-                    "timestamp": candle.timestamp,
-                    "open": candle.open,
-                    "high": candle.high,
-                    "low": candle.low,
-                    "close": candle.close,
-                    "volume": candle.volume,
-                    "observed_at": candle.source.observed_at,
-                }
-                for candle in sorted(
-                    candles.values(),
-                    key=lambda item: (item.product_id, item.resolution, item.timestamp),
-                )
-            ]
-            if candle_values:
-                statement = insert(MarketCandle).values(candle_values)
-                statement = statement.on_conflict_do_update(
-                    index_elements=[
-                        "region",
-                        "environment",
-                        "product_id",
-                        "resolution",
-                        "timestamp",
-                    ],
-                    set_={
-                        "symbol": statement.excluded.symbol,
-                        "open": statement.excluded.open,
-                        "high": statement.excluded.high,
-                        "low": statement.excluded.low,
-                        "close": statement.excluded.close,
-                        "volume": statement.excluded.volume,
-                        "observed_at": statement.excluded.observed_at,
-                    },
-                )
-                await session.execute(statement)
-            if candles:
-                await session.execute(
-                    delete(MarketCandle).where(
-                        MarketCandle.region == "india",
-                        MarketCandle.environment == runtime.delta_env.value,
-                        MarketCandle.timestamp < updated - timedelta(hours=24),
-                    )
-                )
 
 
 async def _consume(
     database: Database,
     runtime: ControlRuntimeSettings,
-    queue: asyncio.Queue[TickerObservation | CandleObservation],
+    queue: asyncio.Queue[TickerObservation],
     persistence_lock: asyncio.Lock,
     stop: asyncio.Event,
 ) -> None:
@@ -186,14 +129,13 @@ async def _connection(
     snapshot: CatalogSnapshot,
     snapshot_id: UUID,
     symbols: tuple[str, ...],
-    queue: asyncio.Queue[TickerObservation | CandleObservation],
+    queue: asyncio.Queue[TickerObservation],
     stop: asyncio.Event,
     connect_factory: _ConnectFactory,
 ) -> None:
     logger = get_logger("worker.market.websocket")
     subscription = WsSubscription.for_channel(WsChannel.TICKER, symbols=symbols)
-    candles = WsSubscription.for_candles(WsCandleResolution.ONE_MINUTE, symbols=symbols)
-    expected = desired_subscriptions(revision=1, entries=(subscription, candles))
+    expected = desired_subscriptions(revision=1, entries=(subscription,))
     parser = DeltaPublicFrameParser()
     backoff = 1
     rejected_frames = 0
@@ -259,7 +201,7 @@ async def _connection(
                         continue
                     sequence += len(outcomes)
                     for outcome in outcomes:
-                        if isinstance(outcome, (TickerObservation, CandleObservation)):
+                        if isinstance(outcome, TickerObservation):
                             stage = "enqueue"
                             await asyncio.wait_for(queue.put(outcome), timeout=2)
                     if outcomes:
@@ -308,9 +250,7 @@ async def run_public_ticker_stream(
         symbols[index : index + _SYMBOLS_PER_CONNECTION]
         for index in range(0, len(symbols), _SYMBOLS_PER_CONNECTION)
     )
-    queue: asyncio.Queue[TickerObservation | CandleObservation] = asyncio.Queue(
-        maxsize=_QUEUE_LIMIT
-    )
+    queue: asyncio.Queue[TickerObservation] = asyncio.Queue(maxsize=_QUEUE_LIMIT)
     snapshot_id = uuid4()
     async with asyncio.TaskGroup() as tasks:
         tasks.create_task(_consume(database, runtime, queue, persistence_lock, stop))
