@@ -15,12 +15,12 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import DeltaRegion
 from hmt_crypto.domain.enums import ContractType
+from hmt_crypto.errors import HmtCryptoError
 from hmt_crypto.exchange.base import ProductQuery
 from hmt_crypto.exchange.delta.catalog import CatalogProductLoad, CatalogSource, ProductCatalog
 from hmt_crypto.exchange.delta.client import DeltaPublicClient
 from hmt_crypto.exchange.delta.endpoints import get_delta_endpoints
 from hmt_crypto.exchange.delta.rate_limiter import RateLimitScope, ScopeKind, WeightedRateLimiter
-from hmt_crypto.errors import HmtCryptoError
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import CatalogueProduct, CatalogueSnapshot, MarketQuote
@@ -206,10 +206,8 @@ async def run_market_worker(
                             if session.get_bind().dialect.name == "postgresql"
                             else sqlite_insert
                         )
-                        for ticker in sorted(tickers, key=lambda item: item.product_id):
-                            if ticker.product_id not in allowed:
-                                continue
-                            values = {
+                        values = [
+                            {
                                 "id": uuid4(),
                                 "region": "india",
                                 "environment": runtime.delta_env.value,
@@ -230,13 +228,25 @@ async def run_market_worker(
                                 "observed_at": ticker.timestamp,
                                 "updated_at": observed,
                             }
-                            statement = insert(MarketQuote).values(**values)
+                            for ticker in sorted(tickers, key=lambda item: item.product_id)
+                            if ticker.product_id in allowed
+                        ]
+                        if values:
+                            statement = insert(MarketQuote).values(values)
                             statement = statement.on_conflict_do_update(
                                 index_elements=["region", "environment", "product_id"],
-                                set_={key: value for key, value in values.items() if key != "id"},
+                                set_={
+                                    "symbol": statement.excluded.symbol,
+                                    "mark_price": statement.excluded.mark_price,
+                                    "spot_price": statement.excluded.spot_price,
+                                    "best_bid": statement.excluded.best_bid,
+                                    "best_ask": statement.excluded.best_ask,
+                                    "observed_at": statement.excluded.observed_at,
+                                    "updated_at": statement.excluded.updated_at,
+                                },
                             )
                             await session.execute(statement)
-                logger.info("market_quotes_updated", quote_count=len(tickers))
+                logger.info("market_quotes_updated", quote_count=len(values))
             except asyncio.CancelledError:
                 raise
             except Exception as error:

@@ -66,8 +66,8 @@ async def _persist_batch(
             insert = (
                 pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
             )
-            for ticker in sorted(latest.values(), key=lambda item: item.product_id):
-                values = {
+            quote_values = [
+                {
                     "id": uuid4(),
                     "region": "india",
                     "environment": runtime.delta_env.value,
@@ -80,17 +80,25 @@ async def _persist_batch(
                     "observed_at": ticker.source.observed_at,
                     "updated_at": updated,
                 }
-                statement = insert(MarketQuote).values(**values)
+                for ticker in sorted(latest.values(), key=lambda item: item.product_id)
+            ]
+            if quote_values:
+                statement = insert(MarketQuote).values(quote_values)
                 statement = statement.on_conflict_do_update(
                     index_elements=["region", "environment", "product_id"],
-                    set_={key: value for key, value in values.items() if key != "id"},
+                    set_={
+                        "symbol": statement.excluded.symbol,
+                        "mark_price": statement.excluded.mark_price,
+                        "spot_price": statement.excluded.spot_price,
+                        "best_bid": statement.excluded.best_bid,
+                        "best_ask": statement.excluded.best_ask,
+                        "observed_at": statement.excluded.observed_at,
+                        "updated_at": statement.excluded.updated_at,
+                    },
                 )
                 await session.execute(statement)
-            for candle in sorted(
-                candles.values(),
-                key=lambda item: (item.product_id, item.resolution, item.timestamp),
-            ):
-                values = {
+            candle_values = [
+                {
                     "id": uuid4(),
                     "region": "india",
                     "environment": runtime.delta_env.value,
@@ -105,7 +113,13 @@ async def _persist_batch(
                     "volume": candle.volume,
                     "observed_at": candle.source.observed_at,
                 }
-                statement = insert(MarketCandle).values(**values)
+                for candle in sorted(
+                    candles.values(),
+                    key=lambda item: (item.product_id, item.resolution, item.timestamp),
+                )
+            ]
+            if candle_values:
+                statement = insert(MarketCandle).values(candle_values)
                 statement = statement.on_conflict_do_update(
                     index_elements=[
                         "region",
@@ -114,7 +128,15 @@ async def _persist_batch(
                         "resolution",
                         "timestamp",
                     ],
-                    set_={key: value for key, value in values.items() if key != "id"},
+                    set_={
+                        "symbol": statement.excluded.symbol,
+                        "open": statement.excluded.open,
+                        "high": statement.excluded.high,
+                        "low": statement.excluded.low,
+                        "close": statement.excluded.close,
+                        "volume": statement.excluded.volume,
+                        "observed_at": statement.excluded.observed_at,
+                    },
                 )
                 await session.execute(statement)
             if candles:
@@ -178,6 +200,7 @@ async def _connection(
     while not stop.is_set():
         generation = uuid4()
         sequence = 1
+        stage = "connect"
         try:
             async with connect_factory(
                 endpoint_url,
@@ -186,12 +209,14 @@ async def _connection(
                 close_timeout=5,
                 ping_interval=None,
             ) as socket:
+                stage = "subscribe"
                 await socket.send(encode_subscribe(expected.entries))
                 await socket.send(encode_enable_heartbeat())
                 accepted = False
-                backoff = 1
                 while not stop.is_set():
+                    stage = "receive"
                     frame = await asyncio.wait_for(socket.recv(), timeout=30)
+                    stage = "decode"
                     message = decode_ws_object(
                         frame,
                         max_bytes=_MAX_FRAME_BYTES,
@@ -201,6 +226,7 @@ async def _connection(
                     if message_type in {"heartbeat", "pong"}:
                         continue
                     if message_type == "subscriptions":
+                        stage = "subscription_ack"
                         parse_subscriptions_ack(message, expected=expected)
                         accepted = True
                         logger.info("public_ticker_subscribed", symbol_count=len(symbols))
@@ -218,6 +244,7 @@ async def _connection(
                         spot_asset_ids={},
                     )
                     try:
+                        stage = "parse"
                         outcomes = parser.parse(message, context=context)
                     except ExchangeProtocolError:
                         rejected_frames += 1
@@ -233,11 +260,19 @@ async def _connection(
                     sequence += len(outcomes)
                     for outcome in outcomes:
                         if isinstance(outcome, (TickerObservation, CandleObservation)):
+                            stage = "enqueue"
                             await asyncio.wait_for(queue.put(outcome), timeout=2)
+                    if outcomes:
+                        backoff = 1
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.warning("public_ticker_reconnect", backoff_seconds=backoff)
+        except Exception as error:
+            logger.warning(
+                "public_ticker_reconnect",
+                backoff_seconds=backoff,
+                failure_stage=stage,
+                error_type=type(error).__name__,
+            )
         try:
             await asyncio.wait_for(stop.wait(), timeout=backoff)
         except TimeoutError:
