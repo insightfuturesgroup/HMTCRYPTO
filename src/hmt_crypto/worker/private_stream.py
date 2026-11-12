@@ -8,6 +8,7 @@ import hmac
 import json
 import time
 from datetime import UTC, datetime
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -24,6 +25,18 @@ from hmt_crypto.persistence.models import (
 _ORIGIN = "wss://socket.india.delta.exchange"
 _CHANNELS = ("orders", "positions", "margins", "v2/user_trades")
 _SYMBOLS = ("BTCUSD", "ETHUSD")
+_AUTH_FAILURE_STATUSES = {
+    "api_key_not_found",
+    "incomplete_payload",
+    "internal_server_error",
+    "invalid_signature",
+    "ip_not_whitelisted",
+    "request_expired",
+}
+
+
+class _ReceiveSocket(Protocol):
+    async def recv(self) -> str | bytes: ...
 
 
 def _subscription_payload() -> dict[str, object]:
@@ -61,6 +74,23 @@ def _acknowledged_channels(frame: object) -> set[str]:
 def _stream_key(channel: str, frame: dict[str, object]) -> tuple[str, str]:
     symbol = frame.get("symbol") or frame.get("sy")
     return channel, symbol if isinstance(symbol, str) else "account"
+
+
+async def _receive_subscription_ack(socket: _ReceiveSocket) -> set[str]:
+    """Wait for Delta's acknowledgement while tolerating interleaved safe frames."""
+
+    for _ in range(16):
+        raw = await asyncio.wait_for(socket.recv(), timeout=10)
+        frame = json.loads(raw)
+        if not isinstance(frame, dict):
+            continue
+        frame_type = frame.get("type")
+        if frame_type == "subscriptions":
+            return _acknowledged_channels(frame)
+        if frame_type in {"heartbeat", "pong", *_CHANNELS}:
+            continue
+        raise ValueError("private websocket unexpected subscription frame")
+    raise ValueError("private websocket subscription acknowledgement missing")
 
 
 async def _persist(
@@ -154,6 +184,8 @@ async def run_private_stream(
     logger = get_logger("worker.private.websocket")
     backoff = 1
     while not stop.is_set():
+        failure_stage = "connect"
+        auth_status = "unknown"
         try:
             timestamp = int(time.time())
             signature = hmac.new(
@@ -162,6 +194,7 @@ async def run_private_stream(
                 hashlib.sha256,
             ).hexdigest()
             async with websocket_connect(_ORIGIN, open_timeout=10, close_timeout=5) as socket:
+                failure_stage = "authenticate"
                 auth_message = {
                     "type": "key-auth",
                     "payload": {
@@ -173,12 +206,16 @@ async def run_private_stream(
                 await socket.send(json.dumps(auth_message, separators=(",", ":")))
                 auth = json.loads(await asyncio.wait_for(socket.recv(), timeout=10))
                 if not isinstance(auth, dict) or auth.get("success") is not True:
+                    candidate_status = auth.get("status") if isinstance(auth, dict) else None
+                    if candidate_status in _AUTH_FAILURE_STATUSES:
+                        auth_status = str(candidate_status)
                     raise ValueError("private websocket authentication rejected")
+                auth_status = "authenticated"
                 await socket.send(json.dumps({"type": "enable_heartbeat"}))
                 subscription = _subscription_payload()
                 await socket.send(json.dumps(subscription, separators=(",", ":")))
-                acknowledgement = json.loads(await asyncio.wait_for(socket.recv(), timeout=10))
-                acknowledged = _acknowledged_channels(acknowledgement)
+                failure_stage = "subscribe"
+                acknowledged = await _receive_subscription_ack(socket)
                 for channel in acknowledged:
                     if not await _persist(
                         database,
@@ -192,6 +229,7 @@ async def run_private_stream(
                     ):
                         return
                 logger.info("private_stream_authenticated", account_id=str(account_id))
+                failure_stage = "receive"
                 sequences: dict[tuple[str, str], int] = {}
                 baselined: set[str] = set(acknowledged)
                 last_heartbeat_persisted = 0.0
@@ -263,7 +301,11 @@ async def run_private_stream(
                 credential_version=credential_version,
             )
             logger.warning(
-                "private_stream_reconnect", account_id=str(account_id), backoff_seconds=backoff
+                "private_stream_reconnect",
+                account_id=str(account_id),
+                auth_status=auth_status,
+                backoff_seconds=backoff,
+                failure_stage=failure_stage,
             )
             try:
                 await asyncio.wait_for(stop.wait(), timeout=backoff)
@@ -274,6 +316,7 @@ async def run_private_stream(
 
 __all__ = [
     "_acknowledged_channels",
+    "_receive_subscription_ack",
     "_stream_key",
     "_subscription_payload",
     "run_private_stream",
