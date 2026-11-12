@@ -2334,7 +2334,10 @@ def install_platform_routes(
             snapshot = (
                 await session.execute(
                     select(CatalogueSnapshot)
-                    .where(CatalogueSnapshot.region == "india")
+                    .where(
+                        CatalogueSnapshot.region == "india",
+                        CatalogueSnapshot.environment == "prod",
+                    )
                     .order_by(desc(CatalogueSnapshot.validated_at))
                     .limit(1)
                 )
@@ -2370,8 +2373,9 @@ def install_platform_routes(
                         "bestBid": None if quote is None else quote.best_bid,
                         "bestAsk": None if quote is None else quote.best_ask,
                         "observedAt": None if quote is None else _utc(quote.observed_at),
+                        "receivedAt": None if quote is None else _utc(quote.updated_at),
                         "quoteFresh": bool(
-                            quote is not None and quote.observed_at >= now - timedelta(seconds=15)
+                            quote is not None and quote.updated_at >= now - timedelta(seconds=15)
                         ),
                     }
                 )
@@ -2393,7 +2397,10 @@ def install_platform_routes(
             snapshot = (
                 await session.execute(
                     select(CatalogueSnapshot.id, CatalogueSnapshot.environment)
-                    .where(CatalogueSnapshot.region == "india")
+                    .where(
+                        CatalogueSnapshot.region == "india",
+                        CatalogueSnapshot.environment == "prod",
+                    )
                     .order_by(desc(CatalogueSnapshot.validated_at))
                     .limit(1)
                 )

@@ -4066,10 +4066,31 @@ function Shell({
   const navigate = useNavigate();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [watchlistOpen, setWatchlistOpen] = useState(false);
+  const closeDesktopMenus = () => {
+    document
+      .querySelectorAll<HTMLDetailsElement>(".hmt-nav-dropdown[open]")
+      .forEach((menu) => menu.removeAttribute("open"));
+  };
+  useEffect(() => {
+    const closeOutside = (event: PointerEvent) => {
+      if (!(event.target as Element | null)?.closest(".hmt-nav-dropdown"))
+        closeDesktopMenus();
+    };
+    const closeEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeDesktopMenus();
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeEscape);
+    };
+  }, []);
   const visible = navigation.filter(
     (item) => !item.admin || user.role === "admin",
   );
   const open = (path: string) => {
+    closeDesktopMenus();
     navigate(path);
     setNavigationOpen(false);
   };
@@ -4103,7 +4124,21 @@ function Shell({
                 );
               const active = item.items.some((child) => child.path === location.pathname);
               return (
-                <details className="hmt-nav-dropdown" key={item.label}>
+                <details
+                  className="hmt-nav-dropdown"
+                  key={item.label}
+                  onToggle={(event) => {
+                    if (!event.currentTarget.open) return;
+                    document
+                      .querySelectorAll<HTMLDetailsElement>(
+                        ".hmt-nav-dropdown[open]",
+                      )
+                      .forEach((menu) => {
+                        if (menu !== event.currentTarget)
+                          menu.removeAttribute("open");
+                      });
+                  }}
+                >
                   <summary className={`hmt-nav-link ${active ? "is-active" : ""}`}>{item.label}<ChevronDown size={14} /></summary>
                   <div>{item.items.map((child) => <button key={child.path} onClick={(event) => { open(child.path); event.currentTarget.closest("details")?.removeAttribute("open"); }} type="button">{child.label}</button>)}</div>
                 </details>
