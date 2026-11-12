@@ -52,6 +52,7 @@ from hmt_crypto.persistence.platform_models import (
     TradingViewSignal,
     TradingViewStrategy,
     TradingViewWebhookKey,
+    WatchlistGroup,
     WatchlistItem,
 )
 from hmt_crypto.persistence.pnl_models import PnlSnapshot
@@ -127,6 +128,7 @@ __all__ = [
     "AccountRiskPolicy",
     "AccountAssignment",
     "CredentialSecretReference",
+    "WatchlistGroup",
     "WatchlistItem",
     "MarketCandle",
     "MarketQuote",

@@ -11,6 +11,7 @@ import {
   Bell,
   BookOpen,
   BriefcaseBusiness,
+  ChevronDown,
   Copy,
   Info,
   KeyRound,
@@ -18,12 +19,14 @@ import {
   ListChecks,
   LogOut,
   Menu,
+  MoreVertical,
   Pause,
   Pencil,
   Play,
   Plus,
   Radio,
   RefreshCw,
+  Search,
   Settings,
   ShieldCheck,
   Target,
@@ -78,7 +81,14 @@ interface Account {
   identityVerified: boolean;
   credentialConfigured: boolean;
   credentialState: "unconfigured" | "pending" | "verified" | "failed";
+  credentialVersion?: number | null;
   reconciliationState: "unknown" | "running" | "ready" | "degraded" | "blocked";
+  reconciledAt?: string | null;
+  leaseActive?: boolean;
+  leaseUntil?: string | null;
+  fresh?: boolean;
+  observedAt?: string | null;
+  activeProtectionCount?: number;
   entriesEnabled: boolean;
   exitsEnabled: boolean;
 }
@@ -100,6 +110,40 @@ interface WatchlistRow {
   id: string;
   symbol: string;
   productId: number;
+}
+
+interface WatchlistGroupRow {
+  id: string;
+  name: string;
+  position: number;
+  items: (WatchlistRow & { position: number })[];
+}
+
+interface DashboardOverview {
+  observedAt: string;
+  fresh: boolean;
+  totals: {
+    availableBalance: string;
+    walletBalance: string;
+    usedMargin: string;
+    unrealizedPnl: string;
+    positions: number;
+    openOrders: number;
+    activeGtt: number;
+  };
+  accounts: {
+    accountId: string;
+    profileName: string;
+    availableBalance: string;
+    walletBalance: string;
+    usedMargin: string;
+    unrealizedPnl: string;
+    positionCount: number;
+    openOrderCount: number;
+    activeGttCount: number;
+    fresh: boolean;
+    observedAt: string | null;
+  }[];
 }
 
 interface CandleRow {
@@ -589,6 +633,45 @@ const navigation: readonly {
   },
 ];
 
+const desktopNavigation = [
+  { label: "Dashboard", path: "/dashboard" },
+  { label: "Market", path: "/market" },
+  { label: "Delta Accounts", path: "/accounts" },
+  { label: "Orders", path: "/orders" },
+  { label: "Positions", path: "/positions" },
+  { label: "GTT", path: "/gtt" },
+  {
+    label: "Trading",
+    items: [
+      { label: "Live Trading", path: "/trading" },
+      { label: "Strategies", path: "/strategies" },
+      { label: "TradingView", path: "/tradingview" },
+    ],
+  },
+  {
+    label: "Reports",
+    items: [
+      { label: "Performance & Fees", path: "/performance" },
+      { label: "Notifications", path: "/notifications" },
+    ],
+  },
+  {
+    label: "Settings",
+    items: [
+      { label: "Risk Management", path: "/risk" },
+      { label: "General Settings", path: "/settings" },
+    ],
+  },
+  {
+    label: "Administration",
+    admin: true,
+    items: [
+      { label: "User Management", path: "/users" },
+      { label: "Health & Audit", path: "/health" },
+    ],
+  },
+] as const;
+
 function Panel({
   title,
   children,
@@ -603,6 +686,210 @@ function Panel({
       </div>
       {children}
     </section>
+  );
+}
+
+function money(value: string, currency = "USD") {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return value || "—";
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency,
+    maximumFractionDigits: 2,
+  }).format(parsed);
+}
+
+function StatusBadge({
+  value,
+  good,
+}: {
+  readonly value: string;
+  readonly good?: boolean;
+}) {
+  return (
+    <span className={`status-pill ${good ? "status-pill--good" : ""}`}>
+      <span className="status-dot" />
+      {value.replaceAll("_", " ")}
+    </span>
+  );
+}
+
+function CryptoMarketRail({
+  csrf,
+  open,
+  onClose,
+}: {
+  readonly csrf: string;
+  readonly open: boolean;
+  readonly onClose: () => void;
+}) {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [groups, setGroups] = useState<WatchlistGroupRow[]>([]);
+  const [activeGroup, setActiveGroup] = useState("");
+  const [search, setSearch] = useState("");
+
+  const load = useCallback(() => {
+    void Promise.all([
+      request<{ products: Product[] }>("/api/v1/market/products"),
+      request<{ groups: WatchlistGroupRow[] }>("/api/v1/market/watchlists"),
+    ]).then(([market, saved]) => {
+      setProducts(market.products);
+      setGroups(saved.groups);
+      setActiveGroup((current) => current || saved.groups[0]?.id || "");
+    });
+  }, []);
+  useEffect(load, [load]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  const group = groups.find((item) => item.id === activeGroup) ?? groups[0];
+  const savedSymbols = new Set(group?.items.map((item) => item.symbol) ?? []);
+  const featured = products.filter((item) =>
+    ["BTCUSD", "ETHUSD"].includes(item.symbol),
+  );
+  const visibleProducts = search.trim()
+    ? products
+        .filter((item) =>
+          item.symbol.toLowerCase().includes(search.trim().toLowerCase()),
+        )
+        .slice(0, 20)
+    : products.filter((item) => savedSymbols.has(item.symbol));
+
+  async function toggle(product: Product) {
+    if (!group) return;
+    const existing = group.items.find(
+      (item) => item.productId === product.productId,
+    );
+    if (existing)
+      await request(
+        `/api/v1/market/watchlists/${group.id}/items/${existing.id}`,
+        { method: "DELETE" },
+        csrf,
+      );
+    else
+      await request(
+        `/api/v1/market/watchlists/${group.id}/items`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            symbol: product.symbol,
+            product_id: product.productId,
+          }),
+        },
+        csrf,
+      );
+    load();
+  }
+
+  async function createGroup() {
+    const name = window.prompt("Watchlist name", `Watchlist ${groups.length + 1}`)?.trim();
+    if (!name) return;
+    const created = await request<{ id: string }>(
+      "/api/v1/market/watchlists",
+      { method: "POST", body: JSON.stringify({ name }) },
+      csrf,
+    );
+    setActiveGroup(created.id);
+    load();
+  }
+
+  async function renameGroup() {
+    if (!group) return;
+    const name = window.prompt("Rename watchlist", group.name)?.trim();
+    if (!name || name === group.name) return;
+    await request(
+      `/api/v1/market/watchlists/${group.id}`,
+      { method: "PATCH", body: JSON.stringify({ name }) },
+      csrf,
+    );
+    load();
+  }
+
+  async function deleteGroup() {
+    if (!group || groups.length === 1 || !window.confirm(`Delete ${group.name}?`)) return;
+    await request(`/api/v1/market/watchlists/${group.id}`, { method: "DELETE" }, csrf);
+    setActiveGroup("");
+    load();
+  }
+
+  return (
+    <aside className={`market-rail ${open ? "is-open" : ""}`}>
+      <div className="market-rail__mobile-heading">
+        <strong>Crypto watchlist</strong>
+        <button aria-label="Close watchlist" onClick={onClose} type="button">
+          <X size={20} />
+        </button>
+      </div>
+      <div className="market-rail__indices">
+        {featured.map((product) => (
+          <div key={product.productId}>
+            <small>{product.symbol}</small>
+            <strong>{product.markPrice ?? "—"}</strong>
+            <span className={product.quoteFresh ? "is-fresh" : "is-stale"}>
+              {product.quoteFresh ? "Fresh" : "Stale"}
+            </span>
+          </div>
+        ))}
+      </div>
+      <label className="market-rail__search">
+        <Search size={16} />
+        <input
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search crypto contracts"
+          value={search}
+        />
+        <kbd>Ctrl K</kbd>
+      </label>
+      <div className="market-rail__groupbar">
+        <select
+          aria-label="Watchlist group"
+          onChange={(event) => setActiveGroup(event.target.value)}
+          value={group?.id ?? ""}
+        >
+          {groups.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.name} ({item.items.length})
+            </option>
+          ))}
+        </select>
+        <div className="market-rail__group-actions">
+          <button aria-label="New watchlist" onClick={() => void createGroup()} title="New watchlist" type="button"><Plus size={15} /></button>
+          <button aria-label="Rename watchlist" onClick={() => void renameGroup()} title="Rename watchlist" type="button"><Pencil size={14} /></button>
+          <button aria-label="Delete watchlist" disabled={groups.length === 1} onClick={() => void deleteGroup()} title="Delete watchlist" type="button"><Trash2 size={14} /></button>
+        </div>
+      </div>
+      <div className="market-rail__list">
+        {visibleProducts.map((product) => (
+          <article className="market-rail__contract" key={product.productId}>
+            <div>
+              <strong>{product.symbol}</strong>
+              <small>{product.contractType.replaceAll("_", " ")}</small>
+            </div>
+            <button
+              aria-label={`${savedSymbols.has(product.symbol) ? "Remove" : "Add"} ${product.symbol}`}
+              onClick={() => void toggle(product)}
+              type="button"
+            >
+              {savedSymbols.has(product.symbol) ? "−" : "+"}
+            </button>
+            <dl>
+              <div><dt>Bid</dt><dd>{product.bestBid ?? "—"}</dd></div>
+              <div><dt>Mark</dt><dd>{product.markPrice ?? "—"}</dd></div>
+              <div><dt>Ask</dt><dd>{product.bestAsk ?? "—"}</dd></div>
+            </dl>
+          </article>
+        ))}
+        {visibleProducts.length === 0 ? (
+          <div className="market-rail__empty">
+            {search ? "No matching Delta contracts." : "Search and add contracts to this watchlist."}
+          </div>
+        ) : null}
+      </div>
+    </aside>
   );
 }
 
@@ -824,6 +1111,7 @@ function AccountsPage({
   const [apiSecret, setApiSecret] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const load = useCallback(() => {
     void request<{ accounts: Account[] }>("/api/v1/accounts").then((v) =>
       setAccounts(v.accounts),
@@ -957,6 +1245,7 @@ function AccountsPage({
     event.preventDefault();
     if (editingAccount === null) return;
     setNotice(null);
+    setRenaming(true);
     try {
       await request(
         `/api/v1/accounts/${editingAccount}`,
@@ -975,15 +1264,17 @@ function AccountsPage({
     } catch (error) {
       if (
         error instanceof RequestError &&
-        error.code === "fresh_authentication_required"
-      )
-        setNotice("Sign out and sign in again before editing an account.");
-      else if (
-        error instanceof RequestError &&
         error.code === "account_name_exists"
       )
         setNotice("An account with this profile name already exists.");
+      else if (
+        error instanceof RequestError &&
+        error.code === "manage_permission_required"
+      )
+        setNotice("Manage access is required to rename this account.");
       else setNotice("The account profile could not be renamed.");
+    } finally {
+      setRenaming(false);
     }
   }
   async function archiveAccount(account: Account) {
@@ -1025,15 +1316,19 @@ function AccountsPage({
     }
   }
   return (
-    <>
-      <Panel title="Delta accounts">
+    <div className="hmt-page">
+      <div className="hmt-page-heading">
+        <div>
+          <h1>Delta Accounts</h1>
+          <p>Connect and manage Delta Exchange India accounts</p>
+        </div>
         {user.role === "admin" ? (
           <form
-            className="flex gap-2 p-4"
+            className="hmt-account-create"
             onSubmit={(event) => void create(event)}
           >
             <input
-              className="rounded border px-3 py-2"
+              className="hmt-input"
               disabled={creating}
               onChange={(e) => setProfileName(e.target.value)}
               placeholder="Account profile name"
@@ -1041,7 +1336,7 @@ function AccountsPage({
               value={profileName}
             />
             <button
-              className="rounded bg-blue-600 px-4 py-2 text-white disabled:bg-slate-400"
+              className="hmt-primary-button"
               disabled={creating}
               type="submit"
             >
@@ -1049,8 +1344,10 @@ function AccountsPage({
             </button>
           </form>
         ) : null}
+      </div>
+      <section className="data-panel hmt-account-panel">
         {notice ? (
-          <p className="px-4 pb-4 text-sm text-slate-700" role="status">
+          <p className="hmt-alert hmt-alert--info" role="status">
             {notice}
           </p>
         ) : null}
@@ -1059,9 +1356,8 @@ function AccountsPage({
             <thead>
               <tr>
                 <th>Profile</th>
-                <th>Environment</th>
-                <th>Access</th>
-                <th>Credentials</th>
+                <th>Status</th>
+                <th>Credential</th>
                 <th>Reconciliation</th>
                 <th>Live gates</th>
                 <th>Actions</th>
@@ -1070,51 +1366,31 @@ function AccountsPage({
             <tbody>
               {accounts.map((a) => (
                 <tr key={a.id}>
-                  <td>{a.profileName}</td>
-                  <td>{a.environment}</td>
-                  <td>{a.permission}</td>
-                  <td>{a.credentialState}</td>
-                  <td>{a.reconciliationState}</td>
+                  <td>
+                    <strong>{a.profileName}</strong>
+                    <small>Delta India · {a.environment} · {a.permission} · {a.activeProtectionCount ?? 0} protected</small>
+                  </td>
+                  <td>
+                    <StatusBadge value={a.identityVerified ? "Connected" : "Setup required"} good={a.identityVerified} />
+                    <small>{a.leaseActive ? "Worker lease active" : "Worker lease unavailable"}</small>
+                  </td>
+                  <td><StatusBadge value={a.credentialState} good={a.credentialState === "verified"} /></td>
+                  <td><StatusBadge value={a.reconciliationState} good={a.reconciliationState === "ready"} /><small>{a.fresh ? "Fresh account state" : "Data stale or unavailable"}</small></td>
                   <td>
                     Entries {a.entriesEnabled ? "ON" : "OFF"} · Exits{" "}
                     {a.exitsEnabled ? "ON" : "OFF"}
                   </td>
                   <td>
-                    {user.role === "admin" ? (
-                      <div className="flex gap-2">
-                        <button
-                          className="text-blue-700"
-                          onClick={() => setCredentialAccount(a.id)}
-                          type="button"
-                        >
-                          Configure
-                        </button>
-                        <button
-                          className="text-blue-700 disabled:text-slate-400"
-                          disabled={!a.credentialConfigured}
-                          onClick={() => void verify(a.id)}
-                          type="button"
-                        >
-                          Verify
-                        </button>
-                        <button
-                          className="text-blue-700"
-                          onClick={() => {
-                            setEditingAccount(a.id);
-                            setEditingName(a.profileName);
-                          }}
-                          type="button"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          className="text-red-700"
-                          onClick={() => void archiveAccount(a)}
-                          type="button"
-                        >
-                          Archive
-                        </button>
-                      </div>
+                    {user.role === "admin" || a.permission === "manage" ? (
+                      <details className="hmt-action-menu">
+                        <summary aria-label={`Actions for ${a.profileName}`}><MoreVertical size={18} /></summary>
+                        <div>
+                          <button onClick={() => { setEditingAccount(a.id); setEditingName(a.profileName); }} type="button"><Pencil size={15} /> Edit account name</button>
+                          <button onClick={() => setCredentialAccount(a.id)} type="button"><KeyRound size={15} /> Configure credentials</button>
+                          <button disabled={!a.credentialConfigured} onClick={() => void verify(a.id)} type="button"><ShieldCheck size={15} /> Verify connection</button>
+                          {user.role === "admin" ? <button className="is-danger" onClick={() => void archiveAccount(a)} type="button"><Trash2 size={15} /> Archive account</button> : null}
+                        </div>
+                      </details>
                     ) : (
                       "—"
                     )}
@@ -1123,42 +1399,12 @@ function AccountsPage({
               ))}
               {accounts.length === 0 ? (
                 <tr>
-                  <td colSpan={7}>No assigned Delta accounts.</td>
+                  <td className="empty-cell" colSpan={6}>No assigned Delta accounts.</td>
                 </tr>
               ) : null}
             </tbody>
           </table>
         </div>
-        {editingAccount !== null ? (
-          <form
-            className="flex flex-wrap gap-2 border-t p-4"
-            onSubmit={(event) => void renameAccount(event)}
-          >
-            <input
-              className="min-w-64 flex-1 rounded border px-3 py-2"
-              maxLength={128}
-              onChange={(event) => setEditingName(event.target.value)}
-              required
-              value={editingName}
-            />
-            <button
-              className="rounded bg-blue-600 px-4 py-2 text-white"
-              type="submit"
-            >
-              Save account name
-            </button>
-            <button
-              className="rounded border px-4 py-2"
-              onClick={() => {
-                setEditingAccount(null);
-                setEditingName("");
-              }}
-              type="button"
-            >
-              Cancel
-            </button>
-          </form>
-        ) : null}
         {credentialAccount !== null ? (
           <form
             className="grid gap-3 border-t p-4 md:grid-cols-2"
@@ -1209,8 +1455,23 @@ function AccountsPage({
             </div>
           </form>
         ) : null}
-      </Panel>
-    </>
+      </section>
+      {editingAccount !== null ? (
+        <div className="hmt-modal-backdrop" role="presentation">
+          <form className="hmt-modal" onSubmit={(event) => void renameAccount(event)}>
+            <div className="hmt-modal__heading">
+              <div><h2>Edit account</h2><p>Renaming only changes display metadata. Credentials and history remain linked.</p></div>
+              <button aria-label="Close" onClick={() => setEditingAccount(null)} type="button"><X size={20} /></button>
+            </div>
+            <label>Account name<input autoFocus className="hmt-input" maxLength={128} minLength={1} onChange={(event) => setEditingName(event.target.value)} required value={editingName} /></label>
+            <div className="hmt-modal__actions">
+              <button className="hmt-secondary-button" onClick={() => setEditingAccount(null)} type="button">Cancel</button>
+              <button className="hmt-primary-button" disabled={renaming || editingName.trim().length === 0} type="submit">{renaming ? "Saving…" : "Save changes"}</button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -2083,9 +2344,11 @@ function GttPage({
 function TradingViewPage({
   user,
   csrf,
+  libraryOnly = false,
 }: {
   readonly user: SessionUser;
   readonly csrf: string;
+  readonly libraryOnly?: boolean;
 }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -2305,8 +2568,8 @@ function TradingViewPage({
     <div className="tv-page">
       <div className="tv-page__title">
         <div>
-          <h1>TradingView Integration</h1>
-          <p>Manage secure webhook configurations for Delta Exchange India</p>
+          <h1>{libraryOnly ? "Strategy Library" : "TradingView Integration"}</h1>
+          <p>{libraryOnly ? "Manage versioned Delta strategy configurations and mandatory protection" : "Manage secure webhook configurations for Delta Exchange India"}</p>
         </div>
         <button
           className="tv-primary-button"
@@ -2321,10 +2584,10 @@ function TradingViewPage({
           type="button"
         >
           <Plus size={18} />
-          {showCreate ? "Close" : "Create Webhook"}
+          {showCreate ? "Close" : libraryOnly ? "New Strategy" : "Create Webhook"}
         </button>
       </div>
-      <section className="tv-guide">
+      {!libraryOnly ? <section className="tv-guide">
         <div className="tv-guide__title">
           <Info size={20} />
           <strong>How it works</strong>
@@ -2368,7 +2631,9 @@ function TradingViewPage({
             when generated or rotated. HMT Crypto stores only its hash.
           </p>
         </div>
-      </section>
+      </section> : (
+        <section className="tv-guide"><div className="tv-guide__title"><BookOpen size={20} /><strong>Crypto strategy controls</strong></div><div className="tv-guide__body"><p>Each strategy is bound to a Delta account and contract, versioned by its audit history, and requires stop, target, and trailing protection.</p></div></section>
+      )}
       {accounts.length === 0 ? (
         <section className="tv-empty">
           <KeyRound size={22} />
@@ -2642,7 +2907,7 @@ function TradingViewPage({
           </section>
         ) : null}
       </div>
-      <Panel title="TradingView signal log">
+      {!libraryOnly ? <Panel title="TradingView signal log">
         <div className="overflow-x-auto">
           <table>
             <thead>
@@ -2680,15 +2945,15 @@ function TradingViewPage({
             </tbody>
           </table>
         </div>
-      </Panel>
-      <section className="tv-payload">
+      </Panel> : null}
+      {!libraryOnly ? <section className="tv-payload">
         <strong>TradingView alert JSON</strong>
         <pre>{`{"signal_id":"{{strategy.order.id}}-{{timenow}}","side":"buy","timestamp":{{timenow}},"limit_price":null}`}</pre>
         <p>
           Signals expire after 60 seconds and duplicate signal IDs are rejected.
           Use <code>null</code> for market-order limit_price.
         </p>
-      </section>
+      </section> : null}
     </div>
   );
 }
@@ -3682,7 +3947,6 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
 }
 
 function DashboardPage({
-  csrf,
   user,
   readOnlyMode,
 }: {
@@ -3690,30 +3954,67 @@ function DashboardPage({
   readonly user: SessionUser;
   readonly readOnlyMode?: boolean;
 }) {
+  const [overview, setOverview] = useState<DashboardOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const load = useCallback(() => {
+    setLoading(true);
+    void request<DashboardOverview>("/api/v1/dashboard/overview")
+      .then(setOverview)
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(load, [load]);
+  const totals = overview?.totals;
   return (
-    <>
-      <Panel title="Live platform status">
-        <div className="grid gap-4 p-5 md:grid-cols-3">
-          <div>
-            <small>Trading mode</small>
-            <strong className="block">
-              {readOnlyMode
-                ? "LIVE DATA — trading disabled"
-                : "LIVE — entries locked"}
-            </strong>
-          </div>
-          <div>
-            <small>User role</small>
-            <strong className="block">{user.role}</strong>
-          </div>
-          <div>
-            <small>Venue</small>
-            <strong className="block">Delta Exchange India</strong>
-          </div>
+    <div className="hmt-page">
+      <div className="hmt-page-heading">
+        <div>
+          <h1>Account Overview</h1>
+          <p>View balances, margin, P&amp;L, and trading activity by account</p>
+          <small>Last updated: {overview ? new Date(overview.observedAt).toLocaleTimeString() : "—"}</small>
         </div>
-      </Panel>
-      <AccountsPage csrf={csrf} user={user} />
-    </>
+        <button className="hmt-primary-button" disabled={loading} onClick={load} type="button"><RefreshCw size={17} /> {loading ? "Refreshing…" : "Refresh"}</button>
+      </div>
+      <div className="hmt-dashboard-context">
+        <span><ShieldCheck size={17} /> {readOnlyMode ? "Live account data · trading disabled" : "Live control"}</span>
+        <span>User role: <strong>{user.role}</strong></span>
+        <span>Venue: <strong>Delta Exchange India</strong></span>
+      </div>
+      <section className="hmt-summary-band">
+        {[
+          ["Available balance", money(totals?.availableBalance ?? "0"), "Across assigned accounts"],
+          ["Used margin", money(totals?.usedMargin ?? "0"), "Current Delta margin"],
+          ["Wallet balance", money(totals?.walletBalance ?? "0"), "Across assigned accounts"],
+          ["Unrealized P&L", money(totals?.unrealizedPnl ?? "0"), "Open positions"],
+          ["Active positions", String(totals?.positions ?? 0), "Open contracts"],
+          ["Open orders / GTT", `${totals?.openOrders ?? 0} / ${totals?.activeGtt ?? 0}`, "Pending protection"],
+        ].map(([label, value, note]) => (
+          <div className="hmt-summary-cell" key={label}>
+            <p className="hmt-summary-label">{label}</p>
+            <p className="hmt-summary-value">{value}</p>
+            <p className="hmt-summary-note">{note}</p>
+          </div>
+        ))}
+      </section>
+      <section className="hmt-account-cards">
+        {overview?.accounts.map((account) => (
+          <article key={account.accountId}>
+            <header>
+              <div><h2>{account.profileName}</h2><StatusBadge value={account.fresh ? "Fresh" : "Stale"} good={account.fresh} /></div>
+              <small>{account.observedAt ? `Updated ${new Date(account.observedAt).toLocaleTimeString()}` : "Awaiting reconciliation"}</small>
+            </header>
+            <dl>
+              <div><dt>Available</dt><dd>{money(account.availableBalance)}</dd></div>
+              <div><dt>Used margin</dt><dd>{money(account.usedMargin)}</dd></div>
+              <div><dt>Wallet</dt><dd>{money(account.walletBalance)}</dd></div>
+              <div><dt>Unrealized P&amp;L</dt><dd>{money(account.unrealizedPnl)}</dd></div>
+              <div><dt>Positions</dt><dd>{account.positionCount}</dd></div>
+              <div><dt>Open orders / GTT</dt><dd>{account.openOrderCount} / {account.activeGttCount}</dd></div>
+            </dl>
+          </article>
+        ))}
+        {!loading && overview?.accounts.length === 0 ? <div className="tv-empty"><Info /><p>No assigned account has reconciled data yet.</p></div> : null}
+      </section>
+    </div>
   );
 }
 
@@ -3729,6 +4030,7 @@ function Shell({
   const location = useLocation();
   const navigate = useNavigate();
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [watchlistOpen, setWatchlistOpen] = useState(false);
   const visible = navigation.filter(
     (item) => !item.admin || user.role === "admin",
   );
@@ -3756,7 +4058,26 @@ function Shell({
             <small>Crypto</small>
           </span>
         </span>
+        <nav aria-label="Primary navigation" className="hmt-primary-navigation">
+          {desktopNavigation
+            .filter((item) => !("admin" in item && item.admin) || user.role === "admin")
+            .map((item) => {
+              if (!("items" in item))
+                return (
+                  <button className={`hmt-nav-link ${location.pathname === item.path ? "is-active" : ""}`} key={item.path} onClick={() => open(item.path)} type="button">{item.label}</button>
+                );
+              const active = item.items.some((child) => child.path === location.pathname);
+              return (
+                <details className="hmt-nav-dropdown" key={item.label}>
+                  <summary className={`hmt-nav-link ${active ? "is-active" : ""}`}>{item.label}<ChevronDown size={14} /></summary>
+                  <div>{item.items.map((child) => <button key={child.path} onClick={(event) => { open(child.path); event.currentTarget.closest("details")?.removeAttribute("open"); }} type="button">{child.label}</button>)}</div>
+                </details>
+              );
+            })}
+        </nav>
         <div className="hmt-header-actions">
+          <button aria-label="Open crypto watchlist" className="hmt-mobile-watchlist" onClick={() => setWatchlistOpen(true)} type="button"><Radio size={18} /></button>
+          <button aria-label="Notifications" className="hmt-icon-button" onClick={() => open("/notifications")} type="button"><Bell size={18} /></button>
           <span className="hmt-environment is-danger">DELTA INDIA · LIVE</span>
           <span className="hmt-operator">
             <span>
@@ -3797,6 +4118,8 @@ function Shell({
             ))}
           </nav>
         </aside>
+        <button aria-label="Close watchlist" className={`market-rail-backdrop ${watchlistOpen ? "is-open" : ""}`} onClick={() => setWatchlistOpen(false)} type="button" />
+        <CryptoMarketRail csrf={csrf} onClose={() => setWatchlistOpen(false)} open={watchlistOpen} />
         <main className="hmt-main">
           {session.readOnlyMode ? (
             <div className="mx-6 mt-5 rounded border border-blue-300 bg-blue-50 px-4 py-3 font-semibold text-blue-900">
@@ -3864,7 +4187,7 @@ function Shell({
               />
               <Route
                 path="/strategies"
-                element={<TradingViewPage csrf={csrf} user={user} />}
+                element={<TradingViewPage csrf={csrf} libraryOnly user={user} />}
               />
               <Route
                 path="/tradingview"

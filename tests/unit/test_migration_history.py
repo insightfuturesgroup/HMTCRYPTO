@@ -88,6 +88,7 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions(base="base", head="heads"))
     assert [(revision.revision, revision.down_revision) for revision in revisions] == [
+        ("phase23_hmt_ui_watchlists_v1", "phase22_live_qualification_v1"),
         ("phase22_live_qualification_v1", "phase21_credential_identity_binding_v1"),
         ("phase21_credential_identity_binding_v1", "phase20_account_archive_v1"),
         ("phase20_account_archive_v1", "phase19_notifications_v1"),
@@ -116,7 +117,7 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
         ("phase2_hardening_v1", "phase2_baseline_v1"),
         ("phase2_baseline_v1", None),
     ]
-    assert script.get_current_head() == "phase22_live_qualification_v1"
+    assert script.get_current_head() == "phase23_hmt_ui_watchlists_v1"
     assert len("phase8_version_width_v1") <= 32
     assert max(len(revision.revision) for revision in revisions) <= 128
 
@@ -583,7 +584,7 @@ def test_offline_upgrade_renders_without_importing_models_or_leaking_dsn(
     assert "CREATE TABLE public.hmt_crypto_alembic_version" in rendered
     assert "CREATE TABLE hmt_crypto_alembic_version" not in rendered
     assert "CREATE SCHEMA hmt_crypto" in rendered
-    assert rendered.count("CREATE TABLE hmt_crypto.") == 71
+    assert rendered.count("CREATE TABLE hmt_crypto.") == 72
     assert "CREATE TABLE hmt_crypto.kill_workflows" in rendered
     assert "CREATE TABLE hmt_crypto.kill_workflow_events" in rendered
     assert "CREATE TABLE hmt_crypto.paper_execution_heads" in rendered

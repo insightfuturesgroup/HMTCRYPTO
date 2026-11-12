@@ -153,20 +153,41 @@ class CredentialSecretReference(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
-class WatchlistItem(Base):
-    __tablename__ = "watchlist_items"
+class WatchlistGroup(Base):
+    __tablename__ = "watchlist_groups"
     __table_args__ = (
-        UniqueConstraint("user_id", "symbol", name="uq_watchlist_user_symbol"),
-        Index("ix_watchlist_user_created", "user_id", "created_at"),
+        UniqueConstraint("user_id", "name", name="uq_watchlist_group_user_name"),
+        Index("ix_watchlist_group_user_position", "user_id", "position"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
     )
+    name: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    position: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class WatchlistItem(Base):
+    __tablename__ = "watchlist_items"
+    __table_args__ = (
+        UniqueConstraint("group_id", "symbol", name="uq_watchlist_group_symbol"),
+        Index("ix_watchlist_group_position", "group_id", "position"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    group_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.watchlist_groups.id", ondelete="RESTRICT"), nullable=False
+    )
     symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
     product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    position: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
@@ -1070,5 +1091,6 @@ __all__ = [
     "TradingViewSignal",
     "TradingViewStrategy",
     "TradingViewWebhookKey",
+    "WatchlistGroup",
     "WatchlistItem",
 ]

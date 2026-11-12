@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, desc, func, literal, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from hmt_crypto.api.delta_reconciliation import (
     ReconciliationReadError,
@@ -75,6 +76,7 @@ from hmt_crypto.persistence.models import (
     TradingViewSignal,
     TradingViewStrategy,
     TradingViewWebhookKey,
+    WatchlistGroup,
     WatchlistItem,
 )
 
@@ -84,6 +86,85 @@ _CSRF_COOKIE = "__Host-hmt_auth_csrf"
 _SESSION_COOKIE = "__Host-hmt_platform_session"
 _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.: -]{0,127}\Z")
 _LOGGER = get_logger("api.platform")
+
+
+def _payload_decimal(row: dict[str, object], key: str) -> Decimal:
+    try:
+        value = Decimal(str(row.get(key, "0")))
+    except InvalidOperation:
+        return Decimal(0)
+    return value if value.is_finite() else Decimal(0)
+
+
+def _payload_list(value: str | None) -> list[dict[str, object]]:
+    try:
+        decoded: object = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [row for row in decoded if isinstance(row, dict)]
+
+
+def _page_payload_rows(
+    rows: object,
+    *,
+    symbol: str | None,
+    status: str | None,
+    order_type: str | None,
+    date_from: datetime | None,
+    date_to: datetime | None,
+    sort: str,
+    page: int,
+    page_size: int,
+) -> dict[str, object]:
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=409, detail="account_state_not_ready")
+    selected = [row for row in rows if isinstance(row, dict)]
+    if symbol:
+        expected = symbol.upper()
+        selected = [
+            row
+            for row in selected
+            if str(row.get("product_symbol", row.get("symbol", ""))).upper() == expected
+        ]
+    if status:
+        expected_status = status.lower()
+        selected = [
+            row
+            for row in selected
+            if str(row.get("state", row.get("status", ""))).lower() == expected_status
+        ]
+    if order_type:
+        expected_type = order_type.lower()
+        selected = [
+            row for row in selected if str(row.get("order_type", "")).lower() == expected_type
+        ]
+
+    def observed_at(row: dict[str, object]) -> datetime:
+        raw = row.get(
+            "created_at",
+            row.get("timestamp", row.get("updated_at", row.get("time", ""))),
+        )
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.min.replace(tzinfo=UTC)
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    if date_from is not None:
+        selected = [row for row in selected if observed_at(row) >= date_from]
+    if date_to is not None:
+        selected = [row for row in selected if observed_at(row) <= date_to]
+    selected.sort(key=observed_at, reverse=sort == "newest")
+    total = len(selected)
+    start = (page - 1) * page_size
+    return {
+        "items": selected[start : start + page_size],
+        "total": total,
+        "page": page,
+        "pageSize": page_size,
+    }
 
 
 class _Body(BaseModel):
@@ -133,6 +214,14 @@ class CredentialBody(_Body):
 class WatchlistBody(_Body):
     symbol: str = Field(min_length=1, max_length=128)
     product_id: int = Field(gt=0)
+
+
+class WatchlistGroupBody(_Body):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class WatchlistGroupItemBody(WatchlistBody):
+    position: int = Field(default=0, ge=0, lt=10_000)
 
 
 class GttBody(_Body):
@@ -869,8 +958,31 @@ def install_platform_routes(
                     )
                 )
             rows = (await session.execute(query.order_by(Account.profile_name))).all()
-            return {
-                "accounts": [
+            now = datetime.now(UTC)
+            payload: list[dict[str, object]] = []
+            for account, permission, control in rows:
+                lease = await session.scalar(
+                    select(PrivateWorkerLease).where(PrivateWorkerLease.account_id == account.id)
+                )
+                snapshot = await session.scalar(
+                    select(PrivateReconciliationSnapshot)
+                    .where(PrivateReconciliationSnapshot.account_id == account.id)
+                    .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+                    .limit(1)
+                )
+                protection_count = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(GttOrder)
+                        .where(
+                            GttOrder.account_id == account.id,
+                            GttOrder.status.in_(("armed", "triggered")),
+                        )
+                    )
+                    or 0
+                )
+                observed = None if snapshot is None else snapshot.observed_at
+                payload.append(
                     {
                         "id": str(account.id),
                         "profileName": account.profile_name,
@@ -880,18 +992,33 @@ def install_platform_routes(
                         "permission": permission,
                         "identityVerified": account.identity_verified_at is not None,
                         "credentialConfigured": account.current_credential_version is not None,
-                        "credentialState": "unconfigured"
-                        if control is None
-                        else control.credential_state,
-                        "reconciliationState": "unknown"
-                        if control is None
-                        else control.reconciliation_state,
+                        "credentialState": (
+                            "unconfigured" if control is None else control.credential_state
+                        ),
+                        "credentialVersion": account.current_credential_version,
+                        "reconciliationState": (
+                            "unknown" if control is None else control.reconciliation_state
+                        ),
+                        "reconciledAt": (
+                            None
+                            if control is None or control.reconciled_at is None
+                            else _utc(control.reconciled_at)
+                        ),
+                        "leaseActive": bool(lease is not None and lease.lease_until > now),
+                        "leaseUntil": None if lease is None else _utc(lease.lease_until),
+                        "fresh": bool(
+                            observed is not None
+                            and observed >= now - timedelta(seconds=60)
+                            and control is not None
+                            and control.reconciliation_state == "ready"
+                        ),
+                        "observedAt": None if observed is None else _utc(observed),
+                        "activeProtectionCount": protection_count,
                         "entriesEnabled": False if control is None else control.entries_enabled,
                         "exitsEnabled": False if control is None else control.exits_enabled,
                     }
-                    for account, permission, control in rows
-                ]
-            }
+                )
+            return {"accounts": payload}
 
     @app.post("/api/v1/accounts")
     async def create_account(body: CreateAccountBody, request: Request) -> dict[str, object]:
@@ -997,10 +1124,8 @@ def install_platform_routes(
     async def update_account(
         account_id: UUID, body: UpdateAccountBody, request: Request
     ) -> dict[str, object]:
-        actor = await admin(request, mutation=True)
+        actor = await principal(request, mutation=True)
         now = datetime.now(UTC)
-        if actor.last_login_at is None or now - actor.last_login_at > timedelta(minutes=15):
-            raise HTTPException(status_code=403, detail="fresh_authentication_required")
         profile_name = " ".join(body.profile_name.strip().split())
         if _PROFILE.fullmatch(profile_name) is None:
             raise HTTPException(status_code=400, detail="invalid_profile_name")
@@ -1009,6 +1134,9 @@ def install_platform_routes(
                 account = await session.get(Account, account_id, with_for_update=True)
                 if account is None or account.archived_at is not None:
                     raise HTTPException(status_code=404, detail="account_not_found")
+                permission = await account_permission(session, actor, account_id)
+                if actor.role != "admin" and permission != "manage":
+                    raise HTTPException(status_code=403, detail="manage_permission_required")
                 account.profile_name = profile_name
                 account.updated_at = now
                 await append_audit(
@@ -1702,6 +1830,184 @@ def install_platform_routes(
             "totals": {key: format(value, "f") for key, value in sorted(totals.items())},
         }
 
+    @app.get("/api/v1/dashboard/overview")
+    async def dashboard_overview(request: Request) -> dict[str, object]:
+        actor = await principal(request)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            query = (
+                select(Account, AccountLiveControl)
+                .join(AccountLiveControl, AccountLiveControl.account_id == Account.id)
+                .where(Account.archived_at.is_(None))
+            )
+            if actor.role != "admin":
+                query = query.join(
+                    AccountAssignment, AccountAssignment.account_id == Account.id
+                ).where(AccountAssignment.user_id == actor.profile_id)
+            accounts = (await session.execute(query.order_by(Account.profile_name))).all()
+            cards: list[dict[str, object]] = []
+            total_available = Decimal(0)
+            total_wallet = Decimal(0)
+            total_margin = Decimal(0)
+            total_unrealized = Decimal(0)
+            total_positions = 0
+            total_orders = 0
+            total_gtt = 0
+            for account, control in accounts:
+                snapshot = await session.scalar(
+                    select(PrivateReconciliationSnapshot)
+                    .where(PrivateReconciliationSnapshot.account_id == account.id)
+                    .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+                    .limit(1)
+                )
+                balances = [] if snapshot is None else _payload_list(snapshot.balances_payload)
+                positions = [] if snapshot is None else _payload_list(snapshot.positions_payload)
+                orders = [] if snapshot is None else _payload_list(snapshot.open_orders_payload)
+                available = sum(
+                    (_payload_decimal(row, "available_balance") for row in balances), Decimal(0)
+                )
+                wallet_balance = sum(
+                    (_payload_decimal(row, "balance") for row in balances), Decimal(0)
+                )
+                blocked = sum(
+                    (_payload_decimal(row, "blocked_margin") for row in balances), Decimal(0)
+                )
+                unrealized = sum(
+                    (_payload_decimal(row, "unrealized_pnl") for row in positions), Decimal(0)
+                )
+                active_gtt = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(GttOrder)
+                        .where(
+                            GttOrder.account_id == account.id,
+                            GttOrder.status.in_(("armed", "triggered")),
+                        )
+                    )
+                    or 0
+                )
+                observed = None if snapshot is None else snapshot.observed_at
+                fresh = bool(
+                    observed is not None
+                    and observed >= now - timedelta(seconds=60)
+                    and control.reconciliation_state == "ready"
+                )
+                card = {
+                    "accountId": str(account.id),
+                    "profileName": account.profile_name,
+                    "availableBalance": format(available, "f"),
+                    "walletBalance": format(wallet_balance, "f"),
+                    "usedMargin": format(blocked, "f"),
+                    "unrealizedPnl": format(unrealized, "f"),
+                    "positionCount": len(positions),
+                    "openOrderCount": len(orders),
+                    "activeGttCount": active_gtt,
+                    "fresh": fresh,
+                    "observedAt": None if observed is None else _utc(observed),
+                }
+                cards.append(card)
+                total_available += available
+                total_wallet += wallet_balance
+                total_margin += blocked
+                total_unrealized += unrealized
+                total_positions += len(positions)
+                total_orders += len(orders)
+                total_gtt += active_gtt
+        return {
+            "observedAt": _utc(now),
+            "fresh": bool(cards) and all(bool(card["fresh"]) for card in cards),
+            "totals": {
+                "availableBalance": format(total_available, "f"),
+                "walletBalance": format(total_wallet, "f"),
+                "usedMargin": format(total_margin, "f"),
+                "unrealizedPnl": format(total_unrealized, "f"),
+                "positions": total_positions,
+                "openOrders": total_orders,
+                "activeGtt": total_gtt,
+            },
+            "accounts": cards,
+        }
+
+    @app.get("/api/v1/positions")
+    async def normalized_positions(
+        request: Request,
+        account_id: UUID,
+        symbol: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        sort: str = "newest",
+        page: int = 1,
+        page_size: int = 25,
+    ) -> dict[str, object]:
+        if page < 1 or not 1 <= page_size <= 100 or sort not in {"newest", "oldest"}:
+            raise HTTPException(status_code=400, detail="invalid_pagination")
+        state = await account_state(account_id, request)
+        return _page_payload_rows(
+            state["positions"],
+            symbol=symbol,
+            status=None,
+            order_type=None,
+            date_from=date_from,
+            date_to=date_to,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+        ) | {"accountId": str(account_id), "fresh": state["fresh"]}
+
+    @app.get("/api/v1/orders")
+    async def normalized_orders(
+        request: Request,
+        account_id: UUID,
+        symbol: str | None = None,
+        status: str | None = None,
+        order_type: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        sort: str = "newest",
+        page: int = 1,
+        page_size: int = 25,
+    ) -> dict[str, object]:
+        if page < 1 or not 1 <= page_size <= 100 or sort not in {"newest", "oldest"}:
+            raise HTTPException(status_code=400, detail="invalid_pagination")
+        state = await account_state(account_id, request)
+        return _page_payload_rows(
+            state["openOrders"],
+            symbol=symbol,
+            status=status,
+            order_type=order_type,
+            date_from=date_from,
+            date_to=date_to,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+        ) | {"accountId": str(account_id), "fresh": state["fresh"]}
+
+    @app.get("/api/v1/fills")
+    async def normalized_fills(
+        request: Request,
+        account_id: UUID,
+        symbol: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        sort: str = "newest",
+        page: int = 1,
+        page_size: int = 25,
+    ) -> dict[str, object]:
+        if page < 1 or not 1 <= page_size <= 100 or sort not in {"newest", "oldest"}:
+            raise HTTPException(status_code=400, detail="invalid_pagination")
+        state = await account_state(account_id, request)
+        return _page_payload_rows(
+            state["fills"],
+            symbol=symbol,
+            status=None,
+            order_type=None,
+            date_from=date_from,
+            date_to=date_to,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+        ) | {"accountId": str(account_id), "fresh": state["fresh"]}
+
     @app.get("/api/v1/notifications")
     async def current_notifications(request: Request) -> dict[str, object]:
         actor = await principal(request)
@@ -2004,6 +2310,226 @@ def install_platform_routes(
                 "products": products,
             }
 
+    async def default_watchlist_group(session: AsyncSession, user_id: UUID) -> WatchlistGroup:
+        row = await session.scalar(
+            select(WatchlistGroup)
+            .where(WatchlistGroup.user_id == user_id)
+            .order_by(WatchlistGroup.position, WatchlistGroup.created_at)
+            .limit(1)
+        )
+        if row is not None:
+            return row
+        now = datetime.now(UTC)
+        row = WatchlistGroup(
+            id=uuid4(),
+            user_id=user_id,
+            name="Watchlist 1",
+            position=0,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+        await session.flush()
+        return row
+
+    @app.get("/api/v1/market/watchlists")
+    async def watchlist_groups(request: Request) -> dict[str, object]:
+        actor = await principal(request)
+        async with database.transaction() as session:
+            await default_watchlist_group(session, actor.profile_id)
+            groups = list(
+                (
+                    await session.execute(
+                        select(WatchlistGroup)
+                        .where(WatchlistGroup.user_id == actor.profile_id)
+                        .order_by(WatchlistGroup.position, WatchlistGroup.created_at)
+                    )
+                ).scalars()
+            )
+            items = list(
+                (
+                    await session.execute(
+                        select(WatchlistItem)
+                        .where(
+                            WatchlistItem.user_id == actor.profile_id,
+                            WatchlistItem.active.is_(True),
+                        )
+                        .order_by(WatchlistItem.group_id, WatchlistItem.position)
+                    )
+                ).scalars()
+            )
+            by_group: dict[UUID, list[dict[str, object]]] = {}
+            for item in items:
+                by_group.setdefault(item.group_id, []).append(
+                    {
+                        "id": str(item.id),
+                        "symbol": item.symbol,
+                        "productId": item.product_id,
+                        "position": item.position,
+                    }
+                )
+            return {
+                "groups": [
+                    {
+                        "id": str(group.id),
+                        "name": group.name,
+                        "position": group.position,
+                        "items": by_group.get(group.id, []),
+                    }
+                    for group in groups
+                ]
+            }
+
+    @app.post("/api/v1/market/watchlists")
+    async def create_watchlist_group(
+        body: WatchlistGroupBody, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        name = " ".join(body.name.strip().split())
+        if _PROFILE.fullmatch(name) is None:
+            raise HTTPException(status_code=400, detail="invalid_watchlist_name")
+        now = datetime.now(UTC)
+        try:
+            async with database.transaction() as session:
+                count = await session.scalar(
+                    select(func.count())
+                    .select_from(WatchlistGroup)
+                    .where(WatchlistGroup.user_id == actor.profile_id)
+                )
+                if int(count or 0) >= 7:
+                    raise HTTPException(status_code=409, detail="watchlist_limit_reached")
+                row = WatchlistGroup(
+                    id=uuid4(),
+                    user_id=actor.profile_id,
+                    name=name,
+                    position=int(count or 0),
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+                await append_audit(
+                    session,
+                    actor=actor,
+                    action="WATCHLIST_GROUP_CREATED",
+                    target_type="watchlist_group",
+                    target_id=str(row.id),
+                    outcome="SUCCEEDED",
+                    request_id=_request_id(request),
+                )
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail="watchlist_name_exists") from None
+        return {"id": str(row.id), "name": row.name, "position": row.position, "items": []}
+
+    @app.patch("/api/v1/market/watchlists/{group_id}")
+    async def rename_watchlist_group(
+        group_id: UUID, body: WatchlistGroupBody, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        name = " ".join(body.name.strip().split())
+        if _PROFILE.fullmatch(name) is None:
+            raise HTTPException(status_code=400, detail="invalid_watchlist_name")
+        try:
+            async with database.transaction() as session:
+                row = await session.scalar(
+                    select(WatchlistGroup).where(
+                        WatchlistGroup.id == group_id,
+                        WatchlistGroup.user_id == actor.profile_id,
+                    )
+                )
+                if row is None:
+                    raise HTTPException(status_code=404, detail="watchlist_not_found")
+                row.name = name
+                row.updated_at = datetime.now(UTC)
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail="watchlist_name_exists") from None
+        return {"id": str(group_id), "name": name}
+
+    @app.delete("/api/v1/market/watchlists/{group_id}")
+    async def delete_watchlist_group(group_id: UUID, request: Request) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        async with database.transaction() as session:
+            groups = list(
+                (
+                    await session.execute(
+                        select(WatchlistGroup)
+                        .where(WatchlistGroup.user_id == actor.profile_id)
+                        .order_by(WatchlistGroup.position)
+                        .with_for_update()
+                    )
+                ).scalars()
+            )
+            row = next((group for group in groups if group.id == group_id), None)
+            if row is None:
+                raise HTTPException(status_code=404, detail="watchlist_not_found")
+            if len(groups) == 1:
+                raise HTTPException(status_code=409, detail="last_watchlist_required")
+            items = (
+                await session.execute(
+                    select(WatchlistItem).where(WatchlistItem.group_id == group_id)
+                )
+            ).scalars()
+            for item in items:
+                await session.delete(item)
+            await session.delete(row)
+        return {"id": str(group_id), "deleted": True}
+
+    @app.put("/api/v1/market/watchlists/{group_id}/items")
+    async def add_watchlist_group_item(
+        group_id: UUID, body: WatchlistGroupItemBody, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            group = await session.scalar(
+                select(WatchlistGroup).where(
+                    WatchlistGroup.id == group_id,
+                    WatchlistGroup.user_id == actor.profile_id,
+                )
+            )
+            if group is None:
+                raise HTTPException(status_code=404, detail="watchlist_not_found")
+            row = await session.scalar(
+                select(WatchlistItem).where(
+                    WatchlistItem.group_id == group_id,
+                    WatchlistItem.symbol == body.symbol,
+                )
+            )
+            if row is None:
+                row = WatchlistItem(
+                    id=uuid4(),
+                    user_id=actor.profile_id,
+                    group_id=group_id,
+                    symbol=body.symbol,
+                    product_id=body.product_id,
+                    active=True,
+                    position=body.position,
+                    created_at=now,
+                )
+                session.add(row)
+            else:
+                row.active = True
+                row.product_id = body.product_id
+                row.position = body.position
+        return {"id": str(row.id), "symbol": row.symbol, "productId": row.product_id}
+
+    @app.delete("/api/v1/market/watchlists/{group_id}/items/{item_id}")
+    async def delete_watchlist_group_item(
+        group_id: UUID, item_id: UUID, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        async with database.transaction() as session:
+            row = await session.scalar(
+                select(WatchlistItem).where(
+                    WatchlistItem.id == item_id,
+                    WatchlistItem.group_id == group_id,
+                    WatchlistItem.user_id == actor.profile_id,
+                )
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="watchlist_item_not_found")
+            await session.delete(row)
+        return {"id": str(item_id), "deleted": True}
+
     @app.get("/api/v1/market/watchlist")
     async def watchlist(request: Request) -> dict[str, object]:
         actor = await principal(request)
@@ -2014,7 +2540,7 @@ def install_platform_routes(
                     .where(
                         WatchlistItem.user_id == actor.profile_id, WatchlistItem.active.is_(True)
                     )
-                    .order_by(WatchlistItem.created_at)
+                    .order_by(WatchlistItem.position, WatchlistItem.created_at)
                 )
             ).scalars()
             return {
@@ -2074,10 +2600,12 @@ def install_platform_routes(
         request_id = _request_id(request)
         now = datetime.now(UTC)
         async with database.transaction() as session:
+            group = await default_watchlist_group(session, actor.profile_id)
             row = (
                 await session.execute(
                     select(WatchlistItem).where(
                         WatchlistItem.user_id == actor.profile_id,
+                        WatchlistItem.group_id == group.id,
                         WatchlistItem.symbol == body.symbol,
                     )
                 )
@@ -2086,9 +2614,11 @@ def install_platform_routes(
                 row = WatchlistItem(
                     id=uuid4(),
                     user_id=actor.profile_id,
+                    group_id=group.id,
                     symbol=body.symbol,
                     product_id=body.product_id,
                     active=True,
+                    position=0,
                     created_at=now,
                 )
                 session.add(row)
