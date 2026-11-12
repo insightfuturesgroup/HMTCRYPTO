@@ -737,9 +737,25 @@ function CryptoMarketRail({
   }, []);
   useEffect(load, [load]);
   useEffect(() => {
+    const stream = new EventSource("/api/v1/market/stream", {
+      withCredentials: true,
+    });
+    const receive = (event: MessageEvent<string>) => {
+      try {
+        const value = JSON.parse(event.data) as { products: Product[] };
+        setProducts(value.products);
+      } catch {
+        /* A malformed frame is ignored; the stream reconnects automatically. */
+      }
+    };
+    stream.addEventListener("market", receive as EventListener);
+    return () => stream.close();
+  }, []);
+  useEffect(() => {
+    // Low-frequency recovery only. Normal quote delivery is server-pushed.
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") load();
-    }, 2_000);
+    }, 30_000);
     return () => window.clearInterval(timer);
   }, [load]);
   useEffect(() => {
@@ -4287,7 +4303,21 @@ export default function PlatformApp() {
   });
   useEffect(() => {
     performance.mark("hmt-session-check-start");
-    void request<Session>("/api/v1/auth/session")
+    const recover = async () => {
+      try {
+        return await networkRequest<Session>("/api/v1/auth/refresh", {
+          method: "POST",
+        });
+      } catch (error) {
+        if (
+          error instanceof RequestError &&
+          ![401, 403, 503].includes(error.status)
+        )
+          throw error;
+        return request<Session>("/api/v1/auth/session");
+      }
+    };
+    void recover()
       .then((value) => {
         performance.mark("hmt-session-check-end");
         performance.measure(
@@ -4306,6 +4336,44 @@ export default function PlatformApp() {
         }),
       );
   }, []);
+  useEffect(() => {
+    if (!session?.authenticated) return;
+
+    let stopped = false;
+    const refresh = async () => {
+      try {
+        const value = await networkRequest<Session>("/api/v1/auth/refresh", {
+          method: "POST",
+        });
+        if (!stopped) setSession(value);
+      } catch (error) {
+        if (
+          !stopped &&
+          error instanceof RequestError &&
+          [401, 403].includes(error.status)
+        ) {
+          queryClient.clear();
+          setSession({
+            authenticated: false,
+            csrfToken: null,
+            readOnlyMode: true,
+            user: null,
+          });
+        }
+        // A transient network/Auth outage must not sign an active user out.
+      }
+    };
+    const timer = window.setInterval(refresh, 15 * 60 * 1000);
+    const refreshVisible = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    document.addEventListener("visibilitychange", refreshVisible);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshVisible);
+    };
+  }, [session?.authenticated]);
   if (recoveryToken !== null)
     return (
       <PasswordRecovery

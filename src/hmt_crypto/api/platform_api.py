@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import re
 import secrets
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -14,7 +16,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, desc, func, literal, select
 from sqlalchemy.exc import IntegrityError
@@ -454,6 +456,9 @@ def install_platform_routes(
             ):
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
             platform_session.last_seen_at = now
+            platform_session.expires_at = now + timedelta(
+                seconds=settings.session_absolute_seconds
+            )
             return Principal(
                 row.id,
                 row.auth_user_id,
@@ -557,6 +562,7 @@ def install_platform_routes(
         platform_token: str,
         age: int,
     ) -> None:
+        persistent_age = 315_360_000  # Ten years; server-side revocation remains authoritative.
         for name, value, httponly in (
             (_ACCESS_COOKIE, access, True),
             (_REFRESH_COOKIE, refresh, True),
@@ -570,7 +576,7 @@ def install_platform_routes(
                 secure=True,
                 samesite="strict",
                 path="/",
-                max_age=(age if name == _ACCESS_COOKIE else settings.session_absolute_seconds),
+                max_age=(age if name == _ACCESS_COOKIE else persistent_age),
             )
 
     def clear_auth_cookies(response: JSONResponse) -> None:
@@ -746,6 +752,79 @@ def install_platform_routes(
                 },
             }
         )
+
+    @app.post("/api/v1/auth/refresh")
+    async def refresh_platform_session(request: Request) -> JSONResponse:
+        """Rotate Supabase tokens and keep an active application session alive."""
+
+        require_origin(request)
+        refresh = request.cookies.get(_REFRESH_COOKIE)
+        platform_token = request.cookies.get(_SESSION_COOKIE)
+        csrf = request.cookies.get(_CSRF_COOKIE)
+        if refresh is None or platform_token is None or csrf is None:
+            raise HTTPException(status_code=401, detail="authentication_required")
+        try:
+            tokens = await auth.refresh(refresh)
+        except AuthenticationRejected:
+            raise HTTPException(status_code=401, detail="authentication_required") from None
+        except AuthenticationUnavailable:
+            raise HTTPException(status_code=503, detail="authentication_unavailable") from None
+        now = datetime.now(UTC)
+        token_sha256 = hashlib.sha256(platform_token.encode("utf-8")).hexdigest()
+        async with database.transaction() as session:
+            result = (
+                await session.execute(
+                    select(PlatformUser, PlatformSession)
+                    .join(PlatformSession, PlatformSession.user_id == PlatformUser.id)
+                    .where(
+                        PlatformUser.auth_user_id == tokens.identity.auth_user_id,
+                        PlatformSession.token_sha256 == token_sha256,
+                    )
+                )
+            ).one_or_none()
+            if result is None:
+                raise HTTPException(status_code=401, detail="authentication_required")
+            row, platform_session = result
+            if (
+                row.status != "active"
+                or row.email.casefold() != tokens.identity.email
+                or platform_session.revoked_at is not None
+            ):
+                raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
+            platform_session.last_seen_at = now
+            platform_session.expires_at = now + timedelta(
+                seconds=settings.session_absolute_seconds
+            )
+            actor = Principal(
+                row.id,
+                row.auth_user_id,
+                row.email,
+                row.full_name,
+                row.role,
+                row.last_login_at,
+            )
+        response = JSONResponse(
+            {
+                "authenticated": True,
+                "csrfToken": csrf,
+                "readOnlyMode": settings.private_read_only,
+                "user": {
+                    "id": str(actor.profile_id),
+                    "email": actor.email,
+                    "fullName": actor.full_name,
+                    "role": actor.role,
+                },
+            }
+        )
+        set_auth_cookies(
+            response,
+            tokens.access_token,
+            tokens.refresh_token,
+            csrf,
+            platform_token,
+            tokens.expires_in,
+        )
+        return response
 
     @app.delete("/api/v1/auth/session")
     async def platform_logout(request: Request) -> JSONResponse:
@@ -2249,9 +2328,7 @@ def install_platform_routes(
             )
         return {"updated": True}
 
-    @app.get("/api/v1/market/products")
-    async def market_products(request: Request) -> dict[str, object]:
-        await principal(request)
+    async def market_products_payload() -> dict[str, object]:
         now = datetime.now(UTC)
         async with database.transaction() as session:
             snapshot = (
@@ -2308,6 +2385,69 @@ def install_platform_routes(
                 },
                 "products": products,
             }
+
+    async def market_change_token() -> str:
+        """Return a small projection version without materializing every product."""
+
+        async with database.transaction() as session:
+            snapshot = (
+                await session.execute(
+                    select(CatalogueSnapshot.id, CatalogueSnapshot.environment)
+                    .where(CatalogueSnapshot.region == "india")
+                    .order_by(desc(CatalogueSnapshot.validated_at))
+                    .limit(1)
+                )
+            ).one_or_none()
+            if snapshot is None:
+                return "empty"
+            newest_quote = await session.scalar(
+                select(func.max(MarketQuote.updated_at)).where(
+                    MarketQuote.region == "india",
+                    MarketQuote.environment == snapshot.environment,
+                )
+            )
+            return f"{snapshot.id}:{_utc(newest_quote)}"
+
+    @app.get("/api/v1/market/products")
+    async def market_products(request: Request) -> dict[str, object]:
+        await principal(request)
+        return await market_products_payload()
+
+    @app.get("/api/v1/market/stream")
+    async def market_stream(request: Request) -> StreamingResponse:
+        """Push changed local WebSocket projections without browser polling.
+
+        The public worker remains Delta's sole WebSocket consumer.  This
+        same-origin SSE bridge emits only when the persisted projection
+        changes and sends a cheap heartbeat while idle.
+        """
+
+        await principal(request)
+
+        async def events() -> AsyncIterator[str]:
+            previous_token = ""
+            idle_ticks = 0
+            while not await request.is_disconnected():
+                token = await market_change_token()
+                if token != previous_token or idle_ticks >= 15:
+                    previous_token = token
+                    idle_ticks = 0
+                    payload = await market_products_payload()
+                    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+                    yield f"event: market\ndata: {encoded}\n\n"
+                else:
+                    idle_ticks += 1
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
 
     async def default_watchlist_group(session: AsyncSession, user_id: UUID) -> WatchlistGroup:
         row = await session.scalar(
