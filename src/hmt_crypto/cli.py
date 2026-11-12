@@ -201,7 +201,7 @@ def platform_qualify_live(
     approver_email: Annotated[str, typer.Option("--approver-email")],
     failure_drills_sha256: Annotated[str, typer.Option("--failure-drills-sha256")],
 ) -> None:
-    """Derive and persist approval only from a complete 24-hour evidence window."""
+    """Derive and persist approval only from a complete six-hour evidence window."""
     _run_async(
         lambda: qualify_live_account(
             profile_name=profile_name,

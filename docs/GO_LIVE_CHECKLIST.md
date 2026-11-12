@@ -55,8 +55,9 @@ approval after every preceding mandatory item is complete.
 - [ ] Partial fill, exchange-side/foreign order, foreign position, cancellation, modification, and
       credential-version changes reconcile deterministically.
 - [ ] Funding and fee totals are traceable to stored exchange evidence.
-- [ ] A sustained healthy read-only qualification window is recorded with no unexplained readiness
-      gap. Duration is chosen by the operator/risk owner; elapsed time alone is not acceptance.
+- [ ] A sustained six-hour healthy read-only qualification window is recorded with no unexplained
+      readiness gap. Six hours is the approved operator/risk-owner policy; elapsed time alone is not
+      acceptance.
 
 ## 5. Trading and risk controls
 

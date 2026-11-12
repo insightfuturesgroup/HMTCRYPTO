@@ -11,6 +11,10 @@ from uuid import uuid4
 from sqlalchemy import desc, select
 
 from hmt_crypto.api.settings import ControlRuntimeSettings
+from hmt_crypto.live_qualification_policy import (
+    LIVE_QUALIFICATION_WINDOW,
+    LIVE_QUALIFICATION_WINDOW_HOURS,
+)
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
     Account,
@@ -50,13 +54,13 @@ async def qualify_live_account(
     approver_email: str,
     failure_drills_sha256: str,
 ) -> dict[str, JsonValue]:
-    """Approve only a complete immutable 24-hour evidence window."""
+    """Approve only a complete immutable six-hour evidence window."""
     if not re.fullmatch(r"[0-9a-f]{40}", release_commit):
         raise ValueError("release commit must be a full lowercase SHA")
     if not re.fullmatch(r"[0-9a-f]{64}", failure_drills_sha256):
         raise ValueError("failure-drill evidence must be a SHA-256")
     now = datetime.now(UTC)
-    start = now - timedelta(hours=24)
+    start = now - LIVE_QUALIFICATION_WINDOW
     database = Database(ControlRuntimeSettings().database_runtime_config())
     try:
         async with database.transaction() as session:
@@ -183,6 +187,7 @@ async def qualify_live_account(
                 "catalogueRevision": catalogue.revision,
                 "credentialVersion": lease.credential_version,
                 "failureDrillsSha256": failure_drills_sha256,
+                "qualificationWindowHours": LIVE_QUALIFICATION_WINDOW_HOURS,
                 "reconciliationCount": len(reconciliations),
                 "releaseCommit": release_commit,
                 "riskPolicyVersion": risk.version,

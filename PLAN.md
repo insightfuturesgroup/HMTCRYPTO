@@ -262,7 +262,7 @@ LIVE startup requires all of:
 - Startup reconciliation completed with no unacknowledged discrepancies.
 - Kill switch not latched.
 - Risk policy loaded and valid.
-- For production: the Phase 5 persisted 24-hour qualification is valid and bound to account, region/environment, credential version, egress identity, build/config/schema versions and current reconciliation state; operator acknowledgement of those identities; and a loud structured/console banner.
+- For production: the Phase 5 persisted six-hour qualification is valid and bound to account, region/environment, credential version, egress identity, build/config/schema versions and current reconciliation state; operator acknowledgement of those identities; and a loud structured/console banner.
 
 Tests set a hard `PRODUCTION_WRITES_FORBIDDEN` guard. The production transport itself is write-disabled through Phase 4, not merely guarded in tests. Integration tests may use LIVE semantics only on testnet, behind an explicit pytest marker and environment switch.
 
@@ -776,7 +776,7 @@ Reduce-only risk-reducing actions remain possible during most halts, subject to 
 ### Task 5.6: Machine-enforced production qualification
 
 - [ ] Persist a qualification record bound to Delta user/account, region/environment, credential version/fingerprint, proxy/egress identity, build/config/schema versions, product allowlist and risk-policy version.
-- [ ] Accumulate at least 24 continuous hours of production **read-only** evidence: healthy REST/WS, current catalogue/quotes/private state, reconciliations, scheduler/leader health, rate budget, no unresolved operations and no unacknowledged external exposure.
+- [ ] Accumulate at least six continuous hours of production **read-only** evidence: healthy REST/WS, current catalogue/quotes/private state, reconciliations, scheduler/leader health, rate budget, no unresolved operations and no unacknowledged external exposure.
 - [ ] Invalidate qualification on critical gaps, credential/egress/build/config/schema/risk changes, leadership ambiguity, unresolved operations, unmanaged exposure or failed reconciliation. A restart may resume only from persisted continuous evidence whose identities still match.
 - [ ] Check valid qualification in both risk and transport immediately before every future production risk-increasing order.
 - [ ] Keep the production activation latch false. Implementing/passing qualification does not itself authorize an order; activation requires a separate reviewed operator action after Phase 5.
@@ -788,7 +788,7 @@ Reduce-only risk-reducing actions remain possible during most halts, subject to 
 - [ ] Document region/environment separation and key rotation while flat.
 - [ ] Document the server-only credential provider/rotation CLI and state clearly that browser onboarding never receives keys.
 - [ ] Add a safe go-live checklist: clean account reconciliation, no unmanaged exposure, clock/NTP, IP allowlist, fresh catalogue, risk values, kill drill, restart drill, WS/REST soak, alert test, backup restore, low-size testnet proof, production read-only soak, explicit human approval.
-- [ ] Document the machine-enforced 24-hour production qualification and every invalidation condition.
+- [ ] Document the machine-enforced six-hour production qualification and every invalidation condition.
 - [ ] Document a separately approved staged activation beginning at minimum supported size/product allowlist; do not perform that activation in this task.
 
 ### Task 5.8: Final verification

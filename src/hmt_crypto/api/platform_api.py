@@ -46,6 +46,7 @@ from hmt_crypto.api.platform_auth import (
 )
 from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlApiSettings
+from hmt_crypto.live_qualification_policy import qualification_window_is_complete
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.errors import PersistenceError
@@ -456,9 +457,7 @@ def install_platform_routes(
             ):
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
             platform_session.last_seen_at = now
-            platform_session.expires_at = now + timedelta(
-                seconds=settings.session_absolute_seconds
-            )
+            platform_session.expires_at = now + timedelta(seconds=settings.session_absolute_seconds)
             return Principal(
                 row.id,
                 row.auth_user_id,
@@ -507,7 +506,10 @@ def install_platform_routes(
             return False, "qualification_missing", evidence, streams
         if evidence.window_completed_at is None:
             return False, "qualification_missing", evidence, streams
-        if evidence.window_completed_at - evidence.window_started_at < timedelta(hours=24):
+        if not qualification_window_is_complete(
+            started_at=evidence.window_started_at,
+            completed_at=evidence.window_completed_at,
+        ):
             return False, "qualification_window_incomplete", evidence, streams
         return True, "qualified", evidence, streams
 
@@ -792,9 +794,7 @@ def install_platform_routes(
             ):
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
             platform_session.last_seen_at = now
-            platform_session.expires_at = now + timedelta(
-                seconds=settings.session_absolute_seconds
-            )
+            platform_session.expires_at = now + timedelta(seconds=settings.session_absolute_seconds)
             actor = Principal(
                 row.id,
                 row.auth_user_id,
@@ -2415,7 +2415,8 @@ def install_platform_routes(
                     MarketQuote.environment == snapshot.environment,
                 )
             )
-            return f"{snapshot.id}:{_utc(newest_quote)}"
+            quote_revision = _utc(newest_quote) if newest_quote is not None else "none"
+            return f"{snapshot.id}:{quote_revision}"
 
     @app.get("/api/v1/market/products")
     async def market_products(request: Request) -> dict[str, object]:

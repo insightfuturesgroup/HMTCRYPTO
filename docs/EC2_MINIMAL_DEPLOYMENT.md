@@ -161,7 +161,7 @@ alone are not an activation control.
 ## Evidence-derived Live qualification
 
 Phase 22 stores private-stream observations as append-only evidence. Do not qualify from a health
-snapshot or elapsed wall time. After at least 24 continuous hours, record the reviewed failure-drill
+snapshot or elapsed wall time. After at least six continuous hours, record the reviewed failure-drill
 bundle digest and run the qualification command from the reviewed API image:
 
 ```bash

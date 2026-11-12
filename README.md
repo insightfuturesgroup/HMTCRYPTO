@@ -338,7 +338,7 @@ Production stays read-only until all items are evidenced:
 - cancel-only and cancel-and-flatten testnet kill drills;
 - Supabase migration, least-privilege roles, backup and restore proof;
 - alerts and operator runbook tested;
-- at least 24 continuous hours of bound production read-only qualification;
+- at least six continuous hours of bound production read-only qualification;
 - explicit human approval for a separately reviewed minimum-size staged activation.
 
 This project does not perform that activation.

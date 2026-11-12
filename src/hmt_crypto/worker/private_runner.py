@@ -24,6 +24,7 @@ from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion, ExecutionMode
 from hmt_crypto.exchange.delta.signer import DeltaSigner
+from hmt_crypto.live_qualification_policy import qualification_window_is_complete
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
@@ -366,7 +367,10 @@ async def _dispatch_qualification_is_current(
     if (
         evidence is None
         or evidence.window_completed_at is None
-        or evidence.window_completed_at - evidence.window_started_at < timedelta(hours=24)
+        or not qualification_window_is_complete(
+            started_at=evidence.window_started_at,
+            completed_at=evidence.window_completed_at,
+        )
     ):
         return False
     return {row.channel for row in streams} == {
