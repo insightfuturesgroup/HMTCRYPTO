@@ -3024,20 +3024,49 @@ function RiskPage({
   const [maxOpen, setMaxOpen] = useState("5");
   const [maxSignals, setMaxSignals] = useState("5");
   const [usdInrRate, setUsdInrRate] = useState("100");
-  const [products, setProducts] = useState("");
+  const [catalogueProducts, setCatalogueProducts] = useState<Product[]>([]);
+  const [productIds, setProductIds] = useState<number[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
-    void request<{ accounts: Account[] }>("/api/v1/accounts").then((v) => {
-      setAccounts(v.accounts);
-      setAccountId(v.accounts[0]?.id ?? "");
+    void Promise.all([
+      request<{ accounts: Account[] }>("/api/v1/accounts"),
+      networkRequest<{ products: Product[] }>("/api/v1/market/products"),
+    ]).then(([accountResult, marketResult]) => {
+      const eligible = marketResult.products.filter((product) =>
+        ["BTCUSD", "ETHUSD"].includes(product.symbol),
+      );
+      setAccounts(accountResult.accounts);
+      setAccountId(accountResult.accounts[0]?.id ?? "");
+      setCatalogueProducts(eligible);
+      setProductIds(eligible.map((product) => product.productId));
     });
   }, []);
+  useEffect(() => {
+    if (!accountId) return;
+    void networkRequest<{
+      configured: boolean;
+      policy: null | {
+        maxOrderLimitInr: string;
+        maxPositionLimitInr: string;
+        maxDailyLossLimitInr: string;
+        maxOpenOrders: number;
+        maxInflightSignals: number;
+        usdInrRate: string;
+        allowedProductIds: number[];
+      };
+    }>(`/api/v1/risk/${accountId}`).then((result) => {
+      if (!result.configured || result.policy === null) return;
+      setMaxOrder(result.policy.maxOrderLimitInr);
+      setMaxPosition(result.policy.maxPositionLimitInr);
+      setMaxLoss(result.policy.maxDailyLossLimitInr);
+      setMaxOpen(String(result.policy.maxOpenOrders));
+      setMaxSignals(String(result.policy.maxInflightSignals));
+      setUsdInrRate(result.policy.usdInrRate);
+      setProductIds(result.policy.allowedProductIds);
+    });
+  }, [accountId]);
   async function save(event: FormEvent) {
     event.preventDefault();
-    const allowed = products
-      .split(",")
-      .map((v) => Number(v.trim()))
-      .filter((v) => Number.isInteger(v) && v > 0);
     try {
       await request(
         `/api/v1/risk/${accountId}`,
@@ -3050,7 +3079,7 @@ function RiskPage({
             max_open_orders: Number(maxOpen),
             max_inflight_signals: Number(maxSignals),
             usd_inr_rate: usdInrRate,
-            allowed_product_ids: allowed,
+            allowed_product_ids: productIds,
             enabled: true,
           }),
         },
@@ -3059,10 +3088,16 @@ function RiskPage({
       setNotice(
         "Risk policy saved. Live gates were reset and must be enabled separately.",
       );
-    } catch {
-      setNotice(
-        "Risk policy was rejected. Confirm catalogue product IDs and limits.",
-      );
+    } catch (error) {
+      const code = error instanceof RequestError ? error.code : "request_failed";
+      const messages: Record<string, string> = {
+        fresh_authentication_required: "Sign in again before changing the Live risk policy.",
+        catalogue_not_ready: "The current Delta catalogue is not ready. Retry after the feed refreshes.",
+        invalid_product_scope: "Select both approved Delta products from the current catalogue.",
+        symbol_not_allowed: "Only BTCUSD and ETHUSD are approved for this qualification.",
+        risk_scope_requires_requalification: "Use the approved INR limits, ₹100/USD rate, and five-order/five-signal caps.",
+      };
+      setNotice(messages[code] ?? `Risk policy was rejected (${code}).`);
     }
   }
   return (
@@ -3144,19 +3179,36 @@ function RiskPage({
             value={maxOpen}
           />
         </label>
-        <label className="md:col-span-2">
-          Allowed product IDs, comma separated
-          <input
-            className="block w-full rounded border px-3 py-2"
-            onChange={(e) => setProducts(e.target.value)}
-            placeholder="27, 3136"
-            value={products}
-          />
-        </label>
+        <fieldset className="rounded border p-3 md:col-span-2">
+          <legend className="px-1 font-medium">Approved Delta products</legend>
+          {catalogueProducts.map((product) => (
+            <label className="mr-6 inline-flex items-center gap-2" key={product.productId}>
+              <input
+                checked={productIds.includes(product.productId)}
+                onChange={(event) =>
+                  setProductIds((current) =>
+                    event.target.checked
+                      ? [...new Set([...current, product.productId])]
+                      : current.filter((value) => value !== product.productId),
+                  )
+                }
+                type="checkbox"
+              />
+              {product.symbol}
+            </label>
+          ))}
+          {catalogueProducts.length === 0 ? (
+            <p className="text-red-700">BTCUSD and ETHUSD are unavailable in the current catalogue.</p>
+          ) : null}
+        </fieldset>
         {user.role === "admin" ? (
           <button
             className="rounded bg-blue-600 px-4 py-2 text-white md:col-span-2"
-            disabled={!accountId}
+            disabled={
+              !accountId ||
+              catalogueProducts.length !== 2 ||
+              productIds.length !== 2
+            }
             type="submit"
           >
             Save and enable risk policy
