@@ -223,7 +223,7 @@
 }
 
 /* HMT desktop navigation and crypto workspace */
-@media (min-width: 1620px) {
+@media (min-width: 1280px) {
   .hmt-header { height: 64px; gap: 10px; padding: 0 14px; }
   .hmt-primary-navigation { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 0; }
   .hmt-nav-link { min-height: 38px; padding: 7px 8px; font-size: 13px; }
@@ -583,7 +583,7 @@
 .kill-dialog__engage:hover:not(:disabled) { background: #b91c1c; }
 .kill-dialog__primary:disabled, .kill-dialog__engage:disabled { cursor: not-allowed; background: #98a2b3; }
 
-@media (max-width: 1619px) {
+@media (max-width: 1279px) {
   .hmt-menu-button { display: inline-grid; }
   .hmt-mobile-watchlist { display: inline-grid; }
   .market-rail { position: fixed; z-index: 70; top: 60px; right: 0; bottom: 0; width: min(92vw, 360px); transform: translateX(102%); box-shadow: -8px 0 24px rgb(24 34 48 / .16); transition: transform 160ms ease; }
