@@ -49,7 +49,7 @@ STATEMENTS: Sequence[tuple[str, str]] = (
         """
         INSERT INTO hmt_crypto.watchlist_groups
             (id, user_id, name, position, created_at, updated_at)
-        SELECT md5(user_id::text || ':watchlist-1')::uuid,
+        SELECT md5(user_id::text || chr(58) || 'watchlist-1')::uuid,
                user_id, 'Watchlist 1', 0, min(created_at), now()
         FROM hmt_crypto.watchlist_items
         GROUP BY user_id
@@ -59,7 +59,7 @@ STATEMENTS: Sequence[tuple[str, str]] = (
         "backfill_items",
         """
         UPDATE hmt_crypto.watchlist_items AS item
-        SET group_id = md5(item.user_id::text || ':watchlist-1')::uuid,
+        SET group_id = md5(item.user_id::text || chr(58) || 'watchlist-1')::uuid,
             position = ranked.position
         FROM (
             SELECT id, row_number() OVER

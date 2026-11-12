@@ -243,6 +243,13 @@ def test_hardening_function_sql_has_no_unintended_text_bind_parameters() -> None
         assert not sa.text(statement).compile().params
 
 
+def test_phase23_backfill_salt_is_not_an_unbound_sqlalchemy_parameter() -> None:
+    source = (VERSIONS / "phase23_hmt_ui_watchlists_v1.py").read_text(encoding="utf-8")
+
+    assert ":watchlist" not in source
+    assert source.count("chr(58) || 'watchlist-1'") == 2
+
+
 def test_frozen_history_verifier_has_no_rewrite_mode(tmp_path: Path) -> None:
     copied_tool = tmp_path / "tools" / "generate_migration_baseline.py"
     copied_tool.parent.mkdir(parents=True)
