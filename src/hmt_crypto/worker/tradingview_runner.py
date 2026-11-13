@@ -35,6 +35,7 @@ from hmt_crypto.persistence.models import (
     TradingViewSignal,
     TradingViewStrategy,
 )
+from hmt_crypto.worker.scope import normalize_worker_uuid
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,13 +67,10 @@ async def admit_one_tradingview_signal(
     database: Database, *, account_id: UUID, owner_id: UUID
 ) -> TradingViewCycleResult:
     """Admit at most one signal under the current lease and exchange snapshot."""
-    if (
-        type(account_id) is not UUID
-        or account_id.int == 0
-        or type(owner_id) is not UUID
-        or owner_id.int == 0
-    ):
-        raise ValueError("invalid TradingView worker scope")
+    account_id = normalize_worker_uuid(
+        account_id, message="invalid TradingView worker scope"
+    )
+    owner_id = normalize_worker_uuid(owner_id, message="invalid TradingView worker scope")
     now = datetime.now(UTC)
     async with database.transaction() as session:
         signal = await session.scalar(

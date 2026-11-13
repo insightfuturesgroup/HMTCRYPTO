@@ -29,6 +29,7 @@ from hmt_crypto.persistence.models import (
     PrivateWorkerLease,
     ProtectionGroup,
 )
+from hmt_crypto.worker.scope import normalize_worker_uuid
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,13 +62,8 @@ async def evaluate_one_gtt(
     database: Database, *, account_id: UUID, owner_id: UUID
 ) -> GttCycleResult:
     """Evaluate at most one armed GTT and atomically queue its exit when triggered."""
-    if (
-        type(account_id) is not UUID
-        or account_id.int == 0
-        or type(owner_id) is not UUID
-        or owner_id.int == 0
-    ):
-        raise ValueError("invalid GTT worker scope")
+    account_id = normalize_worker_uuid(account_id, message="invalid GTT worker scope")
+    owner_id = normalize_worker_uuid(owner_id, message="invalid GTT worker scope")
     now = datetime.now(UTC)
     async with database.transaction() as session:
         lease = await session.scalar(
