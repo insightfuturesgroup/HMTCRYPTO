@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-LIVE_QUALIFICATION_WINDOW_HOURS = 6
+LIVE_QUALIFICATION_WINDOW_HOURS = 1
 LIVE_QUALIFICATION_WINDOW = timedelta(hours=LIVE_QUALIFICATION_WINDOW_HOURS)
 LIVE_RECONCILIATION_MAX_GAP_SECONDS = 60
 # Store unchanged reconciliation evidence frequently enough that ordinary

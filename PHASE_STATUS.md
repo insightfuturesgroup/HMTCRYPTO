@@ -96,7 +96,7 @@ remain locked during remediation and qualification.
 ## Remaining work
 
 UI parity, workflow stabilization, full-suite verification, production acceptance, and the
-machine-enforced six-hour operational qualification remain incomplete. Release remains **NO-GO for live entries** until all mandatory gates
+machine-enforced one-hour operational qualification remain incomplete. Release remains **NO-GO for live entries** until all mandatory gates
 in `docs/GO_LIVE_CHECKLIST.md` are evidenced for the exact commit, images, schema head, credentials,
 Elastic IP, account, product allowlist, and risk configuration.
 

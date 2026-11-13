@@ -55,7 +55,7 @@ async def qualify_live_account(
     approver_email: str,
     failure_drills_sha256: str,
 ) -> dict[str, JsonValue]:
-    """Approve only a complete immutable six-hour evidence window."""
+    """Approve only a complete immutable one-hour evidence window."""
     if not re.fullmatch(r"[0-9a-f]{40}", release_commit):
         raise ValueError("release commit must be a full lowercase SHA")
     if not re.fullmatch(r"[0-9a-f]{64}", failure_drills_sha256):
