@@ -14,6 +14,7 @@ from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_WINDOW,
     LIVE_QUALIFICATION_WINDOW_HOURS,
+    LIVE_RECONCILIATION_MAX_GAP_SECONDS,
 )
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
@@ -179,7 +180,10 @@ async def qualify_live_account(
                 and row.worker_generation == lease.generation
             ]
             if len(ready_reconciliations) != len(reconciliations) or not _continuous(
-                ready_reconciliations, start=start, end=now, gap=60
+                ready_reconciliations,
+                start=start,
+                end=now,
+                gap=LIVE_RECONCILIATION_MAX_GAP_SECONDS,
             ):
                 raise ValueError("reconciliation qualification window is not continuous")
             payload: dict[str, object] = {

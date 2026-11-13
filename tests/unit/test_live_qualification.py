@@ -3,6 +3,8 @@ from datetime import UTC, datetime, timedelta
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_WINDOW,
     LIVE_QUALIFICATION_WINDOW_HOURS,
+    LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS,
+    LIVE_RECONCILIATION_MAX_GAP_SECONDS,
     qualification_window_is_complete,
 )
 from hmt_crypto.qualification import _continuous
@@ -11,6 +13,15 @@ from hmt_crypto.qualification import _continuous
 def test_live_qualification_window_is_six_hours() -> None:
     assert LIVE_QUALIFICATION_WINDOW_HOURS == 6
     assert LIVE_QUALIFICATION_WINDOW == timedelta(hours=6)
+
+
+def test_reconciliation_evidence_cadence_fits_continuity_policy() -> None:
+    assert LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS == 30
+    assert LIVE_RECONCILIATION_MAX_GAP_SECONDS == 60
+    assert (
+        LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS
+        < LIVE_RECONCILIATION_MAX_GAP_SECONDS
+    )
 
 
 def test_live_qualification_window_rejects_five_hours_fifty_nine_minutes() -> None:

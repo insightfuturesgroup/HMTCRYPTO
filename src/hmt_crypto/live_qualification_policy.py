@@ -6,6 +6,10 @@ from datetime import datetime, timedelta
 
 LIVE_QUALIFICATION_WINDOW_HOURS = 6
 LIVE_QUALIFICATION_WINDOW = timedelta(hours=LIVE_QUALIFICATION_WINDOW_HOURS)
+LIVE_RECONCILIATION_MAX_GAP_SECONDS = 60
+# Store unchanged reconciliation evidence frequently enough that ordinary
+# worker scheduling jitter cannot violate the qualification continuity bound.
+LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS = 30
 
 
 def qualification_window_is_complete(*, started_at: datetime, completed_at: datetime) -> bool:
@@ -16,5 +20,7 @@ def qualification_window_is_complete(*, started_at: datetime, completed_at: date
 __all__ = [
     "LIVE_QUALIFICATION_WINDOW",
     "LIVE_QUALIFICATION_WINDOW_HOURS",
+    "LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS",
+    "LIVE_RECONCILIATION_MAX_GAP_SECONDS",
     "qualification_window_is_complete",
 ]

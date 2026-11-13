@@ -24,7 +24,10 @@ from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion, ExecutionMode
 from hmt_crypto.exchange.delta.signer import DeltaSigner
-from hmt_crypto.live_qualification_policy import qualification_window_is_complete
+from hmt_crypto.live_qualification_policy import (
+    LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS,
+    qualification_window_is_complete,
+)
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
@@ -235,7 +238,8 @@ async def _publish(
             or latest.credential_version != claim.credential_version
             or latest.worker_owner_id != process.owner_id
             or latest.worker_generation != claim.generation
-            or latest.observed_at <= now - timedelta(minutes=5)
+            or latest.observed_at
+            <= now - timedelta(seconds=LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS)
         )
         if publish_snapshot:
             session.add(
