@@ -1,5 +1,80 @@
 # HMT-Crypto Implementation Plan
 
+## Current Resume Context — 2026-11-15
+
+> **Read this section first after context compaction.** It is the authoritative handoff for current work and supersedes conflicting historical status below. Reverify EC2 runtime state before any production action.
+
+### Repository and production baseline
+
+- Working repository: `/private/tmp/HMTCRYPTO-review`.
+- Release baseline before the final activation fix: `103942459334b72b63ad04dae895c62bd81c7cbd` (`feat(reports): add TradingView signal logs`). Always verify `git status --short` and `git rev-parse HEAD` before editing or releasing.
+- Production application: `https://crypto.helpmetrade.club`, using Delta Exchange India production.
+- Initial production account: `Hitashi`, ID `32468e34-b2a5-4d5e-9a82-64aa3e8ab148`.
+- EC2 deployment uses `docker-compose.ec2.yml` plus `/etc/hmt/docker-compose.activation.yml` when Live activation settings are required.
+- Health, reconciliation, and private streams were last reported ready. This is historical evidence, not proof of current readiness.
+
+### Final Live Activation Fix — implemented
+
+- Admitted submissions no longer expire merely because they waited more than 15 seconds for a worker claim. Claim fencing, idempotency, quote freshness, and uncertain-operation recovery remain enforced.
+- Risk-policy and product-allowlist updates preserve the current entry and exit gate values.
+- Protective exits are independent from entry qualification. A closed entry gate limits claims to reduce-only submissions; GTT remains governed by the protective-exit gate and fresh reconciliation/lease/quote evidence.
+- Qualification evidence is bound to account, Delta region/environment, and credential version. It is not invalidated solely by a source commit, image, or configuration hash change.
+- `QUALIFICATION_MIN_MINUTES` is the single qualification-duration control, defaults to `0`, accepts `0..1440`, and produces an immutable audit event when a non-default value is used.
+- A write-enabled private worker automatically creates current binding evidence and opens eligible gates after credentials, lease, reconciliation, all private channels, risk policy, allowed-product quotes, and unresolved-operation checks pass. An emergency/kill-switch entry lock is never overridden.
+- `POST /api/v1/admin/accounts/{account_id}/force-open-gates` is Admin-only, CSRF-protected, fresh-auth protected, and audited. Failed prerequisites return a stable conflict code and the rejection audit is committed before the response is raised.
+- Automatic and forced activation do not retry or bypass `UNCERTAIN` submissions/actions.
+
+### Failure modes resolved by this release
+
+- Delayed admitted submissions remain claimable exactly once rather than becoming permanently pending after 15 seconds.
+- Entry qualification is not applied to protective exits or GTT.
+- Product/risk edits and ordinary deployments do not silently close account gates.
+- Startup activation and force-open share explicit health prerequisites and stable failure codes.
+- `UNCERTAIN` work remains recovery debt and blocks new mutation claims until reconciled by client/exchange identity.
+
+### Crypto Symbol Trading Settings
+
+- Do not copy NFO candle or ATR fields; this portal does not require candle settings.
+- Per-symbol fields: enabled, default whole contracts, default order type, stop-loss percentage, target percentage, trailing percentage, TradingView symbol mapping, global/account override, version, and audit metadata.
+- Store settings in the private `hmt_crypto` schema; FastAPI remains the only authority. Add an Alembic migration only after checking the current migration head.
+- Provide authorized `GET` and `PUT /api/v1/admin/symbol-settings` endpoints, or an equivalent consistent route, with Admin permission, CSRF protection, catalogue validation, stable errors, and immutable audit.
+- Symbol settings must never expand the risk allowlist or qualification scope.
+- UI requirements: search, global/account selector, bulk update, save, refresh, export, and inherited-versus-override display.
+
+### UI scope still required
+
+- Orders: HMT table/filter layout, multi-account Place Order modal, visible dispatch state, permitted edit/cancel actions, compact decimals, and time below the date.
+- Positions: HMT filters/table and immediate reduce-only exit.
+- GTT: HMT modal with multi-account selection, symbol search, Single/OCO, SL/target/trailing fields, and protective-exit readiness.
+- TradingView: create, edit, pause/resume, rotate, revoke, account/symbol mapping, payload example, and signal logs.
+- Reports: TradingView Logs under Reports.
+- Menus and modals must close correctly and must not overlap or render inside clipped table containers.
+
+### Owner-approved activation override and retained safety
+
+- Qualification has no mandatory elapsed-time wait by default and no commit/build/config-hash binding. This owner decision overrides conflicting historical qualification-duration and commit-binding text below.
+- New entries still require dispatch enabled, current account/venue/credential binding evidence, an enabled risk policy, fresh quotes/reconciliation/private streams, no unresolved operation, and open entry gates.
+- Protective reduce-only exits use separate readiness and must not be blocked by entry qualification.
+- Automated tests must not call Delta mutation endpoints or place real orders.
+- `UNCERTAIN` submissions must be reconciled by client/exchange order ID before any retry.
+- Never expose Delta, AWS, or database secrets, or private-schema access, to the browser.
+
+### Acceptance before release
+
+- Focused activation tests: 31 passed.
+- Complete unit suite: 5,503 passed. The suite uses mocked/fake exchange mutation boundaries and did not call Delta mutation endpoints.
+- Ruff checks and formatting, Python compilation, diff whitespace checks, and wheel/sdist artifact tests pass.
+- Verify the deployed commit, merged Compose environment, health, worker generation, credential version, lease, reconciliation, and all private channels.
+- A minimum Live order or TradingView signal is an explicit operator acceptance action, not an automated test.
+
+### Resume workflow
+
+1. Read this section and run `git status --short` and `git rev-parse HEAD`.
+2. Inspect current implementations and tests before changing schemas or APIs.
+3. Fix backend state transitions and stable error responses before updating UI behavior.
+4. Add migration/API/UI changes, then run focused and full validation.
+5. Create one reviewed commit and deploy matching API, UI, and worker images. A successful build alone is not Live readiness.
+
 > **Implementation status (2026-11-06):** Phases 0–5 have an offline implementation baseline.
 > Environment-dependent qualification and deliberately disabled exchange-writing/private-stream
 > activation are tracked in [`PHASE_STATUS.md`](./PHASE_STATUS.md) and

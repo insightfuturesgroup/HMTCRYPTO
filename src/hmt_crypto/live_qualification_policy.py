@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-LIVE_QUALIFICATION_WINDOW_HOURS = 1
-LIVE_QUALIFICATION_WINDOW = timedelta(hours=LIVE_QUALIFICATION_WINDOW_HOURS)
+
+def _qualification_min_minutes() -> int:
+    raw = os.environ.get("QUALIFICATION_MIN_MINUTES", "0").strip()
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise RuntimeError("QUALIFICATION_MIN_MINUTES must be an integer") from error
+    if not 0 <= value <= 24 * 60:
+        raise RuntimeError("QUALIFICATION_MIN_MINUTES must be between 0 and 1440")
+    return value
+
+
+LIVE_QUALIFICATION_MIN_MINUTES = _qualification_min_minutes()
+LIVE_QUALIFICATION_WINDOW = timedelta(minutes=LIVE_QUALIFICATION_MIN_MINUTES)
+# Kept for response compatibility while clients migrate to the minute field.
+LIVE_QUALIFICATION_WINDOW_HOURS = LIVE_QUALIFICATION_MIN_MINUTES / 60
 LIVE_RECONCILIATION_MAX_GAP_SECONDS = 60
 # Store unchanged reconciliation evidence frequently enough that ordinary
 # worker scheduling jitter cannot violate the qualification continuity bound.
@@ -18,6 +33,11 @@ def _canonical_decimal(value: object) -> str:
     normalized = Decimal(str(value)).normalize()
     rendered = format(normalized, "f")
     return "0" if Decimal(rendered) == 0 else rendered
+
+
+def _canonical_integer(value: object) -> int:
+    """Parse an integer policy value without weakening static type checks."""
+    return int(str(value))
 
 
 def canonical_risk_policy_scope(
@@ -39,8 +59,8 @@ def canonical_risk_policy_scope(
         "maxOrderNotional": _canonical_decimal(max_order_notional),
         "maxPositionNotional": _canonical_decimal(max_position_notional),
         "maxDailyLoss": _canonical_decimal(max_daily_loss),
-        "maxOpenOrders": int(max_open_orders),
-        "maxInflightSignals": int(max_inflight_signals),
+        "maxOpenOrders": _canonical_integer(max_open_orders),
+        "maxInflightSignals": _canonical_integer(max_inflight_signals),
     }
 
 
@@ -70,6 +90,7 @@ __all__ = [
     "APPROVED_LIVE_RISK_SCOPE",
     "LIVE_QUALIFICATION_WINDOW",
     "LIVE_QUALIFICATION_WINDOW_HOURS",
+    "LIVE_QUALIFICATION_MIN_MINUTES",
     "LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS",
     "LIVE_RECONCILIATION_MAX_GAP_SECONDS",
     "canonical_risk_policy_scope",

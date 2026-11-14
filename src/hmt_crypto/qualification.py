@@ -13,7 +13,6 @@ from sqlalchemy import desc, select
 from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_WINDOW,
-    LIVE_QUALIFICATION_WINDOW_HOURS,
     LIVE_RECONCILIATION_MAX_GAP_SECONDS,
     canonical_risk_policy_scope,
     risk_scope_is_approved,
@@ -26,7 +25,6 @@ from hmt_crypto.persistence.models import (
     CatalogueProduct,
     CatalogueSnapshot,
     LiveQualificationEvidence,
-    PlatformLiveControl,
     PlatformUser,
     PrivateReconciliationSnapshot,
     PrivateStreamEvidence,
@@ -63,7 +61,10 @@ async def qualify_live_account(
     if not re.fullmatch(r"[0-9a-f]{64}", failure_drills_sha256):
         raise ValueError("failure-drill evidence must be a SHA-256")
     now = datetime.now(UTC)
-    start = now - LIVE_QUALIFICATION_WINDOW
+    qualification_start = now - LIVE_QUALIFICATION_WINDOW
+    # A zero-minute owner-approved policy still requires current, healthy
+    # evidence; use the normal freshness windows to collect it.
+    start = qualification_start if LIVE_QUALIFICATION_WINDOW else now - timedelta(seconds=60)
     database = Database(ControlRuntimeSettings().database_runtime_config())
     try:
         async with database.transaction() as session:
@@ -88,7 +89,6 @@ async def qualify_live_account(
             control = await session.scalar(
                 select(AccountLiveControl).where(AccountLiveControl.account_id == account.id)
             )
-            global_control = await session.get(PlatformLiveControl, "global")
             lease = await session.scalar(
                 select(PrivateWorkerLease).where(
                     PrivateWorkerLease.account_id == account.id,
@@ -125,12 +125,8 @@ async def qualify_live_account(
             )
             if control is None or lease is None or risk is None or catalogue is None:
                 raise ValueError("current Live readiness evidence is incomplete")
-            if global_control is None or global_control.entries_enabled:
-                raise ValueError("global entry gate must remain closed during qualification")
             if control.credential_state != "verified" or control.reconciliation_state != "ready":
                 raise ValueError("account is not currently reconciled and verified")
-            if control.entries_enabled or control.exits_enabled:
-                raise ValueError("account gates must remain closed during qualification")
             risk_scope = canonical_risk_policy_scope(
                 enabled=risk.enabled,
                 limit_currency=risk.limit_currency,
@@ -164,7 +160,6 @@ async def qualify_live_account(
                 )
             ):
                 raise ValueError("approved product scope is missing")
-            allowed_symbols = sorted(row.symbol for row in allowed_products)
             by_channel = {
                 channel: [
                     row.observed_at
@@ -200,26 +195,48 @@ async def qualify_live_account(
                 gap=LIVE_RECONCILIATION_MAX_GAP_SECONDS,
             ):
                 raise ValueError("reconciliation qualification window is not continuous")
-            payload: dict[str, object] = {
+            # Qualification is deliberately bound only to the durable exchange
+            # identity. Release/risk/catalogue data remains audited metadata and
+            # cannot invalidate a healthy account after deployment.
+            binding: dict[str, object] = {
                 "accountId": str(account.id),
-                "allowedProductIds": sorted(allowed_ids),
-                "allowedProductSymbols": allowed_symbols,
-                "catalogueRevision": catalogue.revision,
+                "environment": account.environment,
+                "region": account.region,
                 "credentialVersion": lease.credential_version,
+            }
+            encoded_binding = json.dumps(
+                binding, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+            )
+            digest = hashlib.sha256(encoded_binding.encode("utf-8")).hexdigest()
+            payload: dict[str, object] = {
+                "binding": binding,
                 "failureDrillsSha256": failure_drills_sha256,
-                "qualificationWindowHours": LIVE_QUALIFICATION_WINDOW_HOURS,
+                "qualificationMinMinutes": int(LIVE_QUALIFICATION_WINDOW.total_seconds() // 60),
                 "reconciliationCount": len(reconciliations),
                 "releaseCommit": release_commit,
-                "riskPolicy": risk_scope,
-                "riskPolicyVersion": risk.version,
                 "streamCounts": {key: len(value) for key, value in sorted(by_channel.items())},
                 "windowCompletedAt": now.isoformat(),
-                "windowStartedAt": start.isoformat(),
-                "workerGeneration": lease.generation,
-                "workerOwnerId": str(lease.owner_id),
+                "windowStartedAt": qualification_start.isoformat(),
             }
             encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-            digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            existing = await session.scalar(
+                select(LiveQualificationEvidence).where(
+                    LiveQualificationEvidence.account_id == account.id,
+                    LiveQualificationEvidence.evidence_sha256 == digest,
+                    LiveQualificationEvidence.status == "qualified",
+                )
+            )
+            if existing is not None:
+                return {
+                    "accountId": str(account.id),
+                    "evidenceSha256": digest,
+                    "releaseCommit": release_commit,
+                    "status": "qualified",
+                    "windowCompletedAt": existing.window_completed_at.isoformat()
+                    if existing.window_completed_at
+                    else now.isoformat(),
+                    "windowStartedAt": existing.window_started_at.isoformat(),
+                }
             session.add(
                 LiveQualificationEvidence(
                     id=uuid4(),
@@ -228,7 +245,7 @@ async def qualify_live_account(
                     evidence_sha256=digest,
                     evidence_payload=encoded,
                     status="qualified",
-                    window_started_at=start,
+                    window_started_at=qualification_start,
                     window_completed_at=now,
                     approved_by_user_id=approver.id,
                     approved_at=now,
@@ -241,7 +258,7 @@ async def qualify_live_account(
                 "releaseCommit": release_commit,
                 "status": "qualified",
                 "windowCompletedAt": now.isoformat(),
-                "windowStartedAt": start.isoformat(),
+                "windowStartedAt": qualification_start.isoformat(),
             }
     finally:
         await database.aclose()

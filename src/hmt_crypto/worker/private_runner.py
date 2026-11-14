@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -25,18 +26,24 @@ from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion, ExecutionMode
 from hmt_crypto.exchange.delta.signer import DeltaSigner
 from hmt_crypto.live_qualification_policy import (
+    LIVE_QUALIFICATION_MIN_MINUTES,
     LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS,
-    qualification_window_is_complete,
 )
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
     Account,
     AccountLiveControl,
+    AccountRiskPolicy,
     CatalogueProduct,
     CatalogueSnapshot,
     CredentialSecretReference,
+    LiveOrderAction,
+    LiveOrderSubmission,
     LiveQualificationEvidence,
+    MarketQuote,
+    PlatformAuditEvent,
+    PlatformLiveControl,
     PrivateReconciliationSnapshot,
     PrivateStreamEvidence,
     PrivateWorkerLease,
@@ -92,6 +99,233 @@ class _Claim:
     product_ids: frozenset[int]
 
 
+async def _auto_activate_healthy_account(
+    database: Database,
+    process: PrivateWorkerSettings,
+    claim: _Claim,
+    execution: LiveExecutionSettings,
+) -> str:
+    """Qualify and open a healthy account without weakening emergency controls."""
+    if process.read_only or not execution.enabled:
+        return "deployment_locked"
+    now = datetime.now(UTC)
+    binding_payload: str | None = None
+    async with database.transaction() as session:
+        account = await session.get(Account, claim.account_id)
+        lease = await session.scalar(
+            select(PrivateWorkerLease).where(
+                PrivateWorkerLease.account_id == claim.account_id,
+                PrivateWorkerLease.owner_id == process.owner_id,
+                PrivateWorkerLease.generation == claim.generation,
+                PrivateWorkerLease.credential_version == claim.credential_version,
+                PrivateWorkerLease.lease_until > now,
+            )
+        )
+        control = await session.scalar(
+            select(AccountLiveControl)
+            .where(AccountLiveControl.account_id == claim.account_id)
+            .with_for_update()
+        )
+        global_control = await session.get(PlatformLiveControl, "global", with_for_update=True)
+        if account is None or control is None or global_control is None:
+            return "live_control_unavailable"
+        if account.environment != "prod" or account.mode != "LIVE":
+            return "account_not_live"
+        if control.credential_state != "verified" or lease is None:
+            return "worker_or_credential_not_ready"
+        snapshot = await session.scalar(
+            select(PrivateReconciliationSnapshot)
+            .where(
+                PrivateReconciliationSnapshot.account_id == claim.account_id,
+                PrivateReconciliationSnapshot.outcome == "ready",
+                PrivateReconciliationSnapshot.complete.is_(True),
+                PrivateReconciliationSnapshot.worker_owner_id == process.owner_id,
+                PrivateReconciliationSnapshot.worker_generation == claim.generation,
+                PrivateReconciliationSnapshot.credential_version == claim.credential_version,
+                PrivateReconciliationSnapshot.observed_at >= now - timedelta(seconds=60),
+            )
+            .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+            .limit(1)
+        )
+        if snapshot is None:
+            return "reconciliation_stale"
+        streams = list(
+            await session.scalars(
+                select(PrivateStreamEvidence).where(
+                    PrivateStreamEvidence.account_id == claim.account_id,
+                    PrivateStreamEvidence.worker_owner_id == process.owner_id,
+                    PrivateStreamEvidence.worker_generation == claim.generation,
+                    PrivateStreamEvidence.credential_version == claim.credential_version,
+                    PrivateStreamEvidence.observed_at >= now - timedelta(seconds=45),
+                    PrivateStreamEvidence.state.in_(("snapshot", "live")),
+                )
+            )
+        )
+        if {row.channel for row in streams} != {
+            "orders",
+            "positions",
+            "margins",
+            "v2/user_trades",
+        }:
+            return "private_stream_stale"
+        risk = await session.scalar(
+            select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == claim.account_id)
+        )
+        if risk is None or not risk.enabled:
+            return "risk_policy_disabled"
+        try:
+            product_ids = {int(value) for value in json.loads(risk.allowed_product_ids)}
+        except (TypeError, ValueError):
+            return "risk_product_scope_invalid"
+        if not product_ids:
+            return "risk_product_scope_empty"
+        quotes = list(
+            await session.scalars(
+                select(MarketQuote).where(
+                    MarketQuote.region == account.region,
+                    MarketQuote.environment == account.environment,
+                    MarketQuote.product_id.in_(product_ids),
+                    MarketQuote.observed_at >= now - timedelta(seconds=30),
+                )
+            )
+        )
+        if {row.product_id for row in quotes} != product_ids:
+            return "quote_stale"
+        uncertain_submission = await session.scalar(
+            select(LiveOrderSubmission.id)
+            .where(
+                LiveOrderSubmission.account_id == claim.account_id,
+                LiveOrderSubmission.status == "UNCERTAIN",
+            )
+            .limit(1)
+        )
+        uncertain_action = await session.scalar(
+            select(LiveOrderAction.id)
+            .where(
+                LiveOrderAction.account_id == claim.account_id,
+                LiveOrderAction.status == "UNCERTAIN",
+            )
+            .limit(1)
+        )
+        if uncertain_submission is not None or uncertain_action is not None:
+            return "uncertain_operations_unresolved"
+        if LIVE_QUALIFICATION_MIN_MINUTES:
+            override_details = json.dumps(
+                {"qualificationMinMinutes": LIVE_QUALIFICATION_MIN_MINUTES},
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            override_audit_id = await session.scalar(
+                select(PlatformAuditEvent.id)
+                .where(
+                    PlatformAuditEvent.action == "QUALIFICATION_POLICY_OVERRIDE_APPLIED",
+                    PlatformAuditEvent.target_type == "account",
+                    PlatformAuditEvent.target_id == str(claim.account_id),
+                    PlatformAuditEvent.details == override_details,
+                )
+                .limit(1)
+            )
+            if override_audit_id is None:
+                session.add(
+                    PlatformAuditEvent(
+                        id=uuid4(),
+                        actor_user_id=None,
+                        action="QUALIFICATION_POLICY_OVERRIDE_APPLIED",
+                        target_type="account",
+                        target_id=str(claim.account_id),
+                        outcome="SUCCEEDED",
+                        request_id=str(uuid4()),
+                        details=override_details,
+                        occurred_at=now,
+                    )
+                )
+            window_start = now - timedelta(minutes=LIVE_QUALIFICATION_MIN_MINUTES)
+            old_snapshot = await session.scalar(
+                select(PrivateReconciliationSnapshot.id)
+                .where(
+                    PrivateReconciliationSnapshot.account_id == claim.account_id,
+                    PrivateReconciliationSnapshot.worker_generation == claim.generation,
+                    PrivateReconciliationSnapshot.credential_version == claim.credential_version,
+                    PrivateReconciliationSnapshot.outcome == "ready",
+                    PrivateReconciliationSnapshot.complete.is_(True),
+                    PrivateReconciliationSnapshot.observed_at <= window_start,
+                )
+                .limit(1)
+            )
+            if old_snapshot is None:
+                return "qualification_window_incomplete"
+        binding_payload = json.dumps(
+            {
+                "accountId": str(account.id),
+                "credentialVersion": claim.credential_version,
+                "environment": account.environment,
+                "region": account.region,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        digest = hashlib.sha256(binding_payload.encode("utf-8")).hexdigest()
+        evidence = await session.scalar(
+            select(LiveQualificationEvidence).where(
+                LiveQualificationEvidence.evidence_sha256 == digest,
+                LiveQualificationEvidence.status == "qualified",
+            )
+        )
+        if evidence is None:
+            session.add(
+                LiveQualificationEvidence(
+                    id=uuid4(),
+                    account_id=claim.account_id,
+                    release_commit="0" * 40,
+                    evidence_sha256=digest,
+                    evidence_payload=binding_payload,
+                    status="qualified",
+                    window_started_at=now - timedelta(minutes=LIVE_QUALIFICATION_MIN_MINUTES),
+                    window_completed_at=now,
+                    approved_by_user_id=None,
+                    approved_at=now,
+                    created_at=now,
+                )
+            )
+        emergency_lock = (not global_control.entries_enabled) and any(
+            marker in global_control.reason.lower() for marker in ("emergency", "kill")
+        )
+        changed = not control.exits_enabled
+        control.exits_enabled = True
+        if not emergency_lock:
+            changed = changed or not control.entries_enabled or not global_control.entries_enabled
+            control.entries_enabled = True
+            global_control.entries_enabled = True
+            global_control.reason = "automatic healthy activation"
+            global_control.updated_at = now
+        control.updated_at = now
+        if changed or evidence is None:
+            session.add(
+                PlatformAuditEvent(
+                    id=uuid4(),
+                    actor_user_id=None,
+                    action="AUTOMATIC_LIVE_ACTIVATION",
+                    target_type="account",
+                    target_id=str(claim.account_id),
+                    outcome="SUCCEEDED",
+                    request_id=str(uuid4()),
+                    details=json.dumps(
+                        {
+                            "emergencyEntryLockPreserved": emergency_lock,
+                            "qualificationMinMinutes": LIVE_QUALIFICATION_MIN_MINUTES,
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    occurred_at=now,
+                )
+            )
+    if not changed and evidence is not None:
+        return "already_active"
+    return "exits_opened" if emergency_lock else "gates_opened"
+
+
 async def _claim(
     database: Database,
     process: PrivateWorkerSettings,
@@ -133,7 +367,6 @@ async def _claim(
         if reference is None or catalogue is None:
             control.reconciliation_state = "degraded"
             control.entries_enabled = False
-            control.exits_enabled = False
             control.last_error_code = "private_worker_prerequisite_missing"
             control.updated_at = now
             return None
@@ -150,7 +383,6 @@ async def _claim(
         if not product_ids:
             control.reconciliation_state = "degraded"
             control.entries_enabled = False
-            control.exits_enabled = False
             control.last_error_code = "private_worker_catalogue_empty"
             control.updated_at = now
             return None
@@ -187,7 +419,6 @@ async def _claim(
         if control.reconciliation_state != "ready":
             control.reconciliation_state = "running"
             control.entries_enabled = False
-            control.exits_enabled = False
         control.updated_at = now
         return _Claim(
             account_id,
@@ -276,7 +507,6 @@ async def _publish(
         control.reconciliation_state = outcome
         if process.read_only or outcome != "ready":
             control.entries_enabled = False
-            control.exits_enabled = False
         control.reconciled_at = now
         control.last_error_code = None if outcome == "ready" else "foreign_or_incomplete_state"
         control.updated_at = now
@@ -302,7 +532,6 @@ async def _degrade(database: Database, process: PrivateWorkerSettings, claim: _C
         if control is not None:
             control.reconciliation_state = "degraded"
             control.entries_enabled = False
-            control.exits_enabled = False
             control.last_error_code = "private_worker_read_failed"
             control.updated_at = now
 
@@ -325,8 +554,7 @@ async def _execute_qualified_live_submission(
     owner_id = normalize_worker_uuid(
         process.owner_id, message="invalid Live submission worker scope"
     )
-    if not await _dispatch_qualification_is_current(database, claim, execution):
-        return LiveExecutionResult("QUALIFICATION_MISSING", None)
+    entries_allowed = await _dispatch_qualification_is_current(database, claim, execution)
     signer = DeltaSigner(
         api_key=SecretStr(api_key),
         api_secret=SecretStr(api_secret),
@@ -342,6 +570,7 @@ async def _execute_qualified_live_submission(
             owner_id=owner_id,
             external_user_id=claim.external_user_id,
             adapter=adapter,
+            entries_allowed=entries_allowed,
         )
     finally:
         await adapter.aclose()
@@ -357,10 +586,25 @@ async def _dispatch_qualification_is_current(
         return False
     now = datetime.now(UTC)
     async with database.transaction() as session:
+        account = await session.get(Account, claim.account_id)
+        if account is None:
+            return False
+        binding = json.dumps(
+            {
+                "accountId": str(account.id),
+                "credentialVersion": claim.credential_version,
+                "environment": account.environment,
+                "region": account.region,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        expected_digest = hashlib.sha256(binding.encode("utf-8")).hexdigest()
         evidence = await session.scalar(
             select(LiveQualificationEvidence).where(
                 LiveQualificationEvidence.account_id == claim.account_id,
-                LiveQualificationEvidence.evidence_sha256 == digest,
+                LiveQualificationEvidence.evidence_sha256 == expected_digest,
                 LiveQualificationEvidence.status == "qualified",
             )
         )
@@ -375,14 +619,7 @@ async def _dispatch_qualification_is_current(
                 )
             )
         )
-    if (
-        evidence is None
-        or evidence.window_completed_at is None
-        or not qualification_window_is_complete(
-            started_at=evidence.window_started_at,
-            completed_at=evidence.window_completed_at,
-        )
-    ):
+    if evidence is None or evidence.window_completed_at is None:
         return False
     return {row.channel for row in streams} == {
         "orders",
@@ -534,6 +771,18 @@ async def run_private_worker(
                                     account_id=str(account_id),
                                     generation=claim.generation,
                                 )
+                                activation = await _auto_activate_healthy_account(
+                                    database,
+                                    process,
+                                    claim,
+                                    execution,
+                                )
+                                if activation in {"gates_opened", "exits_opened"}:
+                                    logger.info(
+                                        "automatic_live_activation",
+                                        account_id=str(account_id),
+                                        outcome=activation,
+                                    )
                                 if process.read_only:
                                     continue
                                 gtt_result = await evaluate_one_gtt(

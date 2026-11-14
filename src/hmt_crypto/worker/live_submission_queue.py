@@ -160,6 +160,7 @@ async def claim_next_live_submission(
     account_id: UUID,
     owner_id: UUID,
     claim_seconds: int = 30,
+    entries_allowed: bool = True,
 ) -> ClaimedLiveSubmission | None:
     """Claim one admitted submission only while every Live gate remains valid."""
     if (
@@ -169,6 +170,7 @@ async def claim_next_live_submission(
         or owner_id.int == 0
         or type(claim_seconds) is not int
         or not 5 <= claim_seconds <= 120
+        or type(entries_allowed) is not bool
     ):
         raise ValueError("invalid live submission claim policy")
     now = datetime.now(UTC)
@@ -206,8 +208,6 @@ async def claim_next_live_submission(
             or control.reconciliation_state != "ready"
             or control.reconciled_at is None
             or control.reconciled_at < now - timedelta(seconds=60)
-            or risk is None
-            or not risk.enabled
             or reconciliation is None
             or reconciliation.outcome != "ready"
             or reconciliation.observed_at < now - timedelta(seconds=60)
@@ -216,7 +216,7 @@ async def claim_next_live_submission(
             or reconciliation.credential_version != lease.credential_version
         ):
             return None
-        submission = await session.scalar(
+        statement = (
             select(LiveOrderSubmission)
             .join(
                 LiveOrderIntent,
@@ -238,6 +238,9 @@ async def claim_next_live_submission(
             .limit(1)
             .with_for_update(skip_locked=True)
         )
+        if not entries_allowed:
+            statement = statement.where(LiveOrderPreview.reduce_only.is_(True))
+        submission = await session.scalar(statement)
         if submission is None:
             return None
         intent = await session.get(LiveOrderIntent, submission.intent_id)
@@ -246,13 +249,14 @@ async def claim_next_live_submission(
             intent is None
             or preview is None
             or preview.account_id != account_id
-            or intent.created_at < now - timedelta(seconds=15)
-            or preview.risk_policy_version != risk.version
             or (preview.reduce_only and not control.exits_enabled)
             or (
                 not preview.reduce_only
                 and (
-                    not control.entries_enabled
+                    risk is None
+                    or not risk.enabled
+                    or preview.risk_policy_version != risk.version
+                    or not control.entries_enabled
                     or global_control is None
                     or not global_control.entries_enabled
                 )

@@ -167,3 +167,33 @@ async def test_recovery_debt_blocks_a_new_claim(monkeypatch: pytest.MonkeyPatch)
     )
 
     assert result == subject.LiveExecutionResult("RECOVERY_REQUIRED", None)
+
+
+@pytest.mark.asyncio
+async def test_closed_entry_gate_only_claims_reduce_only_submissions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[bool] = []
+
+    async def no_recovery_debt(*_args, **_kwargs):
+        return False
+
+    async def claim_one(*_args, **kwargs):
+        captured.append(kwargs["entries_allowed"])
+        return None
+
+    monkeypatch.setattr(subject, "has_live_submission_recovery_debt", no_recovery_debt)
+    monkeypatch.setattr(subject, "claim_next_live_submission", claim_one)
+
+    result = await execute_one_live_submission(
+        object(),
+        settings=enabled_settings(),
+        account_id=ACCOUNT_ID,
+        owner_id=OWNER_ID,
+        external_user_id="delta-user",
+        adapter=object(),
+        entries_allowed=False,
+    )
+
+    assert result == subject.LiveExecutionResult("IDLE", None)
+    assert captured == [False]

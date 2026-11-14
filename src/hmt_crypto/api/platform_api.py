@@ -56,9 +56,6 @@ from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlApiSettings
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_WINDOW_HOURS,
-    canonical_risk_policy_scope,
-    qualification_window_is_complete,
-    risk_scope_is_approved,
 )
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
@@ -300,6 +297,10 @@ class GlobalEntryGateBody(_Body):
     reason: str = Field(min_length=3, max_length=256)
 
 
+class ForceOpenGatesBody(_Body):
+    reason: str = Field(min_length=8, max_length=256)
+
+
 class OrderPreviewBody(_Body):
     account_id: JsonUUID
     product_id: int = Field(gt=0)
@@ -524,6 +525,13 @@ def install_platform_routes(
         account_id: UUID,
         now: datetime,
     ) -> tuple[bool, str, LiveQualificationEvidence | None, list[PrivateStreamEvidence]]:
+        account = await session.get(Account, account_id)  # type: ignore[attr-defined]
+        lease = await session.scalar(  # type: ignore[attr-defined]
+            select(PrivateWorkerLease).where(
+                PrivateWorkerLease.account_id == account_id,
+                PrivateWorkerLease.lease_until > now,
+            )
+        )
         evidence = await session.scalar(  # type: ignore[attr-defined]
             select(LiveQualificationEvidence)
             .where(LiveQualificationEvidence.account_id == account_id)
@@ -540,55 +548,126 @@ def install_platform_routes(
             )
         )
         required_channels = {"orders", "positions", "margins", "v2/user_trades"}
-        if {row.channel for row in streams} != required_channels:
+        if account is None or lease is None:
+            return False, "worker_lease_missing", evidence, streams
+        if {row.channel for row in streams} != required_channels or any(
+            row.credential_version != lease.credential_version
+            or row.worker_owner_id != lease.owner_id
+            or row.worker_generation != lease.generation
+            for row in streams
+        ):
             return False, "private_stream_stale", evidence, streams
         if evidence is None or evidence.status != "qualified":
             return False, "qualification_missing", evidence, streams
-        if evidence.window_completed_at is None:
-            return False, "qualification_missing", evidence, streams
+        binding = json.dumps(
+            {
+                "accountId": str(account.id),
+                "credentialVersion": lease.credential_version,
+                "environment": account.environment,
+                "region": account.region,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        expected = hashlib.sha256(binding.encode("utf-8")).hexdigest()
+        if evidence.evidence_sha256 != expected:
+            return False, "qualification_binding_changed", evidence, streams
+        return True, "qualified", evidence, streams
+
+    async def live_gate_prerequisite(
+        session: object,
+        *,
+        account_id: UUID,
+        now: datetime,
+        for_entry: bool,
+    ) -> str | None:
+        account = await session.get(Account, account_id)  # type: ignore[attr-defined]
+        control = await session.scalar(  # type: ignore[attr-defined]
+            select(AccountLiveControl).where(AccountLiveControl.account_id == account_id)
+        )
+        lease = await session.scalar(  # type: ignore[attr-defined]
+            select(PrivateWorkerLease).where(
+                PrivateWorkerLease.account_id == account_id,
+                PrivateWorkerLease.lease_until > now,
+            )
+        )
+        snapshot = await session.scalar(  # type: ignore[attr-defined]
+            select(PrivateReconciliationSnapshot)
+            .where(PrivateReconciliationSnapshot.account_id == account_id)
+            .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+            .limit(1)
+        )
+        if account is None or control is None:
+            return "account_not_found"
+        if account.mode != "LIVE" or account.environment != "prod":
+            return "account_not_live"
+        if account.identity_verified_at is None or control.credential_state != "verified":
+            return "credential_not_verified"
+        if lease is None:
+            return "worker_lease_missing"
+        if (
+            control.reconciliation_state != "ready"
+            or control.reconciled_at is None
+            or control.reconciled_at < now - timedelta(seconds=60)
+            or snapshot is None
+            or snapshot.outcome != "ready"
+            or not snapshot.complete
+            or snapshot.worker_owner_id != lease.owner_id
+            or snapshot.worker_generation != lease.generation
+            or snapshot.credential_version != lease.credential_version
+        ):
+            return "reconciliation_stale"
+        qualification_ready, qualification_reason, _, _ = await qualification_status(
+            session, account_id=account_id, now=now
+        )
+        if not qualification_ready:
+            return qualification_reason if for_entry else None
+        if not for_entry:
+            return None
+        uncertain_submissions = int(
+            await session.scalar(  # type: ignore[attr-defined]
+                select(func.count(LiveOrderSubmission.id)).where(
+                    LiveOrderSubmission.account_id == account_id,
+                    LiveOrderSubmission.status == "UNCERTAIN",
+                )
+            )
+            or 0
+        )
+        uncertain_actions = int(
+            await session.scalar(  # type: ignore[attr-defined]
+                select(func.count(LiveOrderAction.id)).where(
+                    LiveOrderAction.account_id == account_id,
+                    LiveOrderAction.status == "UNCERTAIN",
+                )
+            )
+            or 0
+        )
+        if uncertain_submissions or uncertain_actions:
+            return "uncertain_operations_unresolved"
         risk = await session.scalar(  # type: ignore[attr-defined]
             select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
         )
+        if risk is None or not risk.enabled:
+            return "risk_policy_disabled"
         try:
-            evidence_payload = json.loads(evidence.evidence_payload)
-            raw_evidence_product_ids = evidence_payload["allowedProductIds"]
-            if not isinstance(raw_evidence_product_ids, list):
-                raise TypeError("qualification product scope must be a list")
-            evidence_product_ids = sorted(int(value) for value in raw_evidence_product_ids)
-            current_product_ids = (
-                []
-                if risk is None
-                else sorted(int(value) for value in json.loads(risk.allowed_product_ids))
+            product_ids = tuple(int(value) for value in json.loads(risk.allowed_product_ids))
+        except (TypeError, ValueError):
+            return "risk_product_scope_invalid"
+        if not product_ids:
+            return "risk_product_scope_empty"
+        fresh_quotes = int(
+            await session.scalar(  # type: ignore[attr-defined]
+                select(func.count(MarketQuote.id)).where(
+                    MarketQuote.region == account.region,
+                    MarketQuote.environment == account.environment,
+                    MarketQuote.product_id.in_(product_ids),
+                    MarketQuote.observed_at >= now - timedelta(seconds=30),
+                )
             )
-        except (KeyError, TypeError, ValueError):
-            return False, "qualification_scope_changed", evidence, streams
-        if risk is None or evidence_product_ids != current_product_ids:
-            return False, "qualification_scope_changed", evidence, streams
-        current_risk_scope = canonical_risk_policy_scope(
-            enabled=risk.enabled,
-            limit_currency=risk.limit_currency,
-            usd_inr_rate=risk.usd_inr_rate,
-            max_order_notional=risk.max_order_notional,
-            max_position_notional=risk.max_position_notional,
-            max_daily_loss=risk.max_daily_loss,
-            max_open_orders=risk.max_open_orders,
-            max_inflight_signals=risk.max_inflight_signals,
+            or 0
         )
-        evidence_risk_scope = evidence_payload.get("riskPolicy")
-        if evidence_risk_scope is not None:
-            if not isinstance(evidence_risk_scope, dict) or evidence_risk_scope != current_risk_scope:
-                return False, "qualification_scope_changed", evidence, streams
-        elif not risk_scope_is_approved(current_risk_scope):
-            # Legacy evidence recorded only a mutable database version. Accept an
-            # unchanged approved semantic policy, while keeping real scope changes
-            # fail-closed.
-            return False, "qualification_scope_changed", evidence, streams
-        if not qualification_window_is_complete(
-            started_at=evidence.window_started_at,
-            completed_at=evidence.window_completed_at,
-        ):
-            return False, "qualification_window_incomplete", evidence, streams
-        return True, "qualified", evidence, streams
+        return None if fresh_quotes == len(set(product_ids)) else "quote_stale"
 
     async def append_audit(
         session: object,
@@ -3494,14 +3573,17 @@ def install_platform_routes(
             except LiveSubmissionTransitionError:
                 raise HTTPException(status_code=409, detail="submission_not_cancellable") from None
 
-            sequence = int(
-                await session.scalar(
-                    select(func.coalesce(func.max(LiveOrderSubmissionEvent.sequence), 0)).where(
-                        LiveOrderSubmissionEvent.submission_id == submission.id
+            sequence = (
+                int(
+                    await session.scalar(
+                        select(func.coalesce(func.max(LiveOrderSubmissionEvent.sequence), 0)).where(
+                            LiveOrderSubmissionEvent.submission_id == submission.id
+                        )
                     )
+                    or 0
                 )
-                or 0
-            ) + 1
+                + 1
+            )
             digest = submission_event_sha256(
                 submission_id=_database_uuid(submission.id),
                 sequence=sequence,
@@ -3905,13 +3987,6 @@ def install_platform_routes(
                 row.updated_at = now
                 if policy_changed:
                     row.version += 1
-            control = await session.scalar(
-                select(AccountLiveControl).where(AccountLiveControl.account_id == account_id)
-            )
-            if control is not None and (policy_changed or not body.enabled):
-                control.entries_enabled = False
-                control.exits_enabled = False
-                control.updated_at = now
             await append_audit(
                 session,
                 actor=actor,
@@ -3924,7 +3999,8 @@ def install_platform_routes(
                     "enabled": body.enabled,
                     "productCount": len(product_ids),
                     "policyVersion": row.version,
-                    "qualificationReset": policy_changed,
+                    "qualificationReset": False,
+                    "gatesPreserved": True,
                 },
             )
         return {
@@ -3932,7 +4008,7 @@ def install_platform_routes(
             "configured": True,
             "enabled": body.enabled,
             "policyVersion": row.version,
-            "qualificationReset": policy_changed,
+            "qualificationReset": False,
         }
 
     @app.put("/api/v1/admin/live-control")
@@ -3994,78 +4070,18 @@ def install_platform_routes(
             )
             if control is None:
                 raise HTTPException(status_code=404, detail="account_not_found")
-            if body.entries_enabled or body.exits_enabled:
-                account = await session.get(Account, account_id)
-                risk = await session.scalar(
-                    select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
+            if body.exits_enabled:
+                failure = await live_gate_prerequisite(
+                    session, account_id=account_id, now=now, for_entry=False
                 )
-                lease = await session.scalar(
-                    select(PrivateWorkerLease).where(PrivateWorkerLease.account_id == account_id)
+                if failure is not None:
+                    raise HTTPException(status_code=409, detail=failure)
+            if body.entries_enabled:
+                failure = await live_gate_prerequisite(
+                    session, account_id=account_id, now=now, for_entry=True
                 )
-                snapshot = await session.scalar(
-                    select(PrivateReconciliationSnapshot)
-                    .where(PrivateReconciliationSnapshot.account_id == account_id)
-                    .order_by(desc(PrivateReconciliationSnapshot.observed_at))
-                    .limit(1)
-                )
-                (
-                    qualification_ready,
-                    qualification_reason,
-                    _,
-                    stream_rows,
-                ) = await qualification_status(
-                    session,
-                    account_id=account_id,
-                    now=now,
-                )
-                product_ids = () if risk is None else tuple(json.loads(risk.allowed_product_ids))
-                fresh_quotes = 0
-                if product_ids:
-                    fresh_quotes = int(
-                        await session.scalar(
-                            select(func.count(MarketQuote.id)).where(
-                                MarketQuote.region == "india",
-                                MarketQuote.environment == "prod",
-                                MarketQuote.product_id.in_(product_ids),
-                                MarketQuote.observed_at >= now - timedelta(seconds=30),
-                            )
-                        )
-                        or 0
-                    )
-                ready = (
-                    account is not None
-                    and account.mode == "LIVE"
-                    and account.environment == "prod"
-                    and account.identity_verified_at is not None
-                    and control.credential_state == "verified"
-                    and control.reconciliation_state == "ready"
-                    and control.reconciled_at is not None
-                    and control.reconciled_at >= now - timedelta(seconds=60)
-                    and risk is not None
-                    and risk.enabled
-                    and bool(product_ids)
-                    and fresh_quotes == len(product_ids)
-                    and lease is not None
-                    and lease.lease_until > now
-                    and snapshot is not None
-                    and snapshot.outcome == "ready"
-                    and snapshot.worker_owner_id == lease.owner_id
-                    and snapshot.worker_generation == lease.generation
-                    and snapshot.credential_version == lease.credential_version
-                    and qualification_ready
-                    and all(
-                        row.credential_version == lease.credential_version
-                        and row.worker_owner_id == lease.owner_id
-                        and row.worker_generation == lease.generation
-                        for row in stream_rows
-                    )
-                )
-                if not qualification_ready:
-                    raise HTTPException(status_code=409, detail=qualification_reason)
-                # Stage the qualified account gate first. Order admission still
-                # requires the independently locked global gate, enabled last.
-                if not ready:
-                    raise HTTPException(status_code=409, detail="live_gate_prerequisites_failed")
+                if failure is not None:
+                    raise HTTPException(status_code=409, detail=failure)
             control.entries_enabled = body.entries_enabled
             control.exits_enabled = body.exits_enabled
             control.updated_at = now
@@ -4087,6 +4103,69 @@ def install_platform_routes(
             "accountId": str(account_id),
             "entriesEnabled": body.entries_enabled,
             "exitsEnabled": body.exits_enabled,
+        }
+
+    @app.post("/api/v1/admin/accounts/{account_id}/force-open-gates")
+    async def force_open_gates(
+        account_id: UUID, body: ForceOpenGatesBody, request: Request
+    ) -> dict[str, object]:
+        require_trading_writes_allowed()
+        actor = await admin(request, mutation=True)
+        request_id = _request_id(request)
+        now = datetime.now(UTC)
+        if actor.last_login_at is None or now - actor.last_login_at > timedelta(minutes=15):
+            raise HTTPException(status_code=403, detail="fresh_authentication_required")
+        failure_code: str | None = None
+        async with database.transaction() as session:
+            failure_code = await live_gate_prerequisite(
+                session, account_id=account_id, now=now, for_entry=True
+            )
+            control = await session.scalar(
+                select(AccountLiveControl)
+                .where(AccountLiveControl.account_id == account_id)
+                .with_for_update()
+            )
+            global_control = await session.get(PlatformLiveControl, "global", with_for_update=True)
+            if failure_code is None and (control is None or global_control is None):
+                failure_code = "live_control_unavailable"
+            if failure_code is not None:
+                await append_audit(
+                    session,
+                    actor=actor,
+                    action="FORCE_OPEN_GATES",
+                    target_type="account",
+                    target_id=str(account_id),
+                    outcome="REJECTED",
+                    request_id=request_id,
+                    details={"reason": body.reason, "failureCode": failure_code},
+                )
+            else:
+                assert control is not None and global_control is not None
+                control.entries_enabled = True
+                control.exits_enabled = True
+                control.updated_at = now
+                global_control.entries_enabled = True
+                global_control.reason = body.reason
+                global_control.updated_by_user_id = actor.profile_id
+                global_control.updated_at = now
+                await append_audit(
+                    session,
+                    actor=actor,
+                    action="FORCE_OPEN_GATES",
+                    target_type="account",
+                    target_id=str(account_id),
+                    outcome="SUCCEEDED",
+                    request_id=request_id,
+                    details={"reason": body.reason},
+                )
+        if failure_code is not None:
+            raise HTTPException(status_code=409, detail=failure_code)
+        return {
+            "accountId": str(account_id),
+            "entriesEnabled": True,
+            "exitsEnabled": True,
+            "globalEntriesEnabled": True,
+            "code": "gates_open",
         }
 
     @app.get("/api/v1/admin/health/platform")
@@ -4719,9 +4798,6 @@ def install_platform_routes(
                         )
                     )
                 ).scalar_one_or_none()
-                risk = await session.scalar(
-                    select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == body.account_id)
-                )
                 lease = await session.scalar(
                     select(PrivateWorkerLease).where(
                         PrivateWorkerLease.account_id == body.account_id
@@ -4741,9 +4817,6 @@ def install_platform_routes(
                         MarketQuote.observed_at >= now - timedelta(seconds=30),
                     )
                 )
-                allowed_products = (
-                    set() if risk is None else set(json.loads(risk.allowed_product_ids))
-                )
                 if (
                     account is None
                     or account.mode != "LIVE"
@@ -4755,9 +4828,6 @@ def install_platform_routes(
                     or control.reconciled_at is None
                     or control.reconciled_at < now - timedelta(seconds=60)
                     or not control.exits_enabled
-                    or risk is None
-                    or not risk.enabled
-                    or body.product_id not in allowed_products
                     or lease is None
                     or lease.lease_until <= now
                     or snapshot is None

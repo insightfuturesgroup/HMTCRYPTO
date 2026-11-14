@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import InvalidOperation
+from decimal import Decimal, InvalidOperation
 from uuid import UUID, uuid4
 
 from sqlalchemy import desc, select
@@ -17,7 +17,6 @@ from hmt_crypto.api.live_submission import make_live_client_order_id
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
     AccountLiveControl,
-    AccountRiskPolicy,
     CatalogueProduct,
     CatalogueSnapshot,
     GttOrder,
@@ -74,9 +73,6 @@ async def evaluate_one_gtt(
         control = await session.scalar(
             select(AccountLiveControl).where(AccountLiveControl.account_id == account_id)
         )
-        risk = await session.scalar(
-            select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
-        )
         reconciliation = await session.scalar(
             select(PrivateReconciliationSnapshot)
             .where(PrivateReconciliationSnapshot.account_id == account_id)
@@ -90,8 +86,6 @@ async def evaluate_one_gtt(
             or control is None
             or not control.exits_enabled
             or control.reconciliation_state != "ready"
-            or risk is None
-            or not risk.enabled
             or reconciliation is None
             or reconciliation.outcome != "ready"
             or reconciliation.observed_at < now - timedelta(seconds=60)
@@ -246,7 +240,9 @@ async def evaluate_one_gtt(
                 limit_price=gtt.limit_price,
                 market_price=format(decision.observed_price, "f"),
                 reduce_only=True,
-                max_order_notional=risk.max_order_notional,
+                # Protective exits reduce exposure and are deliberately independent
+                # of entry qualification and entry-notional policy.
+                max_order_notional=Decimal("1e50"),
             )
         except (ValueError, InvalidOperation, LiveOrderAdmissionError):
             return GttCycleResult("BLOCKED", gtt.id, None)
@@ -254,7 +250,7 @@ async def evaluate_one_gtt(
         evidence = hashlib.sha256(
             (
                 f"gtt-admission:v1:{decision.evidence_sha256}:{reconciliation.id}:"
-                f"{catalogue.id}:{risk.version}:{format(sizing.notional, 'f')}"
+                f"{catalogue.id}:protective-exit:{format(sizing.notional, 'f')}"
             ).encode("ascii")
         ).hexdigest()
         session.add(
@@ -274,7 +270,7 @@ async def evaluate_one_gtt(
                 notional=sizing.notional,
                 catalogue_snapshot_id=catalogue.id,
                 reconciliation_snapshot_id=reconciliation.id,
-                risk_policy_version=risk.version,
+                risk_policy_version=0,
                 evidence_sha256=evidence,
                 created_at=now,
                 expires_at=now + timedelta(seconds=15),

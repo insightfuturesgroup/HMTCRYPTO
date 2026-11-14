@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from hmt_crypto.live_qualification_policy import (
     APPROVED_LIVE_RISK_SCOPE,
+    LIVE_QUALIFICATION_MIN_MINUTES,
     LIVE_QUALIFICATION_WINDOW,
     LIVE_QUALIFICATION_WINDOW_HOURS,
     LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS,
@@ -13,42 +14,40 @@ from hmt_crypto.live_qualification_policy import (
 from hmt_crypto.qualification import _continuous
 
 
-def test_live_qualification_window_is_one_hour() -> None:
-    assert LIVE_QUALIFICATION_WINDOW_HOURS == 1
-    assert LIVE_QUALIFICATION_WINDOW == timedelta(hours=1)
+def test_live_qualification_window_defaults_to_zero_minutes() -> None:
+    assert LIVE_QUALIFICATION_MIN_MINUTES == 0
+    assert LIVE_QUALIFICATION_WINDOW_HOURS == 0
+    assert LIVE_QUALIFICATION_WINDOW == timedelta(0)
 
 
 def test_reconciliation_evidence_cadence_fits_continuity_policy() -> None:
     assert LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS == 30
     assert LIVE_RECONCILIATION_MAX_GAP_SECONDS == 60
-    assert (
-        LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS
-        < LIVE_RECONCILIATION_MAX_GAP_SECONDS
-    )
+    assert LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS < LIVE_RECONCILIATION_MAX_GAP_SECONDS
 
 
-def test_live_qualification_window_rejects_fifty_nine_minutes() -> None:
+def test_live_qualification_window_rejects_reverse_time() -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
 
     assert not qualification_window_is_complete(
         started_at=start,
-        completed_at=start + timedelta(minutes=59),
+        completed_at=start - timedelta(microseconds=1),
     )
 
 
-def test_live_qualification_window_accepts_one_hour() -> None:
+def test_live_qualification_window_accepts_immediate_completion() -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
 
     assert qualification_window_is_complete(
         started_at=start,
-        completed_at=start + timedelta(hours=1),
+        completed_at=start,
     )
 
 
 def test_continuity_requires_window_edges_and_bounded_gaps() -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
-    end = start + LIVE_QUALIFICATION_WINDOW
-    observations = [start + timedelta(seconds=30 * index) for index in range(121)]
+    end = start + timedelta(minutes=3)
+    observations = [start + timedelta(seconds=30 * index) for index in range(7)]
 
     assert _continuous(observations, start=start, end=end, gap=45)
     assert not _continuous(observations[2:], start=start, end=end, gap=45)

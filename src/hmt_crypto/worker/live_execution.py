@@ -81,6 +81,7 @@ async def execute_one_live_submission(
     owner_id: UUID,
     external_user_id: str,
     adapter: DeltaIndiaLiveOrderHttpAdapter,
+    entries_allowed: bool = True,
 ) -> LiveExecutionResult:
     """Execute at most one claimed submission, with no transport retry path."""
     if (
@@ -92,13 +93,19 @@ async def execute_one_live_submission(
         or owner_id.int == 0
         or type(external_user_id) is not str
         or not 1 <= len(external_user_id) <= 128
+        or type(entries_allowed) is not bool
     ):
         raise ValueError("live execution is not explicitly qualified")
 
     if await has_live_submission_recovery_debt(database, account_id=account_id):
         return LiveExecutionResult("RECOVERY_REQUIRED", None)
 
-    claim = await claim_next_live_submission(database, account_id=account_id, owner_id=owner_id)
+    claim = await claim_next_live_submission(
+        database,
+        account_id=account_id,
+        owner_id=owner_id,
+        entries_allowed=entries_allowed,
+    )
     if claim is None:
         return LiveExecutionResult("IDLE", None)
 
