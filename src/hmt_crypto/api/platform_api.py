@@ -2413,6 +2413,8 @@ def install_platform_routes(
                         "productId": product.id,
                         "symbol": product.symbol,
                         "contractType": product.contract_type.value,
+                        "state": product.state.value,
+                        "onlyReduceOnlyOrdersAllowed": product.only_reduce_only_orders_allowed,
                         "contractValue": str(product.contract_value),
                         "contractUnitCurrency": product.contract_unit_currency,
                         "tickSize": str(product.tick_size),
@@ -3337,6 +3339,66 @@ def install_platform_routes(
                         "resolvedAt": (None if row.resolved_at is None else _utc(row.resolved_at)),
                     }
                     for row in rows
+                ]
+            }
+
+    @app.get("/api/v1/accounts/{account_id}/order-intents")
+    async def list_account_order_intents(account_id: UUID, request: Request) -> dict[str, object]:
+        """Return sanitized local dispatch state so admitted orders are never hidden."""
+        actor = await principal(request)
+        async with database.transaction() as session:
+            await account_permission(session, actor, account_id)
+            rows = (
+                await session.execute(
+                    select(LiveOrderIntent, LiveOrderPreview, LiveOrderSubmission)
+                    .join(LiveOrderPreview, LiveOrderPreview.id == LiveOrderIntent.preview_id)
+                    .join(LiveOrderSubmission, LiveOrderSubmission.intent_id == LiveOrderIntent.id)
+                    .where(LiveOrderIntent.account_id == account_id)
+                    .order_by(desc(LiveOrderIntent.created_at))
+                    .limit(100)
+                )
+            ).all()
+            latest_catalogue_id = await session.scalar(
+                select(CatalogueSnapshot.id)
+                .where(
+                    CatalogueSnapshot.region == "india",
+                    CatalogueSnapshot.environment == "prod",
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            product_ids = {preview.product_id for _, preview, _ in rows}
+            symbols = (
+                {
+                    row.product_id: row.symbol
+                    for row in await session.execute(
+                        select(CatalogueProduct.product_id, CatalogueProduct.symbol).where(
+                            CatalogueProduct.snapshot_id == latest_catalogue_id,
+                            CatalogueProduct.product_id.in_(product_ids),
+                        )
+                    )
+                }
+                if latest_catalogue_id is not None and product_ids
+                else {}
+            )
+            return {
+                "intents": [
+                    {
+                        "intentId": str(intent.id),
+                        "productId": preview.product_id,
+                        "symbol": symbols.get(preview.product_id, f"Product {preview.product_id}"),
+                        "side": preview.side,
+                        "contracts": preview.contracts,
+                        "orderType": preview.order_type,
+                        "price": str(preview.price),
+                        "intentStatus": intent.status,
+                        "submissionStatus": submission.status,
+                        "exchangeOrderId": submission.exchange_order_id,
+                        "errorCode": submission.last_error_code,
+                        "createdAt": _utc(intent.created_at),
+                        "updatedAt": _utc(submission.updated_at),
+                    }
+                    for intent, preview, submission in rows
                 ]
             }
 

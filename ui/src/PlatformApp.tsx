@@ -96,6 +96,8 @@ interface Product {
   productId: number;
   symbol: string;
   contractType: string;
+  state: string;
+  onlyReduceOnlyOrdersAllowed: boolean;
   contractValue: string;
   contractUnitCurrency: string;
   tickSize: string;
@@ -222,6 +224,22 @@ interface AccountState {
   openOrders: Record<string, unknown>[];
   fills: Record<string, unknown>[];
   walletTransactions: Record<string, unknown>[];
+}
+
+interface LocalOrderIntent {
+  intentId: string;
+  productId: number;
+  symbol: string;
+  side: string;
+  contracts: number;
+  orderType: string;
+  price: string;
+  intentStatus: string;
+  submissionStatus: string;
+  exchangeOrderId: number | null;
+  errorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface OrderPreview {
@@ -1623,7 +1641,7 @@ function OrderTicketDialog({
             method: "POST",
             body: JSON.stringify({ preview_id: preview.previewId }),
           }, csrf);
-          outcomes.push(`${account?.profileName ?? selectedAccountId}: order ${intent.intentId} submitted`);
+          outcomes.push(`${account?.profileName ?? selectedAccountId}: order queued; awaiting Delta acknowledgement (reference ${intent.intentId})`);
         } catch (error) {
           const reason = error instanceof RequestError && ["insufficient_available_balance", "insufficient_margin", "insufficient_commission"].includes(error.code)
             ? "not placed: insufficient available balance or margin"
@@ -1634,7 +1652,7 @@ function OrderTicketDialog({
         }
       }
       setNotice(outcomes.join(" · "));
-      if (outcomes.some((outcome) => outcome.includes("submitted"))) onSubmitted();
+      if (outcomes.some((outcome) => outcome.includes("order queued"))) onSubmitted();
     } catch (error) {
       setNotice(
         error instanceof RequestError &&
@@ -1758,6 +1776,7 @@ function AccountStatePage({
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState("");
   const [state, setState] = useState<AccountState | null>(null);
+  const [orderIntents, setOrderIntents] = useState<LocalOrderIntent[]>([]);
   const [actions, setActions] = useState<LiveOrderActionRow[]>([]);
   const [modifyOrder, setModifyOrder] = useState<Record<
     string,
@@ -1778,12 +1797,14 @@ function AccountStatePage({
           setState(null);
           setError("Reconciled account state is unavailable or stale.");
         });
-      if (mode === "orders")
+      if (mode === "orders") {
         void request<{ actions: LiveOrderActionRow[] }>(
           `/api/v1/trading/actions?account_id=${encodeURIComponent(selected)}`,
-        )
-          .then((value) => setActions(value.actions))
-          .catch(() => setActions([]));
+        ).then((value) => setActions(value.actions)).catch(() => setActions([]));
+        void request<{ intents: LocalOrderIntent[] }>(
+          `/api/v1/accounts/${encodeURIComponent(selected)}/order-intents`,
+        ).then((value) => setOrderIntents(value.intents)).catch(() => setOrderIntents([]));
+      }
     },
     [mode],
   );
@@ -1807,10 +1828,6 @@ function AccountStatePage({
       document.removeEventListener("visibilitychange", refresh);
     };
   }, [accountId, load]);
-  const rows =
-    mode === "orders"
-      ? (state?.openOrders ?? [])
-      : (state?.positions ?? []);
   const selected = accounts.find((account) => account.id === accountId);
   const canTrade =
     !readOnlyMode && user.role !== "viewer" && selected?.permission !== "view";
@@ -1843,8 +1860,8 @@ function AccountStatePage({
       );
       setError(
         action === "cancel"
-          ? "Cancellation queued for the fenced worker."
-          : "Modification queued for the fenced worker.",
+          ? "Cancellation queued; waiting for Delta acknowledgement."
+          : "Modification queued; waiting for Delta acknowledgement.",
       );
       setModifyOrder(null);
       setModifySize("");
@@ -1893,7 +1910,7 @@ function AccountStatePage({
         },
         csrf,
       );
-      setError(`Reduce-only exit ${intent.intentId} admitted for immediate submission.`);
+      setError(`Reduce-only exit queued; awaiting Delta acknowledgement (reference ${intent.intentId}).`);
       load(accountId);
     } catch (requestError) {
       setError(
@@ -1911,7 +1928,7 @@ function AccountStatePage({
         title={
           mode === "orders"
             ? "Orders"
-            : "Reconciled positions and balances"
+            : "Positions"
         }
       >
         <div className={`hmt-orders-toolbar ${mode === "orders" ? "is-orders" : ""}`}>
@@ -1957,99 +1974,68 @@ function AccountStatePage({
             {error}
           </p>
         ) : null}
-        <div className="overflow-x-auto">
-          <table>
-            <thead>
-              <tr>
-                <th>Type</th>
-                <th>ID</th>
-                <th>Product</th>
-                <th>Side / Size</th>
-                <th>State</th>
-                <th>Price</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, index) => {
-                const open = mode === "orders";
-                return (
-                  <tr key={`${String(row.id ?? index)}-${index}`}>
-                    <td>
-                      {mode === "positions"
-                        ? "Position"
-                        : open
-                          ? "Order"
-                          : "Fill"}
-                    </td>
-                    <td>{String(row.id ?? row.order_id ?? "—")}</td>
-                    <td>
-                      {String(row.product_symbol ?? row.product_id ?? "—")}
-                    </td>
-                    <td>
-                      {String(row.side ?? "")}{" "}
-                      {String(row.size ?? row.contracts ?? "")}
-                    </td>
-                    <td>{String(row.state ?? row.role ?? "—")}</td>
-                    <td>
-                      {String(
-                        row.limit_price ?? row.price ?? row.entry_price ?? "—",
-                      )}
-                    </td>
-                    {mode === "orders" ? (
-                      <td>
-                        {open && canTrade ? (
-                          <div className="flex gap-2">
-                            <button
-                              className="text-red-700"
-                              onClick={() => void queueAction(row, "cancel")}
-                              type="button"
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              className="text-blue-700"
-                              onClick={() => {
-                                setModifyOrder(row);
-                                setModifySize(String(row.size ?? ""));
-                                setModifyPrice(String(row.limit_price ?? ""));
-                              }}
-                              type="button"
-                            >
-                              Modify
-                            </button>
-                          </div>
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                    ) : (
-                      <td>
-                        {canTrade ? (
-                          <button
-                            className="rounded border border-red-300 px-3 py-2 text-red-700"
-                            disabled={exitingPosition}
-                            onClick={() => void exitPositionImmediately(row)}
-                            type="button"
-                          >
-                            {exitingPosition ? "Exiting…" : "Exit now"}
-                          </button>
-                        ) : "—"}
-                      </td>
-                    )}
-                  </tr>
-                );
-              })}
-              {rows.length === 0 ? (
-                <tr>
-                  <td colSpan={7}>
-                    No reconciled records.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
+        {mode === "orders" ? (
+          <>
+            <section className="hmt-data-section">
+              <header><div><h3>Order dispatch</h3><p>Orders appear in the Delta list after the exchange acknowledges them.</p></div></header>
+              <div className="overflow-x-auto"><table className="hmt-trading-table">
+                <thead><tr><th>Submitted</th><th>Contract</th><th>Side</th><th>Type / size</th><th>Reference price</th><th>Dispatch</th><th>Delta order</th><th>Details</th></tr></thead>
+                <tbody>
+                  {orderIntents.map((intent) => <tr key={intent.intentId}>
+                    <td>{new Date(intent.createdAt).toLocaleString()}</td>
+                    <td><strong>{intent.symbol}</strong><small>Product {intent.productId}</small></td>
+                    <td><span className={`hmt-side-badge ${intent.side.toLowerCase()}`}>{intent.side.toUpperCase()}</span></td>
+                    <td>{intent.orderType.toUpperCase()} · {intent.contracts}</td>
+                    <td>{intent.price}</td>
+                    <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus.replaceAll("_", " ")}</span></td>
+                    <td>{intent.exchangeOrderId ?? "Awaiting acknowledgement"}</td>
+                    <td>{intent.errorCode ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : intent.submissionStatus === "UNCERTAIN" ? "Check Delta before retrying" : "Waiting for Delta acknowledgement")}</td>
+                  </tr>)}
+                  {orderIntents.length === 0 ? <tr><td colSpan={8}>No locally submitted orders.</td></tr> : null}
+                </tbody>
+              </table></div>
+            </section>
+            <section className="hmt-data-section">
+              <header><div><h3>Open Delta orders</h3><p>Reconciled from the selected account · {state?.fresh ? "Fresh" : "Stale or unavailable"}</p></div></header>
+              <div className="overflow-x-auto"><table className="hmt-trading-table">
+                <thead><tr><th>Contract</th><th>Side</th><th>Type</th><th>Unfilled / size</th><th>Limit price</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody>
+                  {(state?.openOrders ?? []).map((row, index) => <tr key={String(row.id ?? index)}>
+                    <td><strong>{String(row.product_symbol ?? `Product ${row.product_id ?? "—"}`)}</strong><small>Order {String(row.id ?? "—")}</small></td>
+                    <td><span className={`hmt-side-badge ${String(row.side ?? "").toLowerCase()}`}>{String(row.side ?? "—").toUpperCase()}</span></td>
+                    <td>{String(row.order_type ?? "—").replaceAll("_", " ").toUpperCase()}</td>
+                    <td>{String(row.unfilled_size ?? "—")} / {String(row.size ?? "—")}</td>
+                    <td>{String(row.limit_price ?? "Market")}</td>
+                    <td><span className="hmt-status-badge open">{String(row.state ?? "Open")}</span></td>
+                    <td>{canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(row, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(row); setModifySize(String(row.size ?? "")); setModifyPrice(String(row.limit_price ?? "")); }} type="button">Modify</button></div> : "—"}</td>
+                  </tr>)}
+                  {(state?.openOrders ?? []).length === 0 ? <tr><td colSpan={7}>No open Delta orders.</td></tr> : null}
+                </tbody>
+              </table></div>
+            </section>
+          </>
+        ) : (
+          <section className="hmt-data-section">
+            <header><div><h3>Open positions</h3><p>Reconciled perpetual positions · {state?.fresh ? "Fresh" : "Stale or unavailable"}</p></div></header>
+            <div className="overflow-x-auto"><table className="hmt-trading-table">
+              <thead><tr><th>Contract</th><th>Side</th><th>Contracts</th><th>Entry</th><th>Mark</th><th>Liquidation</th><th>Margin</th><th>Unrealized P&amp;L</th><th>Action</th></tr></thead>
+              <tbody>
+                {(state?.positions ?? []).map((row, index) => {
+                  const size = Number(row.size ?? row.contracts ?? 0);
+                  const pnl = Number(row.unrealized_pnl ?? 0);
+                  return <tr key={`${String(row.product_id ?? index)}-${index}`}>
+                    <td><strong>{String(row.product_symbol ?? `Product ${row.product_id ?? "—"}`)}</strong><small>{String(row.margin_mode ?? "Perpetual")}</small></td>
+                    <td><span className={`hmt-side-badge ${size < 0 ? "sell" : "buy"}`}>{size < 0 ? "SHORT" : "LONG"}</span></td>
+                    <td>{Math.abs(size)}</td><td>{String(row.entry_price ?? "—")}</td><td>{String(row.mark_price ?? "—")}</td><td>{String(row.liquidation_price ?? "—")}</td><td>{String(row.margin ?? "—")}</td>
+                    <td className={pnl < 0 ? "hmt-negative" : "hmt-positive"}>{String(row.unrealized_pnl ?? "—")}</td>
+                    <td>{canTrade ? <button className="hmt-exit-button" disabled={exitingPosition} onClick={() => void exitPositionImmediately(row)} type="button">{exitingPosition ? "Sending…" : "Exit now"}</button> : "—"}</td>
+                  </tr>;
+                })}
+                {(state?.positions ?? []).length === 0 ? <tr><td colSpan={9}>No open positions.</td></tr> : null}
+              </tbody>
+            </table></div>
+          </section>
+        )}
         {!readOnlyMode && modifyOrder ? (
           <form
             className="grid gap-3 border-t p-4 md:grid-cols-3"
@@ -2098,24 +2084,27 @@ function AccountStatePage({
             </div>
           </form>
         ) : null}
-        {mode === "positions" ? (
-          <>
-            <h3 className="border-t px-4 pt-4">Balances</h3>
-            <RecordTable empty="No reconciled balances." rows={state?.balances ?? []} />
-            <h3 className="border-t px-4 pt-4">Funding, fees and wallet activity</h3>
-            <RecordTable
-              empty="No reconciled wallet activity."
-              rows={state?.walletTransactions ?? []}
-            />
-          </>
-        ) : null}
-        {mode === "orders" ? (
-          <>
-            <h3 className="border-t px-4 pt-4">Fills</h3>
-            <RecordTable empty="No reconciled fills." rows={state?.fills ?? []} />
-          </>
-        ) : null}
       </Panel>
+      {mode === "positions" ? <Panel title="Balances and wallet activity">
+        <section className="hmt-data-section"><header><div><h3>Balances</h3><p>Available funds and margin held at Delta</p></div></header>
+          <div className="overflow-x-auto"><table className="hmt-trading-table"><thead><tr><th>Asset</th><th>Available</th><th>Wallet balance</th><th>Blocked margin</th></tr></thead><tbody>
+            {(state?.balances ?? []).map((row, i) => <tr key={`${String(row.asset_id ?? i)}-${i}`}><td><strong>{String(row.asset_symbol ?? `Asset ${row.asset_id ?? "—"}`)}</strong></td><td>{String(row.available_balance ?? "—")}</td><td>{String(row.balance ?? "—")}</td><td>{String(row.blocked_margin ?? "—")}</td></tr>)}
+            {(state?.balances ?? []).length === 0 ? <tr><td colSpan={4}>No reconciled balances.</td></tr> : null}
+          </tbody></table></div>
+        </section>
+        <section className="hmt-data-section"><header><div><h3>Funding, fees and wallet activity</h3><p>Latest reconciled wallet transactions</p></div></header>
+          <div className="overflow-x-auto"><table className="hmt-trading-table"><thead><tr><th>Time</th><th>Activity</th><th>Asset</th><th>Amount</th><th>Balance after</th><th>Contract</th></tr></thead><tbody>
+            {(state?.walletTransactions ?? []).map((row, i) => <tr key={String(row.id ?? i)}><td>{String(row.created_at ?? "—")}</td><td>{String(row.transaction_type ?? "—").replaceAll("_", " ")}</td><td>{String(row.asset_symbol ?? `Asset ${row.asset_id ?? "—"}`)}</td><td>{String(row.amount ?? "—")}</td><td>{String(row.balance ?? "—")}</td><td>{String(row.product_id ?? "—")}</td></tr>)}
+            {(state?.walletTransactions ?? []).length === 0 ? <tr><td colSpan={6}>No reconciled wallet activity.</td></tr> : null}
+          </tbody></table></div>
+        </section>
+      </Panel> : null}
+      {mode === "orders" ? <Panel title="Recent fills">
+        <div className="overflow-x-auto"><table className="hmt-trading-table"><thead><tr><th>Time</th><th>Contract</th><th>Side</th><th>Contracts</th><th>Fill price</th><th>Commission</th><th>Role</th><th>Order ID</th></tr></thead><tbody>
+          {(state?.fills ?? []).map((row, i) => <tr key={String(row.id ?? i)}><td>{String(row.created_at ?? "—")}</td><td><strong>{String(row.product_symbol ?? `Product ${row.product_id ?? "—"}`)}</strong></td><td><span className={`hmt-side-badge ${String(row.side ?? "").toLowerCase()}`}>{String(row.side ?? "—").toUpperCase()}</span></td><td>{String(row.size ?? "—")}</td><td>{String(row.price ?? "—")}</td><td>{String(row.commission ?? "—")}</td><td>{String(row.role ?? "—")}</td><td>{String(row.order_id ?? "—")}</td></tr>)}
+          {(state?.fills ?? []).length === 0 ? <tr><td colSpan={8}>No recent reconciled fills.</td></tr> : null}
+        </tbody></table></div>
+      </Panel> : null}
       {mode === "orders" && showOrderTicket ? (
         <OrderTicketDialog
           csrf={csrf}
@@ -3105,7 +3094,9 @@ function RiskPage({
       const eligible = marketResult.products
         .filter((product) =>
           product.contractType === "perpetual_futures" &&
-          product.tradingStatus === "operational"
+          product.state === "live" &&
+          product.tradingStatus === "operational" &&
+          !product.onlyReduceOnlyOrdersAllowed
         )
         .sort((left, right) => left.symbol.localeCompare(right.symbol));
       setAccounts(accountResult.accounts);
@@ -3167,7 +3158,7 @@ function RiskPage({
         fresh_authentication_required: "Sign in again before changing the Live risk policy.",
         catalogue_not_ready: "The current Delta catalogue is not ready. Retry after the feed refreshes.",
         invalid_product_scope: "Select one or more products from the current Delta catalogue.",
-        symbol_not_allowed: "Only active, operational perpetual futures can be approved.",
+        symbol_not_allowed: "One or more selected contracts are no longer active, operational perpetuals, or are restricted to reduce-only orders. Refresh the catalogue and select eligible contracts.",
         risk_scope_requires_requalification: "Use the approved INR limits, ₹100/USD rate, and five-order/five-signal caps.",
       };
       setNotice(messages[code] ?? `Risk policy was rejected (${code}).`);
@@ -3253,7 +3244,10 @@ function RiskPage({
           />
         </label>
         <fieldset className="rounded border p-3 md:col-span-2">
-          <legend className="px-1 font-medium">Approved Delta products</legend>
+          <legend className="px-1 font-medium">Approved active Delta perpetuals</legend>
+          <p className="mb-3 text-sm text-slate-600">
+            Only live, operational contracts that allow new positions can be selected. Contracts that are upcoming, expired, disrupted, or reduce-only are excluded. Changing this allowlist resets the account gates and requires requalification before trading.
+          </p>
           <div className="mb-3 flex flex-wrap items-center gap-3">
             <input
               className="min-w-64 flex-1 rounded border px-3 py-2"
