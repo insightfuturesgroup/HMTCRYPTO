@@ -413,6 +413,7 @@
 .gtt-search { display: flex; align-items: center; gap: 8px; padding: 0 11px; color: #667085; }
 .gtt-search input { min-width: 0; flex: 1; outline: none; }
 .gtt-page__notice { margin: 0; padding: 10px 12px; border: 1px solid #bfdbfe; border-radius: 6px; background: #eff6ff; color: #1e3a8a; font-size: 12px; }
+.gtt-page__notice--warning { border-color: #fbbf24; background: #fffbeb; color: #92400e; }
 .gtt-table-wrap { overflow-x: auto; border: 1px solid var(--hmt-border); border-radius: 7px; background: #fff; }
 .gtt-table { min-width: 1000px; }
 .gtt-table th:first-child, .gtt-table td:first-child { width: 42px; }
@@ -701,6 +702,37 @@
   .gtt-page__filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
+.tv-logs-page { display: grid; gap: 20px; }
+.tv-logs-page__heading { margin: 0; }
+.tv-log-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.tv-log-summary__card { min-height: 112px; padding: 20px; border: 1px solid var(--hmt-border); border-radius: 10px; background: #fff; }
+.tv-log-summary__card span { display: block; color: var(--hmt-muted); font-weight: 600; }
+.tv-log-summary__card strong { display: block; margin-top: 12px; color: var(--hmt-text); font-size: 30px; line-height: 1; }
+.tv-log-summary__card--good strong { color: #168753; }
+.tv-log-summary__card--bad strong { color: #d92d20; }
+.tv-log-summary__card--warn strong { color: #b7791f; }
+.tv-log-toolbar { display: grid; grid-template-columns: minmax(280px, 1fr) auto; gap: 12px; padding: 16px; border-bottom: 1px solid var(--hmt-border); }
+.tv-log-search { display: flex; min-height: var(--hmt-control); align-items: center; gap: 10px; padding: 0 13px; border: 1px solid var(--hmt-border); border-radius: 8px; background: #fff; color: var(--hmt-muted); }
+.tv-log-search input { width: 100%; border: 0; outline: 0; background: transparent; }
+.tv-log-exports { display: flex; gap: 8px; }
+.tv-log-filters { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.tv-log-filters select { min-height: var(--hmt-control); padding: 0 12px; border: 1px solid var(--hmt-border); border-radius: 8px; background: #fff; text-transform: capitalize; }
+.tv-log-table { min-width: 1120px; }
+.tv-log-table code { padding: 3px 6px; border-radius: 5px; background: #f2f4f7; color: #475467; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.tv-log-subtext { display: block; margin-top: 4px; color: var(--hmt-muted); }
+.tv-side-badge { display: inline-flex; padding: 3px 8px; border-radius: 5px; font-size: 12px; font-weight: 700; text-transform: uppercase; }
+.tv-side-badge--buy { background: #dcfae6; color: #067647; }
+.tv-side-badge--sell { background: #fee4e2; color: #b42318; }
+.tv-log-rejection { color: #b42318; font-size: 12px; font-weight: 600; text-transform: capitalize; }
+.tv-log-state { margin: 0; padding: 12px 16px; }
+.tv-log-state--error { background: #fff1f0; color: #b42318; }
+.tv-log-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-top: 1px solid var(--hmt-border); color: var(--hmt-muted); }
+.tv-log-pagination > div { display: flex; align-items: center; gap: 10px; }
+
+@media (max-width: 1100px) {
+  .tv-log-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @media (max-width: 767px) {
   :root { --hmt-control: 44px; }
   .hmt-order-ticket__grid, .hmt-order-metrics { grid-template-columns: 1fr; }
@@ -759,6 +791,13 @@
   .kill-dialog { max-height: calc(100dvh - 16px); padding: 16px; }
   .kill-dialog__close { width: 44px; height: 44px; flex-basis: 44px; }
   .kill-dialog__primary, .kill-dialog__engage { min-height: 44px; }
+  .tv-log-summary { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .tv-log-summary__card { min-height: 88px; padding: 14px; }
+  .tv-log-summary__card strong { font-size: 23px; }
+  .tv-log-toolbar { grid-template-columns: 1fr; padding: 12px; }
+  .tv-log-exports { display: grid; grid-template-columns: 1fr 1fr; }
+  .tv-log-filters { grid-template-columns: 1fr; }
+  .tv-log-pagination { align-items: flex-start; flex-direction: column; }
 }
 
 @media (max-width: 420px) {

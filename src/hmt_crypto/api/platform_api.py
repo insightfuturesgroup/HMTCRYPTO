@@ -56,7 +56,9 @@ from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlApiSettings
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_WINDOW_HOURS,
+    canonical_risk_policy_scope,
     qualification_window_is_complete,
+    risk_scope_is_approved,
 )
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
@@ -549,16 +551,37 @@ def install_platform_routes(
         )
         try:
             evidence_payload = json.loads(evidence.evidence_payload)
-            evidence_risk_version = evidence_payload["riskPolicyVersion"]
-            evidence_product_ids = evidence_payload["allowedProductIds"]
-            current_product_ids = [] if risk is None else sorted(json.loads(risk.allowed_product_ids))
+            raw_evidence_product_ids = evidence_payload["allowedProductIds"]
+            if not isinstance(raw_evidence_product_ids, list):
+                raise TypeError("qualification product scope must be a list")
+            evidence_product_ids = sorted(int(value) for value in raw_evidence_product_ids)
+            current_product_ids = (
+                []
+                if risk is None
+                else sorted(int(value) for value in json.loads(risk.allowed_product_ids))
+            )
         except (KeyError, TypeError, ValueError):
             return False, "qualification_scope_changed", evidence, streams
-        if (
-            risk is None
-            or evidence_risk_version != risk.version
-            or evidence_product_ids != current_product_ids
-        ):
+        if risk is None or evidence_product_ids != current_product_ids:
+            return False, "qualification_scope_changed", evidence, streams
+        current_risk_scope = canonical_risk_policy_scope(
+            enabled=risk.enabled,
+            limit_currency=risk.limit_currency,
+            usd_inr_rate=risk.usd_inr_rate,
+            max_order_notional=risk.max_order_notional,
+            max_position_notional=risk.max_position_notional,
+            max_daily_loss=risk.max_daily_loss,
+            max_open_orders=risk.max_open_orders,
+            max_inflight_signals=risk.max_inflight_signals,
+        )
+        evidence_risk_scope = evidence_payload.get("riskPolicy")
+        if evidence_risk_scope is not None:
+            if not isinstance(evidence_risk_scope, dict) or evidence_risk_scope != current_risk_scope:
+                return False, "qualification_scope_changed", evidence, streams
+        elif not risk_scope_is_approved(current_risk_scope):
+            # Legacy evidence recorded only a mutable database version. Accept an
+            # unchanged approved semantic policy, while keeping real scope changes
+            # fail-closed.
             return False, "qualification_scope_changed", evidence, streams
         if not qualification_window_is_complete(
             started_at=evidence.window_started_at,
@@ -4287,7 +4310,12 @@ def install_platform_routes(
             await account_permission(session, actor, account_id)
             rows = (
                 await session.execute(
-                    select(TradingViewSignal, TradingViewStrategy.name)
+                    select(
+                        TradingViewSignal,
+                        TradingViewStrategy.name,
+                        TradingViewStrategy.product_id,
+                        TradingViewStrategy.symbol,
+                    )
                     .join(
                         TradingViewStrategy,
                         TradingViewStrategy.id == TradingViewSignal.strategy_id,
@@ -4301,8 +4329,11 @@ def install_platform_routes(
                 "signals": [
                     {
                         "id": str(signal.id),
+                        "accountId": str(signal.account_id),
                         "strategyId": str(signal.strategy_id),
                         "strategyName": strategy_name,
+                        "productId": product_id,
+                        "symbol": symbol,
                         "externalSignalId": signal.external_signal_id,
                         "side": signal.side,
                         "limitPrice": signal.limit_price,
@@ -4314,7 +4345,7 @@ def install_platform_routes(
                             None if signal.processed_at is None else _utc(signal.processed_at)
                         ),
                     }
-                    for signal, strategy_name in rows
+                    for signal, strategy_name, product_id, symbol in rows
                 ]
             }
 

@@ -15,6 +15,8 @@ from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_WINDOW,
     LIVE_QUALIFICATION_WINDOW_HOURS,
     LIVE_RECONCILIATION_MAX_GAP_SECONDS,
+    canonical_risk_policy_scope,
+    risk_scope_is_approved,
 )
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
@@ -129,16 +131,17 @@ async def qualify_live_account(
                 raise ValueError("account is not currently reconciled and verified")
             if control.entries_enabled or control.exits_enabled:
                 raise ValueError("account gates must remain closed during qualification")
-            if (
-                not risk.enabled
-                or risk.limit_currency != "INR"
-                or risk.usd_inr_rate != 100
-                or risk.max_order_notional != 50
-                or risk.max_position_notional != 100
-                or risk.max_daily_loss != 20
-                or risk.max_open_orders != 5
-                or risk.max_inflight_signals != 5
-            ):
+            risk_scope = canonical_risk_policy_scope(
+                enabled=risk.enabled,
+                limit_currency=risk.limit_currency,
+                usd_inr_rate=risk.usd_inr_rate,
+                max_order_notional=risk.max_order_notional,
+                max_position_notional=risk.max_position_notional,
+                max_daily_loss=risk.max_daily_loss,
+                max_open_orders=risk.max_open_orders,
+                max_inflight_signals=risk.max_inflight_signals,
+            )
+            if not risk_scope_is_approved(risk_scope):
                 raise ValueError("approved INR conversion policy is missing")
             allowed_ids = set(json.loads(risk.allowed_product_ids))
             allowed_products = list(
@@ -207,6 +210,7 @@ async def qualify_live_account(
                 "qualificationWindowHours": LIVE_QUALIFICATION_WINDOW_HOURS,
                 "reconciliationCount": len(reconciliations),
                 "releaseCommit": release_commit,
+                "riskPolicy": risk_scope,
                 "riskPolicyVersion": risk.version,
                 "streamCounts": {key: len(value) for key, value in sorted(by_channel.items())},
                 "windowCompletedAt": now.isoformat(),

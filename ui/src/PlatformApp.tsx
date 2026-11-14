@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Navigate,
@@ -14,6 +14,7 @@ import {
   BriefcaseBusiness,
   ChevronDown,
   Copy,
+  Download,
   Info,
   KeyRound,
   LayoutDashboard,
@@ -50,6 +51,7 @@ type Page =
   | "gtt"
   | "strategies"
   | "tradingview"
+  | "tradingview-logs"
   | "risk"
   | "performance"
   | "notifications"
@@ -301,7 +303,10 @@ interface TradingViewStrategyRow {
 
 interface TradingViewSignalRow {
   id: string;
+  accountId: string;
   strategyName: string;
+  productId: number;
+  symbol: string;
   externalSignalId: string;
   side: "buy" | "sell";
   limitPrice: string | null;
@@ -310,6 +315,10 @@ interface TradingViewSignalRow {
   intentId: string | null;
   receivedAt: string;
   processedAt: string | null;
+}
+
+interface TradingViewReportRow extends TradingViewSignalRow {
+  accountName: string;
 }
 
 interface LiveOrderActionRow {
@@ -650,6 +659,12 @@ const navigation: readonly {
     icon: Activity,
   },
   {
+    page: "tradingview-logs",
+    path: "/reports/tradingview",
+    label: "TradingView Logs",
+    icon: Activity,
+  },
+  {
     page: "notifications",
     path: "/notifications",
     label: "Notifications",
@@ -688,6 +703,7 @@ const desktopNavigation = [
   {
     label: "Reports",
     items: [
+      { label: "TradingView Logs", path: "/reports/tradingview" },
       { label: "Performance & Fees", path: "/performance" },
       { label: "Notifications", path: "/notifications" },
     ],
@@ -2268,15 +2284,16 @@ function GttPage({
   const [kindFilter, setKindFilter] = useState("all");
   const [showCreate, setShowCreate] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const canManageAccount = (account: Account) =>
+  const canPrepareAccount = (account: Account) =>
     user.role !== "viewer" &&
     account.permission !== "view" &&
     account.environment === "prod" &&
     account.identityVerified &&
     account.credentialState === "verified" &&
     account.reconciliationState === "ready" &&
-    account.leaseActive === true &&
-    account.exitsEnabled;
+    account.leaseActive === true;
+  const canManageAccount = (account: Account) =>
+    canPrepareAccount(account) && account.exitsEnabled;
   const load = useCallback(async (selectedIds: string[]) => {
     if (selectedIds.length === 0) {
       setRows([]);
@@ -2324,7 +2341,10 @@ function GttPage({
     for (const selectedAccountId of createAccountIds) {
       const account = accounts.find((item) => item.id === selectedAccountId);
       if (!account || !canManageAccount(account)) {
-        failures.push(`${account?.profileName ?? "Account"}: not ready or no exit permission`);
+        const reason = account && canPrepareAccount(account) && !account.exitsEnabled
+          ? "account exits are OFF"
+          : "not ready or no exit permission";
+        failures.push(`${account?.profileName ?? "Account"}: ${reason}`);
         continue;
       }
       try {
@@ -2368,6 +2388,9 @@ function GttPage({
     await load(accountIds);
   }
   const createableAccounts = accounts.filter(canManageAccount);
+  const exitGateBlockedAccounts = accounts.filter(
+    (account) => canPrepareAccount(account) && !account.exitsEnabled,
+  );
   const canTrade = !readOnlyMode && createableAccounts.length > 0;
   const canCreate = !readOnlyMode && createAccountIds.some((id) =>
     createableAccounts.some((account) => account.id === id),
@@ -2389,6 +2412,11 @@ function GttPage({
   const searchedProducts = eligibleProducts.filter((product) => product.symbol.toLowerCase().includes(productSearch.trim().toLowerCase()));
   return (
     <div className="hmt-page gtt-page">
+      {exitGateBlockedAccounts.length > 0 ? (
+        <p className="gtt-page__notice gtt-page__notice--warning" role="alert">
+          Account exits are OFF for {exitGateBlockedAccounts.map((account) => account.profileName).join(", ")}. Open Administration → Health &amp; Audit and enable the account gates before creating GTT protection.
+        </p>
+      ) : null}
       <div className="hmt-page-heading gtt-page__heading">
         <div className="gtt-page__title-row">
           <h1>HMT GTT ({rows.length})</h1>
@@ -3388,6 +3416,171 @@ function RiskPage({
         ) : null}
       </form>
     </Panel>
+  );
+}
+
+function TradingViewLogsPage() {
+  const [rows, setRows] = useState<TradingViewReportRow[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [search, setSearch] = useState("");
+  const [accountFilter, setAccountFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [sideFilter, setSideFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const pageSize = 25;
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const accountResponse = await request<{ accounts: Account[] }>("/api/v1/accounts");
+      const signalResponses = await Promise.all(
+        accountResponse.accounts.map(async (account) => {
+          const response = await request<{ signals: TradingViewSignalRow[] }>(
+            `/api/v1/strategies/signals?account_id=${encodeURIComponent(account.id)}`,
+          );
+          return response.signals.map((signal) => ({
+            ...signal,
+            accountName: account.profileName,
+          }));
+        }),
+      );
+      setAccounts(accountResponse.accounts);
+      setRows(signalResponses.flat().sort((left, right) =>
+        right.receivedAt.localeCompare(left.receivedAt),
+      ));
+    } catch {
+      setRows([]);
+      setError("TradingView signal logs are unavailable. Retry after checking account readiness.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { setPage(1); }, [search, accountFilter, statusFilter, sideFilter]);
+
+  const statuses = useMemo(
+    () => [...new Set(rows.map((row) => row.status))].sort(),
+    [rows],
+  );
+  const filtered = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return rows.filter((row) => {
+      if (accountFilter !== "all" && row.accountId !== accountFilter) return false;
+      if (statusFilter !== "all" && row.status !== statusFilter) return false;
+      if (sideFilter !== "all" && row.side !== sideFilter) return false;
+      if (!query) return true;
+      return [
+        row.externalSignalId,
+        row.symbol,
+        row.strategyName,
+        row.accountName,
+        row.rejectionCode,
+        row.intentId,
+      ].some((value) => String(value ?? "").toLowerCase().includes(query));
+    });
+  }, [accountFilter, rows, search, sideFilter, statusFilter]);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const visibleRows = filtered.slice((page - 1) * pageSize, page * pageSize);
+  const admitted = rows.filter((row) =>
+    ["admitted", "accepted", "accepted_shadow", "executed"].includes(row.status.toLowerCase()),
+  ).length;
+  const rejected = rows.filter((row) =>
+    ["rejected", "failed", "duplicate"].some((value) => row.status.toLowerCase().includes(value)),
+  ).length;
+  const awaiting = Math.max(0, rows.length - admitted - rejected);
+
+  const exportCsv = (exportRows: TradingViewReportRow[], name: string) => {
+    const escape = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+    const header = ["Signal ID", "Received", "Processed", "Account", "Strategy", "Product ID", "Symbol", "Side", "Price", "Status", "Rejection", "Intent ID"];
+    const lines = exportRows.map((row) => [
+      row.externalSignalId, row.receivedAt, row.processedAt, row.accountName,
+      row.strategyName, row.productId, row.symbol, row.side,
+      row.limitPrice ?? "market", row.status, row.rejectionCode, row.intentId,
+    ].map(escape).join(","));
+    const blob = new Blob([[header.map(escape).join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = name;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <section className="tv-logs-page">
+      <div className="hmt-page-heading tv-logs-page__heading">
+        <div>
+          <h1>TradingView Webhook Logs</h1>
+          <p>Monitor incoming crypto signals, validation decisions, and order admission.</p>
+        </div>
+        <button className="hmt-primary-button" onClick={() => void load()} type="button">
+          <RefreshCw size={17} /> Refresh
+        </button>
+      </div>
+
+      <div className="tv-log-summary" aria-label="TradingView signal summary">
+        <div className="tv-log-summary__card"><span>Total signals</span><strong>{rows.length}</strong></div>
+        <div className="tv-log-summary__card tv-log-summary__card--good"><span>Admitted</span><strong>{admitted}</strong></div>
+        <div className="tv-log-summary__card tv-log-summary__card--bad"><span>Rejected / failed</span><strong>{rejected}</strong></div>
+        <div className="tv-log-summary__card tv-log-summary__card--warn"><span>Awaiting decision</span><strong>{awaiting}</strong></div>
+      </div>
+
+      <Panel title="Signal history">
+        <div className="tv-log-toolbar">
+          <label className="tv-log-search">
+            <Search size={18} />
+            <input aria-label="Search TradingView logs" onChange={(event) => setSearch(event.target.value)} placeholder="Search signal ID, contract, strategy, account, reason…" value={search} />
+          </label>
+          <div className="tv-log-exports">
+            <button className="hmt-secondary-button" disabled={visibleRows.length === 0} onClick={() => exportCsv(visibleRows, "tradingview-signals-page.csv")} type="button"><Download size={16} /> Export page</button>
+            <button className="hmt-primary-button" disabled={filtered.length === 0} onClick={() => exportCsv(filtered, "tradingview-signals.csv")} type="button"><Download size={16} /> Export all ({filtered.length})</button>
+          </div>
+          <div className="tv-log-filters">
+            <select aria-label="Filter by account" onChange={(event) => setAccountFilter(event.target.value)} value={accountFilter}>
+              <option value="all">All accounts</option>
+              {accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}
+            </select>
+            <select aria-label="Filter by status" onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
+              <option value="all">All statuses</option>
+              {statuses.map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}
+            </select>
+            <select aria-label="Filter by side" onChange={(event) => setSideFilter(event.target.value)} value={sideFilter}>
+              <option value="all">All sides</option><option value="buy">Buy / Long</option><option value="sell">Sell / Short</option>
+            </select>
+          </div>
+        </div>
+        {error ? <p className="tv-log-state tv-log-state--error" role="alert">{error}</p> : null}
+        <div className="overflow-x-auto">
+          <table className="tv-log-table">
+            <thead><tr><th>Signal ID</th><th>Received</th><th>Account</th><th>Strategy</th><th>Contract</th><th>Side / Price</th><th>Status</th><th>Result / Intent</th></tr></thead>
+            <tbody>
+              {loading ? <tr><td colSpan={8}>Loading TradingView logs…</td></tr> : null}
+              {!loading && visibleRows.length === 0 ? <tr><td colSpan={8}>No TradingView signals match these filters.</td></tr> : null}
+              {!loading && visibleRows.map((row) => (
+                <tr key={row.id}>
+                  <td><code>{row.externalSignalId}</code></td>
+                  <td><DateTimeCell value={row.receivedAt} /></td>
+                  <td><strong>{row.accountName}</strong></td>
+                  <td>{row.strategyName}</td>
+                  <td><strong>{row.symbol}</strong><small className="tv-log-subtext">Product {row.productId}</small></td>
+                  <td><span className={`tv-side-badge tv-side-badge--${row.side}`}>{row.side}</span><small className="tv-log-subtext">{row.limitPrice ? displayPrice(row.limitPrice) : "Market"}</small></td>
+                  <td><StatusBadge good={["admitted", "accepted", "executed"].some((value) => row.status.toLowerCase().includes(value))} value={row.status} /></td>
+                  <td>{row.rejectionCode ? <span className="tv-log-rejection">{row.rejectionCode.replaceAll("_", " ")}</span> : row.intentId ? <code>{row.intentId.slice(0, 12)}…</code> : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="tv-log-pagination">
+          <span>Showing {filtered.length === 0 ? 0 : (page - 1) * pageSize + 1}–{Math.min(page * pageSize, filtered.length)} of {filtered.length}</span>
+          <div><button className="hmt-secondary-button" disabled={page <= 1} onClick={() => setPage((value) => value - 1)} type="button">Previous</button><span>Page {page} of {totalPages}</span><button className="hmt-secondary-button" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)} type="button">Next</button></div>
+        </div>
+      </Panel>
+    </section>
   );
 }
 
@@ -4504,6 +4697,10 @@ function Shell({
                 element={<RiskPage csrf={csrf} user={user} />}
               />
               <Route path="/performance" element={<PerformancePage />} />
+              <Route
+                path="/reports/tradingview"
+                element={<TradingViewLogsPage />}
+              />
               <Route path="/notifications" element={<NotificationsPage />} />
               <Route
                 path="/settings"
