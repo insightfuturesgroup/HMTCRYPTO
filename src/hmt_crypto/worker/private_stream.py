@@ -24,7 +24,7 @@ from hmt_crypto.persistence.models import (
 
 _ORIGIN = "wss://socket.india.delta.exchange"
 _CHANNELS = ("orders", "positions", "margins", "v2/user_trades")
-_SYMBOLS = ("BTCUSD", "ETHUSD")
+_SYMBOLS = ("all",)
 _AUTH_FAILURE_STATUSES = {
     "api_key_not_found",
     "incomplete_payload",

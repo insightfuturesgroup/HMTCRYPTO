@@ -534,6 +534,22 @@ def install_platform_routes(
             return False, "qualification_missing", evidence, streams
         if evidence.window_completed_at is None:
             return False, "qualification_missing", evidence, streams
+        risk = await session.scalar(  # type: ignore[attr-defined]
+            select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
+        )
+        try:
+            evidence_payload = json.loads(evidence.evidence_payload)
+            evidence_risk_version = evidence_payload["riskPolicyVersion"]
+            evidence_product_ids = evidence_payload["allowedProductIds"]
+            current_product_ids = [] if risk is None else sorted(json.loads(risk.allowed_product_ids))
+        except (KeyError, TypeError, ValueError):
+            return False, "qualification_scope_changed", evidence, streams
+        if (
+            risk is None
+            or evidence_risk_version != risk.version
+            or evidence_product_ids != current_product_ids
+        ):
+            return False, "qualification_scope_changed", evidence, streams
         if not qualification_window_is_complete(
             started_at=evidence.window_started_at,
             completed_at=evidence.window_completed_at,
@@ -3577,25 +3593,24 @@ def install_platform_routes(
             )
             if catalogue is None:
                 raise HTTPException(status_code=409, detail="catalogue_not_ready")
-            known = set(
+            selected_products = list(
                 await session.scalars(
-                    select(CatalogueProduct.product_id).where(
+                    select(CatalogueProduct).where(
                         CatalogueProduct.snapshot_id == catalogue.id,
                         CatalogueProduct.product_id.in_(product_ids),
                     )
                 )
             )
-            if known != set(product_ids):
+            if {row.product_id for row in selected_products} != set(product_ids):
                 raise HTTPException(status_code=400, detail="invalid_product_scope")
-            product_symbols = set(
-                await session.scalars(
-                    select(CatalogueProduct.symbol).where(
-                        CatalogueProduct.snapshot_id == catalogue.id,
-                        CatalogueProduct.product_id.in_(product_ids),
-                    )
-                )
-            )
-            if product_symbols != {"BTCUSD", "ETHUSD"}:
+            products = [row.to_product() for row in selected_products]
+            if any(
+                product.contract_type.value != "perpetual_futures"
+                or product.state.value != "live"
+                or product.trading_status.value != "operational"
+                or product.only_reduce_only_orders_allowed
+                for product in products
+            ):
                 raise HTTPException(status_code=409, detail="symbol_not_allowed")
             row = await session.scalar(
                 select(AccountRiskPolicy)

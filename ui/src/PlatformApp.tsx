@@ -3050,15 +3050,19 @@ function RiskPage({
   const [usdInrRate, setUsdInrRate] = useState("100");
   const [catalogueProducts, setCatalogueProducts] = useState<Product[]>([]);
   const [productIds, setProductIds] = useState<number[]>([]);
+  const [productSearch, setProductSearch] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
     void Promise.all([
       request<{ accounts: Account[] }>("/api/v1/accounts"),
       networkRequest<{ products: Product[] }>("/api/v1/market/products"),
     ]).then(([accountResult, marketResult]) => {
-      const eligible = marketResult.products.filter((product) =>
-        ["BTCUSD", "ETHUSD"].includes(product.symbol),
-      );
+      const eligible = marketResult.products
+        .filter((product) =>
+          product.contractType === "perpetual_futures" &&
+          product.tradingStatus === "operational"
+        )
+        .sort((left, right) => left.symbol.localeCompare(right.symbol));
       setAccounts(accountResult.accounts);
       setAccountId(accountResult.accounts[0]?.id ?? "");
       setCatalogueProducts(eligible);
@@ -3117,8 +3121,8 @@ function RiskPage({
       const messages: Record<string, string> = {
         fresh_authentication_required: "Sign in again before changing the Live risk policy.",
         catalogue_not_ready: "The current Delta catalogue is not ready. Retry after the feed refreshes.",
-        invalid_product_scope: "Select both approved Delta products from the current catalogue.",
-        symbol_not_allowed: "Only BTCUSD and ETHUSD are approved for this qualification.",
+        invalid_product_scope: "Select one or more products from the current Delta catalogue.",
+        symbol_not_allowed: "Only active, operational perpetual futures can be approved.",
         risk_scope_requires_requalification: "Use the approved INR limits, ₹100/USD rate, and five-order/five-signal caps.",
       };
       setNotice(messages[code] ?? `Risk policy was rejected (${code}).`);
@@ -3205,7 +3209,35 @@ function RiskPage({
         </label>
         <fieldset className="rounded border p-3 md:col-span-2">
           <legend className="px-1 font-medium">Approved Delta products</legend>
-          {catalogueProducts.map((product) => (
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+            <input
+              className="min-w-64 flex-1 rounded border px-3 py-2"
+              onChange={(event) => setProductSearch(event.target.value)}
+              placeholder="Search perpetual contracts"
+              value={productSearch}
+            />
+            <button
+              className="rounded border px-3 py-2"
+              onClick={() => setProductIds(catalogueProducts.map((product) => product.productId))}
+              type="button"
+            >
+              Select all
+            </button>
+            <button
+              className="rounded border px-3 py-2"
+              onClick={() => setProductIds([])}
+              type="button"
+            >
+              Clear
+            </button>
+            <span>{productIds.length} selected</span>
+          </div>
+          <div className="max-h-72 overflow-y-auto rounded border p-3">
+          {catalogueProducts
+            .filter((product) =>
+              product.symbol.toLowerCase().includes(productSearch.trim().toLowerCase())
+            )
+            .map((product) => (
             <label className="mr-6 inline-flex items-center gap-2" key={product.productId}>
               <input
                 checked={productIds.includes(product.productId)}
@@ -3221,8 +3253,9 @@ function RiskPage({
               {product.symbol}
             </label>
           ))}
+          </div>
           {catalogueProducts.length === 0 ? (
-            <p className="text-red-700">BTCUSD and ETHUSD are unavailable in the current catalogue.</p>
+            <p className="text-red-700">No active perpetual futures are available in the current catalogue.</p>
           ) : null}
         </fieldset>
         {user.role === "admin" ? (
@@ -3230,8 +3263,8 @@ function RiskPage({
             className="rounded bg-blue-600 px-4 py-2 text-white md:col-span-2"
             disabled={
               !accountId ||
-              catalogueProducts.length !== 2 ||
-              productIds.length !== 2
+              catalogueProducts.length === 0 ||
+              productIds.length === 0
             }
             type="submit"
           >

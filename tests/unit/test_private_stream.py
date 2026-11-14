@@ -16,14 +16,14 @@ class _Socket:
         return next(self._frames)
 
 
-def test_subscription_uses_explicit_qualified_symbols() -> None:
+def test_subscription_uses_all_listed_symbols() -> None:
     channels = _subscription_payload()["payload"]["channels"]  # type: ignore[index]
 
     assert channels == [
-        {"name": "orders", "symbols": ["BTCUSD", "ETHUSD"]},
-        {"name": "positions", "symbols": ["BTCUSD", "ETHUSD"]},
+        {"name": "orders", "symbols": ["all"]},
+        {"name": "positions", "symbols": ["all"]},
         {"name": "margins"},
-        {"name": "v2/user_trades", "symbols": ["BTCUSD", "ETHUSD"]},
+        {"name": "v2/user_trades", "symbols": ["all"]},
     ]
 
 

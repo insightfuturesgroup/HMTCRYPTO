@@ -141,16 +141,27 @@ async def qualify_live_account(
             ):
                 raise ValueError("approved INR conversion policy is missing")
             allowed_ids = set(json.loads(risk.allowed_product_ids))
-            allowed_symbols = set(
+            allowed_products = list(
                 await session.scalars(
-                    select(CatalogueProduct.symbol).where(
+                    select(CatalogueProduct).where(
                         CatalogueProduct.snapshot_id == catalogue.id,
                         CatalogueProduct.product_id.in_(allowed_ids),
                     )
                 )
             )
-            if allowed_symbols != {"BTCUSD", "ETHUSD"}:
+            if (
+                not allowed_ids
+                or {row.product_id for row in allowed_products} != allowed_ids
+                or any(
+                    product.contract_type.value != "perpetual_futures"
+                    or product.state.value != "live"
+                    or product.trading_status.value != "operational"
+                    or product.only_reduce_only_orders_allowed
+                    for product in (row.to_product() for row in allowed_products)
+                )
+            ):
                 raise ValueError("approved product scope is missing")
+            allowed_symbols = sorted(row.symbol for row in allowed_products)
             by_channel = {
                 channel: [
                     row.observed_at
@@ -188,6 +199,8 @@ async def qualify_live_account(
                 raise ValueError("reconciliation qualification window is not continuous")
             payload: dict[str, object] = {
                 "accountId": str(account.id),
+                "allowedProductIds": sorted(allowed_ids),
+                "allowedProductSymbols": allowed_symbols,
                 "catalogueRevision": catalogue.revision,
                 "credentialVersion": lease.credential_version,
                 "failureDrillsSha256": failure_drills_sha256,
