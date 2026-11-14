@@ -55,6 +55,7 @@ from hmt_crypto.worker.live_order_actions import (
 from hmt_crypto.worker.live_recovery import LiveRecoveryResult, recover_one_live_submission
 from hmt_crypto.worker.private_stream import run_private_stream
 from hmt_crypto.worker.protection_sync import sync_one_protection_group
+from hmt_crypto.worker.scope import normalize_worker_uuid
 from hmt_crypto.worker.tradingview_runner import admit_one_tradingview_signal
 
 
@@ -318,6 +319,12 @@ async def _execute_qualified_live_submission(
     """Bind one secret version and one lease owner to the one-shot adapter."""
     if not execution.enabled:
         return LiveExecutionResult("DISABLED", None)
+    account_id = normalize_worker_uuid(
+        claim.account_id, message="invalid Live submission worker scope"
+    )
+    owner_id = normalize_worker_uuid(
+        process.owner_id, message="invalid Live submission worker scope"
+    )
     if not await _dispatch_qualification_is_current(database, claim, execution):
         return LiveExecutionResult("QUALIFICATION_MISSING", None)
     signer = DeltaSigner(
@@ -331,8 +338,8 @@ async def _execute_qualified_live_submission(
         return await execute_one_live_submission(
             database,
             settings=execution,
-            account_id=claim.account_id,
-            owner_id=process.owner_id,
+            account_id=account_id,
+            owner_id=owner_id,
             external_user_id=claim.external_user_id,
             adapter=adapter,
         )
@@ -396,6 +403,8 @@ async def _execute_qualified_live_action(
 ) -> LiveOrderActionResult:
     if not execution.enabled:
         return LiveOrderActionResult("DISABLED", None)
+    account_id = normalize_worker_uuid(claim.account_id, message="invalid Live action worker scope")
+    owner_id = normalize_worker_uuid(process.owner_id, message="invalid Live action worker scope")
     signer = DeltaSigner(
         api_key=SecretStr(api_key),
         api_secret=SecretStr(api_secret),
@@ -407,8 +416,8 @@ async def _execute_qualified_live_action(
         return await execute_one_live_order_action(
             database,
             settings=execution,
-            account_id=claim.account_id,
-            owner_id=process.owner_id,
+            account_id=account_id,
+            owner_id=owner_id,
             adapter=adapter,
         )
     finally:
@@ -423,6 +432,10 @@ async def _recover_live_submission(
     api_key: str,
     api_secret: str,
 ) -> LiveRecoveryResult:
+    account_id = normalize_worker_uuid(
+        claim.account_id, message="invalid Live recovery worker scope"
+    )
+    owner_id = normalize_worker_uuid(process.owner_id, message="invalid Live recovery worker scope")
     signer = DeltaSigner(
         api_key=SecretStr(api_key),
         api_secret=SecretStr(api_secret),
@@ -433,8 +446,8 @@ async def _recover_live_submission(
     try:
         return await recover_one_live_submission(
             database,
-            account_id=claim.account_id,
-            owner_id=process.owner_id,
+            account_id=account_id,
+            owner_id=owner_id,
             external_user_id=claim.external_user_id,
             adapter=adapter,
         )
