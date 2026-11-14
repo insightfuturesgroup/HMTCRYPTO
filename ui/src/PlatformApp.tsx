@@ -97,13 +97,25 @@ interface Product {
   productId: number;
   symbol: string;
   contractType: string;
+  contractValue: string;
+  contractUnitCurrency: string;
   tickSize: string;
+  initialMargin: string | null;
+  maintenanceMargin: string | null;
+  defaultLeverage: string | null;
   tradingStatus: string;
   markPrice: string | null;
   bestBid: string | null;
   bestAsk: string | null;
   observedAt: string | null;
   quoteFresh: boolean;
+}
+
+interface RiskPolicyView {
+  maxOrderNotional: string;
+  maxPositionNotional: string;
+  allowedProductIds: number[];
+  enabled: boolean;
 }
 
 interface WatchlistRow {
@@ -1524,8 +1536,10 @@ function TradingPage({
 }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [riskPolicy, setRiskPolicy] = useState<RiskPolicyView | null>(null);
   const [accountId, setAccountId] = useState("");
   const [productId, setProductId] = useState("");
+  const [productSearch, setProductSearch] = useState("");
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [contracts, setContracts] = useState("1");
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
@@ -1544,6 +1558,25 @@ function TradingPage({
       setProductId(String(p.products[0]?.productId ?? ""));
     });
   }, []);
+  useEffect(() => {
+    if (!accountId) return;
+    void request<{ configured: boolean; policy: RiskPolicyView | null }>(
+      `/api/v1/risk/${accountId}`,
+    )
+      .then((value) => setRiskPolicy(value.configured ? value.policy : null))
+      .catch(() => setRiskPolicy(null));
+  }, [accountId]);
+  useEffect(() => {
+    const firstApproved = products.find((product) =>
+      riskPolicy?.allowedProductIds.includes(product.productId),
+    );
+    if (
+      firstApproved &&
+      !riskPolicy?.allowedProductIds.includes(Number(productId))
+    ) {
+      setProductId(String(firstApproved.productId));
+    }
+  }, [products, productId, riskPolicy]);
   async function createPreview(event: FormEvent) {
     event.preventDefault();
     setNotice(null);
@@ -1598,85 +1631,74 @@ function TradingPage({
     }
   }
   const selected = accounts.find((account) => account.id === accountId);
+  const selectedProduct = products.find(
+    (product) => product.productId === Number(productId),
+  );
+  const approvedIds = new Set(riskPolicy?.allowedProductIds ?? []);
+  const filteredProducts = products.filter((product) =>
+    product.symbol.toLowerCase().includes(productSearch.trim().toLowerCase()),
+  );
+  const executablePrice = Number(
+    side === "buy"
+      ? selectedProduct?.bestAsk
+      : selectedProduct?.bestBid,
+  );
+  const estimatedNotional =
+    executablePrice > 0 && selectedProduct
+      ? executablePrice * Number(selectedProduct.contractValue) * Number(contracts)
+      : 0;
+  const estimatedMargin =
+    estimatedNotional * Number(selectedProduct?.initialMargin ?? "0");
+  const productApproved =
+    selectedProduct !== undefined && approvedIds.has(selectedProduct.productId);
   const canTrade =
     !readOnlyMode && user.role !== "viewer" && selected?.permission !== "view";
   return (
     <>
-      <Panel title="Manual Live trading">
+      <Panel title="Place crypto order">
         {readOnlyMode ? (
           <p className="mx-4 mt-4 rounded border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
             Qualification mode — order previews and submissions remain disabled.
           </p>
         ) : null}
         <form
-          className="grid gap-3 p-4 md:grid-cols-2"
+          className="hmt-order-ticket"
           onSubmit={(event) => void createPreview(event)}
         >
-          <select
-            className="rounded border px-3 py-2"
-            onChange={(event) => setAccountId(event.target.value)}
-            required
-            value={accountId}
-          >
-            <option value="">Select account</option>
-            {accounts.map((account) => (
-              <option key={account.id} value={account.id}>
-                {account.profileName}
-              </option>
-            ))}
-          </select>
-          <select
-            className="rounded border px-3 py-2"
-            onChange={(event) => setProductId(event.target.value)}
-            required
-            value={productId}
-          >
-            <option value="">Select contract</option>
-            {products.map((product) => (
-              <option key={product.productId} value={product.productId}>
-                {product.symbol} · {product.productId}
-              </option>
-            ))}
-          </select>
-          <select
-            className="rounded border px-3 py-2"
-            onChange={(event) => setSide(event.target.value as "buy" | "sell")}
-            value={side}
-          >
-            <option value="buy">Buy</option>
-            <option value="sell">Sell</option>
-          </select>
-          <input
-            className="rounded border px-3 py-2"
-            min="1"
-            onChange={(event) => setContracts(event.target.value)}
-            required
-            type="number"
-            value={contracts}
-          />
-          <select
-            className="rounded border px-3 py-2"
-            onChange={(event) =>
-              setOrderType(event.target.value as "market" | "limit")
-            }
-            value={orderType}
-          >
-            <option value="market">Market</option>
-            <option value="limit">Limit</option>
-          </select>
+          <div className="hmt-order-ticket__grid">
+            <label>Delta account<select className="hmt-input" onChange={(event) => setAccountId(event.target.value)} required value={accountId}><option value="">Select account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select></label>
+            <label>Find contract<input className="hmt-input" onChange={(event) => setProductSearch(event.target.value)} placeholder="Search BTCUSD, ETHUSD…" value={productSearch} /></label>
+            <label className="md:col-span-2">Crypto contract<select className="hmt-input" onChange={(event) => { setProductId(event.target.value); setPreview(null); }} required value={productId}><option value="">Select contract</option>{filteredProducts.map((product) => <option key={product.productId} value={product.productId}>{product.symbol} · {product.contractType} {approvedIds.has(product.productId) ? "· Approved" : "· Risk approval required"}</option>)}</select></label>
+          </div>
+          <div className="hmt-order-segment" role="group" aria-label="Position side">
+            <button className={side === "buy" ? "is-long" : ""} onClick={() => setSide("buy")} type="button">Long / Buy</button>
+            <button className={side === "sell" ? "is-short" : ""} onClick={() => setSide("sell")} type="button">Short / Sell</button>
+          </div>
+          <div className="hmt-order-segment" role="group" aria-label="Order type">
+            <button className={orderType === "market" ? "is-active" : ""} onClick={() => setOrderType("market")} type="button">Market</button>
+            <button className={orderType === "limit" ? "is-active" : ""} onClick={() => setOrderType("limit")} type="button">Limit</button>
+          </div>
+          <div className="hmt-order-ticket__grid">
+            <label>Contracts<input className="hmt-input" min="1" step="1" onChange={(event) => setContracts(event.target.value)} required type="number" value={contracts} /><small>Whole contracts only. {selectedProduct ? `1 contract = ${selectedProduct.contractValue} ${selectedProduct.contractUnitCurrency}` : "Select a contract"}</small></label>
           {orderType === "limit" ? (
-            <input
-              className="rounded border px-3 py-2"
+            <label>Limit price (USD)<input
+              className="hmt-input"
               onChange={(event) => setLimitPrice(event.target.value)}
-              placeholder="Limit price"
+              placeholder={selectedProduct?.bestBid ?? "Limit price"}
               required
               value={limitPrice}
-            />
+            /></label>
           ) : (
-            <div className="rounded bg-slate-50 px-3 py-2 text-sm">
-              Uses the fresh executable quote.
-            </div>
+            <div className="hmt-order-quote"><small>Executable quote</small><strong>{side === "buy" ? selectedProduct?.bestAsk ?? "—" : selectedProduct?.bestBid ?? "—"} USD</strong><span>{selectedProduct?.quoteFresh ? "Fresh" : "Stale"}</span></div>
           )}
+          </div>
+          <div className="hmt-order-metrics">
+            <div><small>Catalogue leverage (display only)</small><strong>{selectedProduct?.defaultLeverage ? `${selectedProduct.defaultLeverage}×` : "Exchange managed"}</strong></div>
+            <div><small>Est. notional</small><strong>${estimatedNotional ? estimatedNotional.toFixed(4) : "—"}</strong></div>
+            <div><small>Est. initial margin</small><strong>${estimatedMargin ? estimatedMargin.toFixed(4) : "—"}</strong></div>
+            <div><small>Required protection</small><strong>SL 2% · TP 4% · Trail 1%</strong></div>
+          </div>
+          <p className={productApproved ? "hmt-order-scope is-approved" : "hmt-order-scope"}>{productApproved ? "Approved by the active account risk policy." : "This contract is visible but cannot trade until an Admin adds its current product ID to the risk policy and completes requalification."}</p>
           <label className="flex items-center gap-2">
             <input
               checked={reduceOnly}
@@ -1686,11 +1708,11 @@ function TradingPage({
             Reduce-only exit
           </label>
           <button
-            className="rounded bg-blue-600 px-4 py-2 text-white disabled:bg-slate-400"
-            disabled={!canTrade || !accountId || !productId}
+            className={`hmt-order-submit ${side === "sell" ? "is-short" : ""}`}
+            disabled={!canTrade || !accountId || !productId || !productApproved || !selectedProduct?.quoteFresh}
             type="submit"
           >
-            Create 15-second preview
+            Preview {side === "buy" ? "Long" : "Short"} order
           </button>
           {notice ? (
             <p className="md:col-span-2" role="status">
@@ -1784,6 +1806,7 @@ function AccountStatePage({
   > | null>(null);
   const [modifySize, setModifySize] = useState("");
   const [modifyPrice, setModifyPrice] = useState("");
+  const [exitPreview, setExitPreview] = useState<OrderPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(
     (selected: string) => {
@@ -1873,6 +1896,63 @@ function AccountStatePage({
       );
     }
   }
+  async function previewPositionExit(row: Record<string, unknown>) {
+    const productId = Number(row.product_id ?? row.productId);
+    const signedSize = Number(row.size ?? row.contracts);
+    const contracts = Math.abs(signedSize);
+    const rowSide = String(row.side ?? "").toLowerCase();
+    const side: "buy" | "sell" =
+      signedSize < 0 || rowSide === "short" || rowSide === "sell" ? "buy" : "sell";
+    if (!Number.isSafeInteger(productId) || !Number.isSafeInteger(contracts) || contracts < 1) {
+      setError("Position size is not a valid whole-contract exit quantity.");
+      return;
+    }
+    try {
+      const value = await request<OrderPreview>(
+        "/api/v1/trading/previews",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            account_id: accountId,
+            product_id: productId,
+            side,
+            contracts,
+            order_type: "market",
+            limit_price: null,
+            reduce_only: true,
+          }),
+        },
+        csrf,
+      );
+      setExitPreview(value);
+      setError(null);
+    } catch (requestError) {
+      setError(
+        requestError instanceof RequestError
+          ? `Exit preview rejected (${requestError.code}). Refresh the position and retry.`
+          : "Exit preview rejected. Refresh the position and retry.",
+      );
+    }
+  }
+  async function submitPositionExit() {
+    if (!exitPreview) return;
+    try {
+      const value = await request<{ intentId: string }>(
+        "/api/v1/trading/intents",
+        {
+          method: "POST",
+          body: JSON.stringify({ preview_id: exitPreview.previewId }),
+        },
+        csrf,
+      );
+      setError(`Reduce-only exit ${value.intentId} admitted to the fenced worker.`);
+      setExitPreview(null);
+      load(accountId);
+    } catch {
+      setError("Exit preview expired or was invalidated. Create it again.");
+      setExitPreview(null);
+    }
+  }
   return (
     <>
       <Panel
@@ -1925,7 +2005,7 @@ function AccountStatePage({
                 <th>Side / Size</th>
                 <th>State</th>
                 <th>Price</th>
-                {mode === "orders" ? <th>Action</th> : null}
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -1981,13 +2061,25 @@ function AccountStatePage({
                           "—"
                         )}
                       </td>
-                    ) : null}
+                    ) : (
+                      <td>
+                        {canTrade ? (
+                          <button
+                            className="rounded border border-red-300 px-3 py-2 text-red-700"
+                            onClick={() => void previewPositionExit(row)}
+                            type="button"
+                          >
+                            Quick exit
+                          </button>
+                        ) : "—"}
+                      </td>
+                    )}
                   </tr>
                 );
               })}
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={mode === "orders" ? 7 : 6}>
+                  <td colSpan={7}>
                     No reconciled records.
                   </td>
                 </tr>
@@ -1995,6 +2087,16 @@ function AccountStatePage({
             </tbody>
           </table>
         </div>
+        {mode === "positions" && exitPreview ? (
+          <div className="m-4 grid gap-3 rounded border border-red-200 bg-red-50 p-4 md:grid-cols-4">
+            <div><small>Reduce-only product</small><strong className="block">{exitPreview.productId}</strong></div>
+            <div><small>Validated price</small><strong className="block">${exitPreview.price}</strong></div>
+            <div><small>Notional</small><strong className="block">${exitPreview.notional}</strong></div>
+            <div><small>Expires</small><strong className="block">{exitPreview.expiresAt}</strong></div>
+            <button className="rounded bg-red-700 px-4 py-2 text-white md:col-span-2" onClick={() => void submitPositionExit()} type="button">Confirm reduce-only exit</button>
+            <button className="rounded border bg-white px-4 py-2 md:col-span-2" onClick={() => setExitPreview(null)} type="button">Keep position</button>
+          </div>
+        ) : null}
         {!readOnlyMode && modifyOrder ? (
           <form
             className="grid gap-3 border-t p-4 md:grid-cols-3"

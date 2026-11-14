@@ -2397,7 +2397,22 @@ def install_platform_routes(
                         "productId": product.id,
                         "symbol": product.symbol,
                         "contractType": product.contract_type.value,
+                        "contractValue": str(product.contract_value),
+                        "contractUnitCurrency": product.contract_unit_currency,
                         "tickSize": str(product.tick_size),
+                        "initialMargin": (
+                            None if product.initial_margin is None else str(product.initial_margin)
+                        ),
+                        "maintenanceMargin": (
+                            None
+                            if product.maintenance_margin is None
+                            else str(product.maintenance_margin)
+                        ),
+                        "defaultLeverage": (
+                            None
+                            if product.default_leverage is None
+                            else str(product.default_leverage)
+                        ),
                         "tradingStatus": product.trading_status.value,
                         "markPrice": None if quote is None else quote.mark_price,
                         "bestBid": None if quote is None else quote.best_bid,

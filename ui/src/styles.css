@@ -303,6 +303,28 @@
 .hmt-modal__heading p { margin: 4px 0 18px; color: var(--hmt-muted); font-size: 12px; }
 .hmt-modal label { display: grid; gap: 7px; color: #344054; font-size: 12px; font-weight: 650; }
 .hmt-modal__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+.hmt-order-ticket { display: grid; gap: 18px; padding: 20px; }
+.hmt-order-ticket__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.hmt-order-ticket label { display: grid; gap: 7px; color: #344054; font-size: 13px; font-weight: 650; }
+.hmt-order-ticket label small { color: var(--hmt-muted); font-weight: 450; }
+.hmt-order-segment { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; border: 1px solid #d0d5dd; border-radius: 8px; background: #f8fafc; }
+.hmt-order-segment button { min-height: 46px; border: 0; background: transparent; color: #475467; font-weight: 700; }
+.hmt-order-segment button.is-active { background: #2563eb; color: #fff; }
+.hmt-order-segment button.is-long { background: #087f5b; color: #fff; }
+.hmt-order-segment button.is-short { background: #c4322b; color: #fff; }
+.hmt-order-quote { display: grid; gap: 3px; align-content: center; min-height: 72px; padding: 10px 14px; border-radius: 7px; background: #f8fafc; }
+.hmt-order-quote strong { font-size: 18px; }
+.hmt-order-quote span { color: #087f5b; font-size: 12px; }
+.hmt-order-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #e4e7ec; border-radius: 8px; }
+.hmt-order-metrics > div { display: grid; gap: 5px; padding: 13px; border-right: 1px solid #e4e7ec; }
+.hmt-order-metrics > div:last-child { border-right: 0; }
+.hmt-order-metrics small { color: var(--hmt-muted); }
+.hmt-order-scope { margin: 0; padding: 10px 12px; border: 1px solid #f3c969; border-radius: 7px; background: #fffaeb; color: #854a0e; font-size: 13px; }
+.hmt-order-scope.is-approved { border-color: #abefc6; background: #ecfdf3; color: #067647; }
+.hmt-order-submit { min-height: 50px; border: 0; border-radius: 7px; background: #087f5b; color: #fff; font-size: 16px; font-weight: 750; }
+.hmt-order-submit.is-short { background: #c4322b; }
+.hmt-order-submit:disabled { background: #98a2b3; cursor: not-allowed; }
 .hmt-dashboard-context { display: flex; align-items: center; gap: 28px; padding: 14px 16px; border: 1px solid var(--hmt-border); background: #fff; color: #475467; font-size: 12px; }
 .hmt-dashboard-context span { display: inline-flex; align-items: center; gap: 6px; }
 .hmt-account-cards { display: grid; gap: 14px; }
@@ -620,6 +642,9 @@
 
 @media (max-width: 767px) {
   :root { --hmt-control: 44px; }
+  .hmt-order-ticket__grid, .hmt-order-metrics { grid-template-columns: 1fr; }
+  .hmt-order-metrics > div { border-right: 0; border-bottom: 1px solid #e4e7ec; }
+  .hmt-order-metrics > div:last-child { border-bottom: 0; }
   .hmt-header { height: 58px; gap: 10px; padding: 0 12px; }
   .hmt-brand-copy { align-items: flex-start; flex-direction: column; gap: 0; }
   .hmt-brand-copy strong { font-size: 14px; line-height: 1.2; }
