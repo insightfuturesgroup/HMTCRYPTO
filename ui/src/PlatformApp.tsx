@@ -113,10 +113,14 @@ interface Product {
 }
 
 interface RiskPolicyView {
+  version?: number;
   maxOrderNotional: string;
   maxPositionNotional: string;
   allowedProductIds: number[];
   enabled: boolean;
+  qualified?: boolean;
+  qualificationReason?: string;
+  qualificationWindowHours?: number;
 }
 
 interface WatchlistRow {
@@ -1600,8 +1604,16 @@ function OrderTicketDialog({
         setProducts(p.products);
         const policies = await Promise.all(available.map(async (account) => {
           try {
-            const value = await request<{ configured: boolean; policy: RiskPolicyView | null }>(`/api/v1/risk/${account.id}`);
-            return [account.id, value.configured ? value.policy : null] as const;
+            const value = await request<{
+              configured: boolean;
+              policy: RiskPolicyView | null;
+              qualified: boolean;
+              qualificationReason: string;
+              qualificationWindowHours: number;
+            }>(`/api/v1/risk/${account.id}`);
+            return [account.id, value.configured && value.policy
+              ? { ...value.policy, qualified: value.qualified, qualificationReason: value.qualificationReason, qualificationWindowHours: value.qualificationWindowHours }
+              : null] as const;
           } catch {
             return [account.id, null] as const;
           }
@@ -1643,23 +1655,33 @@ function OrderTicketDialog({
           }, csrf);
           outcomes.push(`${account?.profileName ?? selectedAccountId}: order queued; awaiting Delta acknowledgement (reference ${intent.intentId})`);
         } catch (error) {
-          const reason = error instanceof RequestError && ["insufficient_available_balance", "insufficient_margin", "insufficient_commission"].includes(error.code)
-            ? "not placed: insufficient available balance or margin"
-            : error instanceof RequestError
-              ? `not placed (${error.code})`
-              : "not placed (request failed)";
+          const reason = error instanceof RequestError && error.code === "insufficient_available_balance"
+            ? "not placed: insufficient available balance for this contract. Reduce quantity or add funds; no order was sent."
+            : error instanceof RequestError && error.code === "insufficient_margin"
+              ? "not placed: available margin is too low for this order. Reduce quantity or add funds; no order was sent."
+              : error instanceof RequestError && error.code === "insufficient_commission"
+                ? "not placed: available funds do not cover estimated commission. Reduce quantity or add funds; no order was sent."
+            : error instanceof RequestError && error.code === "qualification_scope_changed"
+              ? "not placed: approved risk/product scope changed; requalify this scope in Administration → Health & Audit, then reopen account and global gates. No order was sent."
+              : error instanceof RequestError && ["qualification_missing", "qualification_window_incomplete"].includes(error.code)
+                ? "not placed: Live qualification is required. Complete qualification in Administration → Health & Audit, then reopen the gates. No order was sent."
+                : error instanceof RequestError
+                  ? `not placed (${error.code})`
+                  : "not placed (request failed)";
           outcomes.push(`${account?.profileName ?? selectedAccountId}: ${reason}`);
         }
       }
       setNotice(outcomes.join(" · "));
       if (outcomes.some((outcome) => outcome.includes("order queued"))) onSubmitted();
     } catch (error) {
+      const balanceMessages: Record<string, string> = {
+        insufficient_available_balance: "Order not placed: available wallet balance is too low for this contract. Reduce the quantity or add funds.",
+        insufficient_margin: "Order not placed: available margin is too low for this order. Reduce the quantity or add funds.",
+        insufficient_commission: "Order not placed: available funds do not cover estimated commission. Reduce the quantity or add funds.",
+      };
       setNotice(
-        error instanceof RequestError &&
-          ["insufficient_available_balance", "insufficient_margin", "insufficient_commission"].includes(
-            error.code,
-          )
-          ? "Order not placed: insufficient available balance. Reduce the contract quantity or add funds."
+        error instanceof RequestError && balanceMessages[error.code]
+          ? balanceMessages[error.code]
           : error instanceof RequestError
             ? `Order not placed (${error.code}). Check account readiness, quote freshness, position and risk limits.`
             : "Order not placed. Check account readiness, quote freshness, position and risk limits.",
@@ -1690,6 +1712,8 @@ function OrderTicketDialog({
   const estimatedMargin =
     estimatedNotional * Number(selectedProduct?.initialMargin ?? "0");
   const productApproved = selectedProduct !== undefined && selectedPolicies.length > 0 && selectedPolicies.every((policy) => Boolean(policy?.enabled && policy.allowedProductIds.includes(selectedProduct.productId)));
+  const qualificationFailures = selectedPolicies.filter((policy) => !policy?.qualified);
+  const qualificationReady = selectedPolicies.length > 0 && qualificationFailures.length === 0;
   const canTrade =
     !readOnlyMode && user.role !== "viewer" && accountIds.length > 0;
   return createPortal(
@@ -1738,7 +1762,7 @@ function OrderTicketDialog({
             <div><small>Est. initial margin</small><strong>${estimatedMargin ? estimatedMargin.toFixed(4) : "—"}</strong></div>
             <div><small>Required protection</small><strong>SL 2% · TP 4% · Trail 1%</strong></div>
           </div>
-          <p className={productApproved ? "hmt-order-scope is-approved" : "hmt-order-scope"}>{productApproved ? "Contract is approved by every selected account risk policy." : "Select a contract approved by every selected account. Admins can configure eligible contracts in Risk Management."}</p>
+          <p className={productApproved && qualificationReady ? "hmt-order-scope is-approved" : "hmt-order-scope"}>{!productApproved ? "Select a contract approved by every selected account. Admins can configure eligible contracts in Risk Management." : !qualificationReady ? `This risk/product scope is not qualified (${qualificationFailures[0]?.qualificationReason ?? "qualification_missing"}). Requalify in Administration → Health & Audit before placing an order; changing the allowlist closes the gates. No order will be sent.` : "Contract is approved by every selected account and the current scope is qualified."}</p>
           <label className="flex items-center gap-2">
             <input
               checked={reduceOnly}
@@ -1754,7 +1778,7 @@ function OrderTicketDialog({
           ) : null}
           <footer className="hmt-order-ticket__footer">
             <span>{accountIds.length} account(s) selected</span>
-            <div><button className="hmt-secondary-button" onClick={onClose} type="button">Cancel</button><button className={`hmt-order-submit ${side === "sell" ? "is-short" : ""}`} disabled={loading || Boolean(loadError) || submitting || !canTrade || !productId || !productApproved || !selectedProduct?.quoteFresh || (orderType === "limit" && !limitPrice)} type="submit">{submitting ? "Submitting…" : `${side === "buy" ? "Buy / Long" : "Sell / Short"} immediately`}</button></div>
+            <div><button className="hmt-secondary-button" onClick={onClose} type="button">Cancel</button><button className={`hmt-order-submit ${side === "sell" ? "is-short" : ""}`} disabled={loading || Boolean(loadError) || submitting || !canTrade || !productId || !productApproved || !qualificationReady || !selectedProduct?.quoteFresh || (orderType === "limit" && !limitPrice)} type="submit">{submitting ? "Submitting…" : `${side === "buy" ? "Buy / Long" : "Sell / Short"} immediately`}</button></div>
           </footer>
         </form>
       </section>
@@ -1785,6 +1809,7 @@ function AccountStatePage({
   const [modifySize, setModifySize] = useState("");
   const [modifyPrice, setModifyPrice] = useState("");
   const [exitingPosition, setExitingPosition] = useState(false);
+  const [cancellingIntentId, setCancellingIntentId] = useState<string | null>(null);
   const [showOrderTicket, setShowOrderTicket] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(
@@ -1866,11 +1891,36 @@ function AccountStatePage({
       setModifyOrder(null);
       setModifySize("");
       setModifyPrice("");
-      load(accountId);
+      void load(accountId);
     } catch {
       setError(
         "Action rejected. Refresh account state and verify the Live gates.",
       );
+    }
+  }
+  async function cancelQueuedIntent(intentId: string) {
+    setCancellingIntentId(intentId);
+    setError(null);
+    try {
+      await request(
+        `/api/v1/accounts/${encodeURIComponent(accountId)}/order-intents/${encodeURIComponent(intentId)}/cancel`,
+        { method: "POST", body: JSON.stringify({}) },
+        csrf,
+      );
+      setError("Order cancelled before dispatch. It was not sent to Delta.");
+      void load(accountId);
+    } catch (requestError) {
+      const message = requestError instanceof RequestError
+        ? requestError.code === "submission_already_claimed"
+          ? "The worker already claimed this order. Check Open Delta orders and Delta before taking another action."
+          : requestError.code === "worker_lease_unavailable"
+            ? "The worker lease is unavailable. Refresh order state before retrying."
+            : `Could not cancel queued order (${requestError.code}). Refresh and check its dispatch status.`
+        : "Could not cancel queued order. Refresh and check its dispatch status.";
+      setError(message);
+      void load(accountId);
+    } finally {
+      setCancellingIntentId(null);
     }
   }
   async function exitPositionImmediately(row: Record<string, unknown>) {
@@ -1977,11 +2027,21 @@ function AccountStatePage({
         {mode === "orders" ? (
           <>
             <section className="hmt-data-section">
-              <header><div><h3>Order dispatch</h3><p>Orders appear in the Delta list after the exchange acknowledges them.</p></div></header>
+              <header>
+                <div>
+                  <h3>Order dispatch</h3>
+                  <p>Cancel an unclaimed order here. Once the worker claims it, use the acknowledged Delta order below to cancel or modify it.</p>
+                </div>
+                <a className="hmt-secondary-button" href="#open-delta-orders">View open Delta orders</a>
+              </header>
               <div className="overflow-x-auto"><table className="hmt-trading-table">
-                <thead><tr><th>Submitted</th><th>Contract</th><th>Side</th><th>Type / size</th><th>Reference price</th><th>Dispatch</th><th>Delta order</th><th>Details</th></tr></thead>
+                <thead><tr><th>Submitted</th><th>Contract</th><th>Side</th><th>Type / size</th><th>Reference price</th><th>Dispatch</th><th>Delta order</th><th>Details</th><th>Actions</th></tr></thead>
                 <tbody>
-                  {orderIntents.map((intent) => <tr key={intent.intentId}>
+                  {orderIntents.map((intent) => {
+                    const acknowledgedOrder = intent.exchangeOrderId == null
+                      ? undefined
+                      : state?.openOrders.find((order) => Number(order.id ?? order.order_id) === intent.exchangeOrderId);
+                    return <tr key={intent.intentId}>
                     <td>{new Date(intent.createdAt).toLocaleString()}</td>
                     <td><strong>{intent.symbol}</strong><small>Product {intent.productId}</small></td>
                     <td><span className={`hmt-side-badge ${intent.side.toLowerCase()}`}>{intent.side.toUpperCase()}</span></td>
@@ -1990,12 +2050,13 @@ function AccountStatePage({
                     <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus.replaceAll("_", " ")}</span></td>
                     <td>{intent.exchangeOrderId ?? "Awaiting acknowledgement"}</td>
                     <td>{intent.errorCode ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : intent.submissionStatus === "UNCERTAIN" ? "Check Delta before retrying" : "Waiting for Delta acknowledgement")}</td>
+                    <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" || intent.submissionStatus === "UNCERTAIN" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
                   </tr>)}
-                  {orderIntents.length === 0 ? <tr><td colSpan={8}>No locally submitted orders.</td></tr> : null}
+                  {orderIntents.length === 0 ? <tr><td colSpan={9}>No locally submitted orders.</td></tr> : null}
                 </tbody>
               </table></div>
             </section>
-            <section className="hmt-data-section">
+            <section className="hmt-data-section" id="open-delta-orders">
               <header><div><h3>Open Delta orders</h3><p>Reconciled from the selected account · {state?.fresh ? "Fresh" : "Stale or unavailable"}</p></div></header>
               <div className="overflow-x-auto"><table className="hmt-trading-table">
                 <thead><tr><th>Contract</th><th>Side</th><th>Type</th><th>Unfilled / size</th><th>Limit price</th><th>Status</th><th>Actions</th></tr></thead>
@@ -3083,9 +3144,16 @@ function RiskPage({
   const [maxSignals, setMaxSignals] = useState("5");
   const [usdInrRate, setUsdInrRate] = useState("100");
   const [catalogueProducts, setCatalogueProducts] = useState<Product[]>([]);
+  const [policyLoaded, setPolicyLoaded] = useState(false);
+  const [riskLoadError, setRiskLoadError] = useState<string | null>(null);
   const [productIds, setProductIds] = useState<number[]>([]);
   const [productSearch, setProductSearch] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [qualification, setQualification] = useState<{
+    qualified: boolean;
+    reason: string;
+    windowHours: number;
+  } | null>(null);
   useEffect(() => {
     void Promise.all([
       request<{ accounts: Account[] }>("/api/v1/accounts"),
@@ -3102,13 +3170,18 @@ function RiskPage({
       setAccounts(accountResult.accounts);
       setAccountId(accountResult.accounts[0]?.id ?? "");
       setCatalogueProducts(eligible);
-      setProductIds(eligible.map((product) => product.productId));
     });
   }, []);
   useEffect(() => {
     if (!accountId) return;
+    let active = true;
+    setPolicyLoaded(false);
+    setRiskLoadError(null);
     void networkRequest<{
       configured: boolean;
+      qualified: boolean;
+      qualificationReason: string;
+      qualificationWindowHours: number;
       policy: null | {
         maxOrderLimitInr: string;
         maxPositionLimitInr: string;
@@ -3119,6 +3192,12 @@ function RiskPage({
         allowedProductIds: number[];
       };
     }>(`/api/v1/risk/${accountId}`).then((result) => {
+      if (!active) return;
+      setQualification({
+        qualified: result.qualified,
+        reason: result.qualificationReason,
+        windowHours: result.qualificationWindowHours,
+      });
       if (!result.configured || result.policy === null) return;
       setMaxOrder(result.policy.maxOrderLimitInr);
       setMaxPosition(result.policy.maxPositionLimitInr);
@@ -3127,12 +3206,20 @@ function RiskPage({
       setMaxSignals(String(result.policy.maxInflightSignals));
       setUsdInrRate(result.policy.usdInrRate);
       setProductIds(result.policy.allowedProductIds);
+    }).catch(() => {
+      if (active) setRiskLoadError("Could not load the saved policy. Refresh before changing the product scope.");
+    }).finally(() => {
+      if (active) setPolicyLoaded(true);
     });
+    return () => { active = false; };
   }, [accountId]);
   async function save(event: FormEvent) {
     event.preventDefault();
     try {
-      await request(
+      const saved = await request<{
+        qualificationReset: boolean;
+        policyVersion: number;
+      }>(
         `/api/v1/risk/${accountId}`,
         {
           method: "PUT",
@@ -3149,9 +3236,20 @@ function RiskPage({
         },
         csrf,
       );
-      setNotice(
-        "Risk policy saved. Live gates were reset and must be enabled separately.",
-      );
+      setNotice(saved.qualificationReset
+        ? `Risk policy updated to version ${saved.policyVersion}. Its product/risk scope changed, so the previous qualification is invalid and account gates were closed. Requalify the new scope in Administration → Health & Audit before reopening gates.`
+        : `Risk policy version ${saved.policyVersion} is unchanged. Existing qualification and gates were preserved.`);
+      const refreshed = await networkRequest<{
+        configured: boolean;
+        qualified: boolean;
+        qualificationReason: string;
+        qualificationWindowHours: number;
+      }>(`/api/v1/risk/${accountId}`);
+      setQualification({
+        qualified: refreshed.qualified,
+        reason: refreshed.qualificationReason,
+        windowHours: refreshed.qualificationWindowHours,
+      });
     } catch (error) {
       const code = error instanceof RequestError ? error.code : "request_failed";
       const messages: Record<string, string> = {
@@ -3166,6 +3264,14 @@ function RiskPage({
   }
   return (
     <Panel title="Live risk policy">
+      {accountId && qualification ? (
+        <div className={`m-4 rounded border px-4 py-3 ${qualification.qualified ? "border-emerald-300 bg-emerald-50 text-emerald-900" : "border-amber-300 bg-amber-50 text-amber-950"}`} role="status">
+          <strong>{qualification.qualified ? "Live qualification: ready" : "Live qualification: required"}</strong>
+          <p className="mt-1">{qualification.qualified
+            ? `Current risk/product scope is qualified. Evidence window: ${qualification.windowHours} hour(s).`
+            : `Reason: ${qualification.reason}. A change to approved products or risk limits invalidates the prior approval. Complete the ${qualification.windowHours}-hour qualification in Administration → Health & Audit, then enable account gates and the global gate.`}</p>
+        </div>
+      ) : null}
       <form
         className="grid gap-3 p-4 md:grid-cols-2"
         onSubmit={(e) => void save(e)}
@@ -3246,8 +3352,10 @@ function RiskPage({
         <fieldset className="rounded border p-3 md:col-span-2">
           <legend className="px-1 font-medium">Approved active Delta perpetuals</legend>
           <p className="mb-3 text-sm text-slate-600">
-            Only live, operational contracts that allow new positions can be selected. Contracts that are upcoming, expired, disrupted, or reduce-only are excluded. Changing this allowlist resets the account gates and requires requalification before trading.
+            Only live, operational contracts that allow new positions can be selected. Contracts that are upcoming, expired, disrupted, or reduce-only are excluded. Changing this allowlist resets the account gates and requires requalification before trading. Select all is an explicit scope expansion and may require a fresh qualification window.
           </p>
+          {!policyLoaded ? <p className="mb-3 text-sm text-slate-600" role="status">Loading saved risk policy…</p> : null}
+          {riskLoadError ? <p className="mb-3 text-sm text-red-700" role="alert">{riskLoadError}</p> : null}
           <div className="mb-3 flex flex-wrap items-center gap-3">
             <input
               className="min-w-64 flex-1 rounded border px-3 py-2"
@@ -3257,6 +3365,7 @@ function RiskPage({
             />
             <button
               className="rounded border px-3 py-2"
+              disabled={!policyLoaded || Boolean(riskLoadError)}
               onClick={() => setProductIds(catalogueProducts.map((product) => product.productId))}
               type="button"
             >
@@ -3264,6 +3373,7 @@ function RiskPage({
             </button>
             <button
               className="rounded border px-3 py-2"
+              disabled={!policyLoaded || Boolean(riskLoadError)}
               onClick={() => setProductIds([])}
               type="button"
             >
@@ -3280,6 +3390,7 @@ function RiskPage({
             <label className="mr-6 inline-flex items-center gap-2" key={product.productId}>
               <input
                 checked={productIds.includes(product.productId)}
+                disabled={!policyLoaded || Boolean(riskLoadError)}
                 onChange={(event) =>
                   setProductIds((current) =>
                     event.target.checked
@@ -3302,12 +3413,14 @@ function RiskPage({
             className="rounded bg-blue-600 px-4 py-2 text-white md:col-span-2"
             disabled={
               !accountId ||
+              !policyLoaded ||
+              Boolean(riskLoadError) ||
               catalogueProducts.length === 0 ||
               productIds.length === 0
             }
             type="submit"
           >
-            Save and enable risk policy
+            Save risk policy
           </button>
         ) : (
           <p>Only an administrator can change limits.</p>

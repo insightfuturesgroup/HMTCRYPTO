@@ -40,7 +40,13 @@ from hmt_crypto.api.live_order_admission import (
     position_notional,
     projected_position_contracts,
 )
-from hmt_crypto.api.live_submission import make_live_client_order_id
+from hmt_crypto.api.live_submission import (
+    LiveSubmissionTransitionError,
+    SubmissionFence,
+    make_live_client_order_id,
+    require_transition,
+    submission_event_sha256,
+)
 from hmt_crypto.api.platform_auth import (
     AuthenticationRejected,
     AuthenticationUnavailable,
@@ -48,7 +54,10 @@ from hmt_crypto.api.platform_auth import (
 )
 from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlApiSettings
-from hmt_crypto.live_qualification_policy import qualification_window_is_complete
+from hmt_crypto.live_qualification_policy import (
+    LIVE_QUALIFICATION_WINDOW_HOURS,
+    qualification_window_is_complete,
+)
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.errors import PersistenceError
@@ -67,6 +76,7 @@ from hmt_crypto.persistence.models import (
     LiveOrderIntent,
     LiveOrderPreview,
     LiveOrderSubmission,
+    LiveOrderSubmissionEvent,
     LiveQualificationEvidence,
     MarketQuote,
     PlatformAuditEvent,
@@ -3402,6 +3412,121 @@ def install_platform_routes(
                 ]
             }
 
+    @app.post("/api/v1/accounts/{account_id}/order-intents/{intent_id}/cancel")
+    async def cancel_unclaimed_order_intent(
+        account_id: UUID, intent_id: UUID, request: Request
+    ) -> dict[str, object]:
+        """Cancel an admitted order only if the worker has not claimed it yet."""
+        require_trading_writes_allowed()
+        actor = await principal(request, mutation=True)
+        request_id = UUID(_request_id(request))
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            permission = await account_permission(session, actor, account_id)
+            if actor.role == "viewer" or permission == "view":
+                raise HTTPException(status_code=403, detail="trading_permission_required")
+
+            # Match the worker's lease -> submission lock order. If the worker
+            # wins the race, this sees CLAIMED and refuses the uncertain cancel.
+            lease = await session.scalar(
+                select(PrivateWorkerLease)
+                .where(PrivateWorkerLease.account_id == account_id)
+                .with_for_update()
+            )
+            submission = await session.scalar(
+                select(LiveOrderSubmission)
+                .where(
+                    LiveOrderSubmission.account_id == account_id,
+                    LiveOrderSubmission.intent_id == intent_id,
+                )
+                .with_for_update()
+            )
+            if submission is None:
+                raise HTTPException(status_code=404, detail="order_intent_not_found")
+            if submission.status != "PENDING":
+                raise HTTPException(status_code=409, detail="submission_already_claimed")
+            account = await session.get(Account, account_id)
+            if (
+                lease is None
+                or lease.lease_until <= now
+                or account is None
+                or account.current_credential_version != lease.credential_version
+            ):
+                raise HTTPException(status_code=409, detail="worker_lease_unavailable")
+
+            fence = SubmissionFence(
+                _database_uuid(lease.owner_id),
+                lease.generation,
+                lease.credential_version,
+            )
+            try:
+                # A PENDING row has no persisted fence; the locked current
+                # lease becomes its fence atomically as it transitions to BLOCKED.
+                require_transition(
+                    current=submission.status,
+                    target="BLOCKED",
+                    stored_fence=fence,
+                    actor_fence=fence,
+                )
+            except LiveSubmissionTransitionError:
+                raise HTTPException(status_code=409, detail="submission_not_cancellable") from None
+
+            sequence = int(
+                await session.scalar(
+                    select(func.coalesce(func.max(LiveOrderSubmissionEvent.sequence), 0)).where(
+                        LiveOrderSubmissionEvent.submission_id == submission.id
+                    )
+                )
+                or 0
+            ) + 1
+            digest = submission_event_sha256(
+                submission_id=_database_uuid(submission.id),
+                sequence=sequence,
+                from_status="PENDING",
+                to_status="BLOCKED",
+                fence=fence,
+                occurred_at=now,
+            )
+            submission.status = "BLOCKED"
+            submission.worker_owner_id = fence.owner_id
+            submission.worker_generation = fence.generation
+            submission.credential_version = fence.credential_version
+            submission.claim_until = lease.lease_until
+            submission.last_error_code = "cancelled_before_dispatch"
+            submission.resolved_at = now
+            submission.updated_at = now
+            session.add(
+                LiveOrderSubmissionEvent(
+                    id=uuid4(),
+                    submission_id=_database_uuid(submission.id),
+                    account_id=account_id,
+                    sequence=sequence,
+                    from_status="PENDING",
+                    to_status="BLOCKED",
+                    worker_owner_id=fence.owner_id,
+                    worker_generation=fence.generation,
+                    credential_version=fence.credential_version,
+                    evidence_sha256=digest,
+                    occurred_at=now,
+                )
+            )
+            await append_audit(
+                session,
+                actor=actor,
+                action="LIVE_ORDER_CANCELLED_BEFORE_DISPATCH",
+                target_type="live_order_intent",
+                target_id=str(intent_id),
+                outcome="SUCCEEDED",
+                request_id=str(request_id),
+                details={"account_id": str(account_id), "submission_id": str(submission.id)},
+            )
+            return {
+                "intentId": str(intent_id),
+                "submissionId": str(submission.id),
+                "status": "BLOCKED",
+                "errorCode": "cancelled_before_dispatch",
+            }
+
     @app.post("/api/v1/trading/actions")
     async def create_order_action(body: OrderActionBody, request: Request) -> dict[str, object]:
         require_trading_writes_allowed()
@@ -3584,15 +3709,38 @@ def install_platform_routes(
         actor = await principal(request)
         async with database.transaction() as session:
             await account_permission(session, actor, account_id)
+            now = datetime.now(UTC)
+            qualified, qualification_reason, evidence, _ = await qualification_status(
+                session,
+                account_id=account_id,
+                now=now,
+            )
             row = await session.scalar(
                 select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
             )
             if row is None:
-                return {"accountId": str(account_id), "configured": False, "policy": None}
+                return {
+                    "accountId": str(account_id),
+                    "configured": False,
+                    "policy": None,
+                    "qualified": qualified,
+                    "qualificationReason": qualification_reason,
+                    "qualificationWindowHours": LIVE_QUALIFICATION_WINDOW_HOURS,
+                    "qualificationEvidenceCreatedAt": None
+                    if evidence is None
+                    else _utc(evidence.created_at),
+                }
             return {
                 "accountId": str(account_id),
                 "configured": True,
+                "qualified": qualified,
+                "qualificationReason": qualification_reason,
+                "qualificationWindowHours": LIVE_QUALIFICATION_WINDOW_HOURS,
+                "qualificationEvidenceCreatedAt": None
+                if evidence is None
+                else _utc(evidence.created_at),
                 "policy": {
+                    "version": row.version,
                     "maxOrderNotional": str(row.max_order_notional),
                     "maxPositionNotional": str(row.max_position_notional),
                     "maxDailyLoss": str(row.max_daily_loss),
@@ -3679,6 +3827,7 @@ def install_platform_routes(
                 .where(AccountRiskPolicy.account_id == account_id)
                 .with_for_update()
             )
+            policy_changed = row is None
             if row is None:
                 row = AccountRiskPolicy(
                     id=uuid4(),
@@ -3702,6 +3851,21 @@ def install_platform_routes(
                 )
                 session.add(row)
             else:
+                current_product_ids = tuple(sorted(set(json.loads(row.allowed_product_ids))))
+                policy_changed = (
+                    row.max_order_notional != limits[0]
+                    or row.max_position_notional != limits[1]
+                    or row.max_daily_loss != limits[2]
+                    or row.max_open_orders != body.max_open_orders
+                    or row.max_inflight_signals != body.max_inflight_signals
+                    or row.limit_currency != "INR"
+                    or row.usd_inr_rate != usd_inr_rate
+                    or row.max_order_limit_inr != inr_limits[0]
+                    or row.max_position_limit_inr != inr_limits[1]
+                    or row.max_daily_loss_limit_inr != inr_limits[2]
+                    or current_product_ids != product_ids
+                    or row.enabled != body.enabled
+                )
                 row.max_order_notional, row.max_position_notional, row.max_daily_loss = limits
                 row.max_open_orders = body.max_open_orders
                 row.max_inflight_signals = body.max_inflight_signals
@@ -3716,10 +3880,12 @@ def install_platform_routes(
                 row.enabled = body.enabled
                 row.updated_by_user_id = actor.profile_id
                 row.updated_at = now
+                if policy_changed:
+                    row.version += 1
             control = await session.scalar(
                 select(AccountLiveControl).where(AccountLiveControl.account_id == account_id)
             )
-            if control is not None:
+            if control is not None and (policy_changed or not body.enabled):
                 control.entries_enabled = False
                 control.exits_enabled = False
                 control.updated_at = now
@@ -3731,9 +3897,20 @@ def install_platform_routes(
                 target_id=str(account_id),
                 outcome="SUCCEEDED",
                 request_id=request_id,
-                details={"enabled": body.enabled, "productCount": len(product_ids)},
+                details={
+                    "enabled": body.enabled,
+                    "productCount": len(product_ids),
+                    "policyVersion": row.version,
+                    "qualificationReset": policy_changed,
+                },
             )
-        return {"accountId": str(account_id), "configured": True, "enabled": body.enabled}
+        return {
+            "accountId": str(account_id),
+            "configured": True,
+            "enabled": body.enabled,
+            "policyVersion": row.version,
+            "qualificationReset": policy_changed,
+        }
 
     @app.put("/api/v1/admin/live-control")
     async def set_global_live_control(
@@ -3952,7 +4129,7 @@ def install_platform_routes(
                 "qualified": ready,
                 "reason": reason,
                 "observedAt": _utc(now),
-                "requiredWindowHours": 24,
+                "requiredWindowHours": LIVE_QUALIFICATION_WINDOW_HOURS,
                 "evidence": None
                 if evidence is None
                 else {

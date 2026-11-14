@@ -14,7 +14,9 @@ class LiveSubmissionTransitionError(Exception):
 
 
 _ALLOWED: dict[str, frozenset[str]] = {
-    "PENDING": frozenset({"CLAIMED"}),
+    # An operator may cancel an order only while it is still unclaimed. The
+    # API serializes that transition with the worker's lease-first claim lock.
+    "PENDING": frozenset({"CLAIMED", "BLOCKED"}),
     "CLAIMED": frozenset({"PREPARED", "PENDING", "BLOCKED"}),
     "PREPARED": frozenset({"SENDING", "BLOCKED"}),
     "SENDING": frozenset({"ACCEPTED", "REJECTED", "UNCERTAIN"}),
