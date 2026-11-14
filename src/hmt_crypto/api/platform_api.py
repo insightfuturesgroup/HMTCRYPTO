@@ -188,6 +188,17 @@ def _json_uuid(value: object) -> object:
 JsonUUID = Annotated[UUID, BeforeValidator(_json_uuid)]
 
 
+def _database_uuid(value: object) -> UUID:
+    """Return an exact stdlib UUID for values loaded through asyncpg."""
+    try:
+        normalized = UUID(str(value))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("invalid database UUID") from None
+    if normalized.int == 0:
+        raise ValueError("invalid database UUID")
+    return normalized
+
+
 class LoginBody(_Body):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=1024)
@@ -3204,7 +3215,9 @@ def install_platform_routes(
                     created_at=now,
                 )
             )
-            client_order_id = make_live_client_order_id(preview.account_id, intent_id)
+            client_order_id = make_live_client_order_id(
+                _database_uuid(preview.account_id), intent_id
+            )
             request_sha256 = hashlib.sha256(
                 f"submission:v1:{intent_id}:{client_order_id}:{preview.evidence_sha256}".encode(
                     "ascii"
