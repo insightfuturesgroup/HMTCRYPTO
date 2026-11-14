@@ -45,7 +45,6 @@ type Role = "admin" | "trader" | "viewer";
 type Page =
   | "dashboard"
   | "accounts"
-  | "trading"
   | "orders"
   | "positions"
   | "gtt"
@@ -383,6 +382,13 @@ async function networkRequest<T>(
       const candidate = body.detail ?? body.error;
       if (typeof candidate === "string" && /^[a-z0-9_]{1,64}$/.test(candidate))
         code = candidate;
+      else if (Array.isArray(candidate))
+        code = "validation_error";
+      else if (candidate && typeof candidate === "object") {
+        const detailCode = (candidate as { code?: unknown }).code;
+        if (typeof detailCode === "string" && /^[a-z0-9_]{1,64}$/.test(detailCode))
+          code = detailCode;
+      }
     } catch {
       /* Safe stable fallback; never render server diagnostics. */
     }
@@ -593,11 +599,10 @@ const navigation: readonly {
     label: "Delta Accounts",
     icon: KeyRound,
   },
-  { page: "trading", path: "/trading", label: "Live Trading", icon: Target },
   {
     page: "orders",
     path: "/orders",
-    label: "Orders & Fills",
+    label: "Orders",
     icon: ListChecks,
   },
   {
@@ -653,7 +658,6 @@ const desktopNavigation = [
   {
     label: "Trading",
     items: [
-      { label: "Live Trading", path: "/trading" },
       { label: "Strategies", path: "/strategies" },
       { label: "TradingView", path: "/tradingview" },
     ],
@@ -1525,90 +1529,112 @@ function AccountsPage({
   );
 }
 
-function TradingPage({
+function OrderTicketDialog({
   user,
   csrf,
   readOnlyMode,
+  onClose,
+  onSubmitted,
 }: {
   readonly user: SessionUser;
   readonly csrf: string;
   readonly readOnlyMode: boolean;
+  readonly onClose: () => void;
+  readonly onSubmitted: () => void;
 }) {
+  const canSelectAccount = (account: Account) =>
+    account.permission !== "view" &&
+    account.environment === "prod" &&
+    account.identityVerified &&
+    account.credentialState === "verified" &&
+    account.reconciliationState === "ready" &&
+    account.leaseActive === true;
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
-  const [riskPolicy, setRiskPolicy] = useState<RiskPolicyView | null>(null);
-  const [accountId, setAccountId] = useState("");
+  const [riskPolicies, setRiskPolicies] = useState<Record<string, RiskPolicyView | null>>({});
+  const [accountIds, setAccountIds] = useState<string[]>([]);
   const [productId, setProductId] = useState("");
   const [productSearch, setProductSearch] = useState("");
+  const [productPickerOpen, setProductPickerOpen] = useState(false);
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [contracts, setContracts] = useState("1");
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
   const [limitPrice, setLimitPrice] = useState("");
   const [reduceOnly, setReduceOnly] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
-    void Promise.all([
-      request<{ accounts: Account[] }>("/api/v1/accounts"),
-      request<{ products: Product[] }>("/api/v1/market/products"),
-    ]).then(([a, p]) => {
-      setAccounts(a.accounts);
-      setAccountId(a.accounts[0]?.id ?? "");
-      setProducts(p.products);
-      setProductId(String(p.products[0]?.productId ?? ""));
-    });
-  }, []);
-  useEffect(() => {
-    if (!accountId) return;
-    void request<{ configured: boolean; policy: RiskPolicyView | null }>(
-      `/api/v1/risk/${accountId}`,
-    )
-      .then((value) => setRiskPolicy(value.configured ? value.policy : null))
-      .catch(() => setRiskPolicy(null));
-  }, [accountId]);
-  useEffect(() => {
-    const firstApproved = products.find((product) =>
-      riskPolicy?.allowedProductIds.includes(product.productId),
-    );
-    if (
-      firstApproved &&
-      !riskPolicy?.allowedProductIds.includes(Number(productId))
-    ) {
-      setProductId(String(firstApproved.productId));
+    let active = true;
+    async function loadTicketData() {
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const [a, p] = await Promise.all([
+          request<{ accounts: Account[] }>("/api/v1/accounts"),
+          request<{ products: Product[] }>("/api/v1/market/products"),
+        ]);
+        if (!active) return;
+        setAccounts(a.accounts);
+        const available = a.accounts.filter(canSelectAccount);
+        setAccountIds(available[0] ? [available[0].id] : []);
+        setProducts(p.products);
+        const policies = await Promise.all(available.map(async (account) => {
+          try {
+            const value = await request<{ configured: boolean; policy: RiskPolicyView | null }>(`/api/v1/risk/${account.id}`);
+            return [account.id, value.configured ? value.policy : null] as const;
+          } catch {
+            return [account.id, null] as const;
+          }
+        }));
+        if (active) setRiskPolicies(Object.fromEntries(policies));
+      } catch (error) {
+        if (active) setLoadError(error instanceof RequestError ? `Could not load order data (${error.code}).` : "Could not load order data. Retry or refresh the page.");
+      } finally {
+        if (active) setLoading(false);
+      }
     }
-  }, [products, productId, riskPolicy]);
+    void loadTicketData();
+    return () => { active = false; };
+  }, []);
   async function placeOrder(event: FormEvent) {
     event.preventDefault();
     setNotice(null);
     setSubmitting(true);
     try {
-      const preview = await request<OrderPreview>(
-        "/api/v1/trading/previews",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            account_id: accountId,
-            product_id: Number(productId),
-            side,
-            contracts: Number(contracts),
-            order_type: orderType,
-            limit_price: orderType === "limit" ? limitPrice : null,
-            reduce_only: reduceOnly,
-          }),
-        },
-        csrf,
-      );
-      const intent = await request<{ intentId: string; status: string }>(
-        "/api/v1/trading/intents",
-        {
-          method: "POST",
-          body: JSON.stringify({ preview_id: preview.previewId }),
-        },
-        csrf,
-      );
-      setNotice(
-        `Order ${intent.intentId} admitted. The fenced worker is submitting it now.`,
-      );
+      const outcomes: string[] = [];
+      for (const selectedAccountId of accountIds) {
+        const account = accounts.find((item) => item.id === selectedAccountId);
+        try {
+          const preview = await request<OrderPreview>("/api/v1/trading/previews", {
+            method: "POST",
+            body: JSON.stringify({
+              account_id: selectedAccountId,
+              product_id: Number(productId),
+              side,
+              contracts: Number(contracts),
+              order_type: orderType,
+              limit_price: orderType === "limit" ? limitPrice : null,
+              reduce_only: reduceOnly,
+            }),
+          }, csrf);
+          const intent = await request<{ intentId: string; status: string }>("/api/v1/trading/intents", {
+            method: "POST",
+            body: JSON.stringify({ preview_id: preview.previewId }),
+          }, csrf);
+          outcomes.push(`${account?.profileName ?? selectedAccountId}: order ${intent.intentId} submitted`);
+        } catch (error) {
+          const reason = error instanceof RequestError && ["insufficient_available_balance", "insufficient_margin", "insufficient_commission"].includes(error.code)
+            ? "not placed: insufficient available balance or margin"
+            : error instanceof RequestError
+              ? `not placed (${error.code})`
+              : "not placed (request failed)";
+          outcomes.push(`${account?.profileName ?? selectedAccountId}: ${reason}`);
+        }
+      }
+      setNotice(outcomes.join(" · "));
+      if (outcomes.some((outcome) => outcome.includes("submitted"))) onSubmitted();
     } catch (error) {
       setNotice(
         error instanceof RequestError &&
@@ -1624,14 +1650,16 @@ function TradingPage({
       setSubmitting(false);
     }
   }
-  const selected = accounts.find((account) => account.id === accountId);
   const selectedProduct = products.find(
     (product) => product.productId === Number(productId),
   );
-  const approvedIds = new Set(riskPolicy?.allowedProductIds ?? []);
-  const filteredProducts = products.filter((product) =>
-    product.symbol.toLowerCase().includes(productSearch.trim().toLowerCase()),
+  const tradableAccounts = accounts.filter(
+    canSelectAccount,
   );
+  const filteredProducts = products
+    .filter((product) => product.tradingStatus.toLowerCase() === "operational")
+    .filter((product) => product.symbol.toLowerCase().includes(productSearch.trim().toLowerCase()));
+  const selectedPolicies = accountIds.map((id) => riskPolicies[id] ?? null);
   const executablePrice = Number(
     side === "buy"
       ? selectedProduct?.bestAsk
@@ -1643,15 +1671,18 @@ function TradingPage({
       : 0;
   const estimatedMargin =
     estimatedNotional * Number(selectedProduct?.initialMargin ?? "0");
-  const productApproved =
-    selectedProduct !== undefined && approvedIds.has(selectedProduct.productId);
+  const productApproved = selectedProduct !== undefined && selectedPolicies.length > 0 && selectedPolicies.every((policy) => Boolean(policy?.enabled && policy.allowedProductIds.includes(selectedProduct.productId)));
   const canTrade =
-    !readOnlyMode && user.role !== "viewer" && selected?.permission !== "view";
-  return (
-    <>
-      <Panel title="Place crypto order">
+    !readOnlyMode && user.role !== "viewer" && accountIds.length > 0;
+  return createPortal(
+    <div className="hmt-modal-backdrop hmt-order-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section aria-labelledby="place-order-title" aria-modal="true" className="hmt-order-dialog" role="dialog">
+        <header className="hmt-order-dialog__header"><div><h2 id="place-order-title">Place Order</h2><p>Delta Exchange India · one contract applied to each selected account</p></div><button aria-label="Close order ticket" className="hmt-icon-button" onClick={onClose} type="button"><X /></button></header>
+        {loading ? <p className="hmt-alert" role="status">Loading accounts and live contracts…</p> : null}
+        {loadError ? <p className="hmt-alert hmt-alert--error" role="alert">{loadError}</p> : null}
+        {!loading && !loadError && tradableAccounts.length === 0 ? <p className="hmt-alert hmt-alert--warning" role="status">No accounts are ready to trade. Verify a production account and wait for fresh reconciliation.</p> : null}
         {readOnlyMode ? (
-          <p className="mx-4 mt-4 rounded border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
+          <p className="hmt-alert hmt-alert--warning">
             Qualification mode — order previews and submissions remain disabled.
           </p>
         ) : null}
@@ -1659,11 +1690,8 @@ function TradingPage({
           className="hmt-order-ticket"
           onSubmit={(event) => void placeOrder(event)}
         >
-          <div className="hmt-order-ticket__grid">
-            <label>Delta account<select className="hmt-input" onChange={(event) => setAccountId(event.target.value)} required value={accountId}><option value="">Select account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select></label>
-            <label>Find contract<input className="hmt-input" onChange={(event) => setProductSearch(event.target.value)} placeholder="Search BTCUSD, ETHUSD…" value={productSearch} /></label>
-            <label className="md:col-span-2">Crypto contract<select className="hmt-input" onChange={(event) => setProductId(event.target.value)} required value={productId}><option value="">Select contract</option>{filteredProducts.map((product) => <option key={product.productId} value={product.productId}>{product.symbol} · {product.contractType} {approvedIds.has(product.productId) ? "· Approved" : "· Risk approval required"}</option>)}</select></label>
-          </div>
+          <div className="hmt-order-accounts"><div className="hmt-order-accounts__heading"><strong>Select Accounts ({accountIds.length} selected)</strong><button className="hmt-text-button" disabled={!tradableAccounts.length} onClick={() => setAccountIds(accountIds.length === tradableAccounts.length ? [] : tradableAccounts.map((account) => account.id))} type="button">{accountIds.length === tradableAccounts.length ? "Clear selection" : "Select all"}</button></div><div className="hmt-order-accounts__grid">{accounts.map((account) => { const checked = accountIds.includes(account.id); const disabled = !canSelectAccount(account); const reason = account.permission === "view" ? "View only" : account.environment !== "prod" ? "Testnet excluded" : account.credentialState !== "verified" ? "Verify credentials" : account.reconciliationState !== "ready" || account.leaseActive !== true ? "Account not ready" : "Delta India · Live"; return <label className={`hmt-order-account ${checked ? "is-selected" : ""} ${disabled ? "is-disabled" : ""}`} key={account.id}><input checked={checked} disabled={disabled} onChange={() => setAccountIds((selected) => checked ? selected.filter((id) => id !== account.id) : [...selected, account.id])} type="checkbox" /><span>{account.profileName}<small>{reason}</small></span></label>; })}</div></div>
+          <div className="hmt-order-search"><label htmlFor="crypto-contract-search">Contract</label><div className="hmt-order-search__control"><Search size={18} /><input autoComplete="off" id="crypto-contract-search" onChange={(event) => { setProductSearch(event.target.value); setProductPickerOpen(true); setProductId(""); }} onFocus={() => setProductPickerOpen(true)} placeholder="Search crypto contracts, e.g. BTCUSD" value={productSearch || selectedProduct?.symbol || ""} /><button aria-label="Show contracts" onClick={() => setProductPickerOpen((open) => !open)} type="button"><ChevronDown size={16} /></button>{productPickerOpen ? <div className="hmt-order-search__results" role="listbox">{filteredProducts.map((product) => <button aria-selected={Number(productId) === product.productId} key={product.productId} onClick={() => { setProductId(String(product.productId)); setProductSearch(""); setProductPickerOpen(false); }} role="option" type="button"><span>{product.symbol}</span><small>{product.contractType.replaceAll("_", " ")} · {product.quoteFresh ? "Live quote" : "Quote stale"}</small></button>)}{filteredProducts.length === 0 ? <p>No active contracts match that search.</p> : null}</div> : null}</div></div>
           <div className="hmt-order-segment" role="group" aria-label="Position side">
             <button className={side === "buy" ? "is-long" : ""} onClick={() => setSide("buy")} type="button">Long / Buy</button>
             <button className={side === "sell" ? "is-short" : ""} onClick={() => setSide("sell")} type="button">Short / Sell</button>
@@ -1687,12 +1715,12 @@ function TradingPage({
           )}
           </div>
           <div className="hmt-order-metrics">
-            <div><small>Catalogue leverage (display only)</small><strong>{selectedProduct?.defaultLeverage ? `${selectedProduct.defaultLeverage}×` : "Exchange managed"}</strong></div>
+            <div><small>Leverage</small><strong>{selectedProduct?.defaultLeverage ? `${selectedProduct.defaultLeverage}× maximum` : "Exchange managed"}</strong><small>Exchange controlled</small></div>
             <div><small>Est. notional</small><strong>${estimatedNotional ? estimatedNotional.toFixed(4) : "—"}</strong></div>
             <div><small>Est. initial margin</small><strong>${estimatedMargin ? estimatedMargin.toFixed(4) : "—"}</strong></div>
             <div><small>Required protection</small><strong>SL 2% · TP 4% · Trail 1%</strong></div>
           </div>
-          <p className={productApproved ? "hmt-order-scope is-approved" : "hmt-order-scope"}>{productApproved ? "Approved by the active account risk policy." : "This contract is visible but cannot trade until an Admin adds its current product ID to the risk policy and completes requalification."}</p>
+          <p className={productApproved ? "hmt-order-scope is-approved" : "hmt-order-scope"}>{productApproved ? "Contract is approved by every selected account risk policy." : "Select a contract approved by every selected account. Admins can configure eligible contracts in Risk Management."}</p>
           <label className="flex items-center gap-2">
             <input
               checked={reduceOnly}
@@ -1701,21 +1729,18 @@ function TradingPage({
             />
             Reduce-only exit
           </label>
-          <button
-            className={`hmt-order-submit ${side === "sell" ? "is-short" : ""}`}
-            disabled={submitting || !canTrade || !accountId || !productId || !productApproved || !selectedProduct?.quoteFresh}
-            type="submit"
-          >
-            {submitting ? "Placing order…" : `${side === "buy" ? "Place Long" : "Place Short"} immediately`}
-          </button>
           {notice ? (
-            <p className="md:col-span-2" role="status">
+            <p className="hmt-order-notice" role="status">
               {notice}
             </p>
           ) : null}
+          <footer className="hmt-order-ticket__footer">
+            <span>{accountIds.length} account(s) selected</span>
+            <div><button className="hmt-secondary-button" onClick={onClose} type="button">Cancel</button><button className={`hmt-order-submit ${side === "sell" ? "is-short" : ""}`} disabled={loading || Boolean(loadError) || submitting || !canTrade || !productId || !productApproved || !selectedProduct?.quoteFresh || (orderType === "limit" && !limitPrice)} type="submit">{submitting ? "Submitting…" : `${side === "buy" ? "Buy / Long" : "Sell / Short"} immediately`}</button></div>
+          </footer>
         </form>
-      </Panel>
-    </>
+      </section>
+    </div>, document.body,
   );
 }
 
@@ -1741,6 +1766,7 @@ function AccountStatePage({
   const [modifySize, setModifySize] = useState("");
   const [modifyPrice, setModifyPrice] = useState("");
   const [exitingPosition, setExitingPosition] = useState(false);
+  const [showOrderTicket, setShowOrderTicket] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(
     (selected: string) => {
@@ -1884,11 +1910,11 @@ function AccountStatePage({
       <Panel
         title={
           mode === "orders"
-            ? "Reconciled orders and fills"
+            ? "Orders"
             : "Reconciled positions and balances"
         }
       >
-        <div className="flex gap-3 p-4">
+        <div className={`hmt-orders-toolbar ${mode === "orders" ? "is-orders" : ""}`}>
           <select
             className="rounded border px-3 py-2"
             onChange={(event) => {
@@ -1904,17 +1930,27 @@ function AccountStatePage({
             ))}
           </select>
           <button
-            className="rounded border px-3 py-2"
+            className="hmt-secondary-button"
             onClick={() => load(accountId)}
             type="button"
           >
-            Refresh
+            <RefreshCw size={16} /> Refresh
           </button>
           <span className="self-center text-sm">
             {state
               ? `${state.fresh ? "Fresh" : "Stale"} · ${state.ageSeconds}s · reconciliation ${state.reconciliationState} · lease ${state.leaseActive ? "active" : "inactive"} · credential v${state.credentialVersion}`
               : "No state"}
           </span>
+          {mode === "orders" ? (
+            <button
+              className="hmt-primary-button hmt-orders-toolbar__place"
+              disabled={readOnlyMode || user.role === "viewer"}
+              onClick={() => setShowOrderTicket(true)}
+              type="button"
+            >
+              <Plus size={16} /> Place Order
+            </button>
+          ) : null}
         </div>
         {error ? (
           <p className="px-4 pb-4" role="status">
@@ -2080,6 +2116,15 @@ function AccountStatePage({
           </>
         ) : null}
       </Panel>
+      {mode === "orders" && showOrderTicket ? (
+        <OrderTicketDialog
+          csrf={csrf}
+          onClose={() => setShowOrderTicket(false)}
+          onSubmitted={() => load(accountId)}
+          readOnlyMode={readOnlyMode}
+          user={user}
+        />
+      ) : null}
       {mode === "orders" && !readOnlyMode ? (
         <Panel title="Cancel and modification lifecycle">
           <div className="overflow-x-auto">
@@ -4350,16 +4395,7 @@ function Shell({
                 path="/accounts"
                 element={<AccountsPage csrf={csrf} user={user} />}
               />
-              <Route
-                path="/trading"
-                element={
-                  <TradingPage
-                    csrf={csrf}
-                    readOnlyMode={session.readOnlyMode}
-                    user={user}
-                  />
-                }
-              />
+              <Route path="/trading" element={<Navigate replace to="/orders" />} />
               <Route
                 path="/orders"
                 element={
