@@ -1545,7 +1545,7 @@ function TradingPage({
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
   const [limitPrice, setLimitPrice] = useState("");
   const [reduceOnly, setReduceOnly] = useState(false);
-  const [preview, setPreview] = useState<OrderPreview | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
     void Promise.all([
@@ -1577,12 +1577,12 @@ function TradingPage({
       setProductId(String(firstApproved.productId));
     }
   }, [products, productId, riskPolicy]);
-  async function createPreview(event: FormEvent) {
+  async function placeOrder(event: FormEvent) {
     event.preventDefault();
     setNotice(null);
-    setPreview(null);
+    setSubmitting(true);
     try {
-      const value = await request<OrderPreview>(
+      const preview = await request<OrderPreview>(
         "/api/v1/trading/previews",
         {
           method: "POST",
@@ -1598,22 +1598,7 @@ function TradingPage({
         },
         csrf,
       );
-      setPreview(value);
-    } catch (error) {
-      setNotice(
-        error instanceof RequestError &&
-          ["insufficient_available_balance", "insufficient_margin", "insufficient_commission"].includes(
-            error.code,
-          )
-          ? "Order not placed: insufficient available balance. Reduce the contract quantity or add funds."
-          : "Preview rejected. Check account readiness, quote freshness, position and risk limits.",
-      );
-    }
-  }
-  async function submitIntent() {
-    if (preview === null) return;
-    try {
-      const value = await request<{ intentId: string; status: string }>(
+      const intent = await request<{ intentId: string; status: string }>(
         "/api/v1/trading/intents",
         {
           method: "POST",
@@ -1622,12 +1607,21 @@ function TradingPage({
         csrf,
       );
       setNotice(
-        `Live intent ${value.intentId} admitted. The fenced worker will process it.`,
+        `Order ${intent.intentId} admitted. The fenced worker is submitting it now.`,
       );
-      setPreview(null);
-    } catch {
-      setNotice("Preview expired or was invalidated. Create a fresh preview.");
-      setPreview(null);
+    } catch (error) {
+      setNotice(
+        error instanceof RequestError &&
+          ["insufficient_available_balance", "insufficient_margin", "insufficient_commission"].includes(
+            error.code,
+          )
+          ? "Order not placed: insufficient available balance. Reduce the contract quantity or add funds."
+          : error instanceof RequestError
+            ? `Order not placed (${error.code}). Check account readiness, quote freshness, position and risk limits.`
+            : "Order not placed. Check account readiness, quote freshness, position and risk limits.",
+      );
+    } finally {
+      setSubmitting(false);
     }
   }
   const selected = accounts.find((account) => account.id === accountId);
@@ -1663,12 +1657,12 @@ function TradingPage({
         ) : null}
         <form
           className="hmt-order-ticket"
-          onSubmit={(event) => void createPreview(event)}
+          onSubmit={(event) => void placeOrder(event)}
         >
           <div className="hmt-order-ticket__grid">
             <label>Delta account<select className="hmt-input" onChange={(event) => setAccountId(event.target.value)} required value={accountId}><option value="">Select account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select></label>
             <label>Find contract<input className="hmt-input" onChange={(event) => setProductSearch(event.target.value)} placeholder="Search BTCUSD, ETHUSD…" value={productSearch} /></label>
-            <label className="md:col-span-2">Crypto contract<select className="hmt-input" onChange={(event) => { setProductId(event.target.value); setPreview(null); }} required value={productId}><option value="">Select contract</option>{filteredProducts.map((product) => <option key={product.productId} value={product.productId}>{product.symbol} · {product.contractType} {approvedIds.has(product.productId) ? "· Approved" : "· Risk approval required"}</option>)}</select></label>
+            <label className="md:col-span-2">Crypto contract<select className="hmt-input" onChange={(event) => setProductId(event.target.value)} required value={productId}><option value="">Select contract</option>{filteredProducts.map((product) => <option key={product.productId} value={product.productId}>{product.symbol} · {product.contractType} {approvedIds.has(product.productId) ? "· Approved" : "· Risk approval required"}</option>)}</select></label>
           </div>
           <div className="hmt-order-segment" role="group" aria-label="Position side">
             <button className={side === "buy" ? "is-long" : ""} onClick={() => setSide("buy")} type="button">Long / Buy</button>
@@ -1709,10 +1703,10 @@ function TradingPage({
           </label>
           <button
             className={`hmt-order-submit ${side === "sell" ? "is-short" : ""}`}
-            disabled={!canTrade || !accountId || !productId || !productApproved || !selectedProduct?.quoteFresh}
+            disabled={submitting || !canTrade || !accountId || !productId || !productApproved || !selectedProduct?.quoteFresh}
             type="submit"
           >
-            Preview {side === "buy" ? "Long" : "Short"} order
+            {submitting ? "Placing order…" : `${side === "buy" ? "Place Long" : "Place Short"} immediately`}
           </button>
           {notice ? (
             <p className="md:col-span-2" role="status">
@@ -1721,66 +1715,6 @@ function TradingPage({
           ) : null}
         </form>
       </Panel>
-      {preview ? (
-        <Panel title="Confirm exact Live intent">
-          <div className="grid gap-3 p-4 md:grid-cols-4">
-            <div>
-              <small>Product</small>
-              <strong className="block">{preview.productId}</strong>
-            </div>
-            <div>
-              <small>Validated price</small>
-              <strong className="block">{preview.price}</strong>
-            </div>
-            <div>
-              <small>Notional</small>
-              <strong className="block">{preview.notional}</strong>
-            </div>
-            <div>
-              <small>Expires</small>
-              <strong className="block">{preview.expiresAt}</strong>
-            </div>
-            <div>
-              <small>Projected aggregate exposure</small>
-              <strong className="block">${preview.projectedExposure ?? "—"}</strong>
-            </div>
-            <div>
-              <small>Risk headroom</small>
-              <strong className="block">${preview.riskHeadroom ?? "—"}</strong>
-            </div>
-            <div>
-              <small>Freshness</small>
-              <strong className="block">
-                Quote {preview.quoteAgeSeconds ?? "—"}s · Reconciliation{" "}
-                {preview.reconciliationAgeSeconds ?? "—"}s
-              </strong>
-            </div>
-            <div>
-              <small>Required protection</small>
-              <strong className="block">
-                SL {preview.requiredProtection?.stopLossPct ?? "2"}% · Target{" "}
-                {preview.requiredProtection?.targetPct ?? "4"}% · Trail{" "}
-                {preview.requiredProtection?.trailingOffsetPct ?? "1"}%
-              </strong>
-            </div>
-            <button
-              className="rounded bg-red-700 px-4 py-2 text-white md:col-span-2"
-              disabled={readOnlyMode}
-              onClick={() => void submitIntent()}
-              type="button"
-            >
-              Admit Live order intent
-            </button>
-            <button
-              className="rounded border px-4 py-2 md:col-span-2"
-              onClick={() => setPreview(null)}
-              type="button"
-            >
-              Discard preview
-            </button>
-          </div>
-        </Panel>
-      ) : null}
     </>
   );
 }
@@ -1806,7 +1740,7 @@ function AccountStatePage({
   > | null>(null);
   const [modifySize, setModifySize] = useState("");
   const [modifyPrice, setModifyPrice] = useState("");
-  const [exitPreview, setExitPreview] = useState<OrderPreview | null>(null);
+  const [exitingPosition, setExitingPosition] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(
     (selected: string) => {
@@ -1896,7 +1830,7 @@ function AccountStatePage({
       );
     }
   }
-  async function previewPositionExit(row: Record<string, unknown>) {
+  async function exitPositionImmediately(row: Record<string, unknown>) {
     const productId = Number(row.product_id ?? row.productId);
     const signedSize = Number(row.size ?? row.contracts);
     const contracts = Math.abs(signedSize);
@@ -1907,8 +1841,9 @@ function AccountStatePage({
       setError("Position size is not a valid whole-contract exit quantity.");
       return;
     }
+    setExitingPosition(true);
     try {
-      const value = await request<OrderPreview>(
+      const preview = await request<OrderPreview>(
         "/api/v1/trading/previews",
         {
           method: "POST",
@@ -1924,33 +1859,24 @@ function AccountStatePage({
         },
         csrf,
       );
-      setExitPreview(value);
-      setError(null);
-    } catch (requestError) {
-      setError(
-        requestError instanceof RequestError
-          ? `Exit preview rejected (${requestError.code}). Refresh the position and retry.`
-          : "Exit preview rejected. Refresh the position and retry.",
-      );
-    }
-  }
-  async function submitPositionExit() {
-    if (!exitPreview) return;
-    try {
-      const value = await request<{ intentId: string }>(
+      const intent = await request<{ intentId: string }>(
         "/api/v1/trading/intents",
         {
           method: "POST",
-          body: JSON.stringify({ preview_id: exitPreview.previewId }),
+          body: JSON.stringify({ preview_id: preview.previewId }),
         },
         csrf,
       );
-      setError(`Reduce-only exit ${value.intentId} admitted to the fenced worker.`);
-      setExitPreview(null);
+      setError(`Reduce-only exit ${intent.intentId} admitted for immediate submission.`);
       load(accountId);
-    } catch {
-      setError("Exit preview expired or was invalidated. Create it again.");
-      setExitPreview(null);
+    } catch (requestError) {
+      setError(
+        requestError instanceof RequestError
+          ? `Exit not placed (${requestError.code}). Refresh the position and retry.`
+          : "Exit not placed. Refresh the position and retry.",
+      );
+    } finally {
+      setExitingPosition(false);
     }
   }
   return (
@@ -2066,10 +1992,11 @@ function AccountStatePage({
                         {canTrade ? (
                           <button
                             className="rounded border border-red-300 px-3 py-2 text-red-700"
-                            onClick={() => void previewPositionExit(row)}
+                            disabled={exitingPosition}
+                            onClick={() => void exitPositionImmediately(row)}
                             type="button"
                           >
-                            Quick exit
+                            {exitingPosition ? "Exiting…" : "Exit now"}
                           </button>
                         ) : "—"}
                       </td>
@@ -2087,16 +2014,6 @@ function AccountStatePage({
             </tbody>
           </table>
         </div>
-        {mode === "positions" && exitPreview ? (
-          <div className="m-4 grid gap-3 rounded border border-red-200 bg-red-50 p-4 md:grid-cols-4">
-            <div><small>Reduce-only product</small><strong className="block">{exitPreview.productId}</strong></div>
-            <div><small>Validated price</small><strong className="block">${exitPreview.price}</strong></div>
-            <div><small>Notional</small><strong className="block">${exitPreview.notional}</strong></div>
-            <div><small>Expires</small><strong className="block">{exitPreview.expiresAt}</strong></div>
-            <button className="rounded bg-red-700 px-4 py-2 text-white md:col-span-2" onClick={() => void submitPositionExit()} type="button">Confirm reduce-only exit</button>
-            <button className="rounded border bg-white px-4 py-2 md:col-span-2" onClick={() => setExitPreview(null)} type="button">Keep position</button>
-          </div>
-        ) : null}
         {!readOnlyMode && modifyOrder ? (
           <form
             className="grid gap-3 border-t p-4 md:grid-cols-3"
