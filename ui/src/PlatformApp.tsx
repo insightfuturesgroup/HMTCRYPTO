@@ -4001,7 +4001,6 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
                       <button
                         className="rounded bg-amber-600 px-2 py-1 text-xs text-white disabled:bg-slate-400"
                         disabled={
-                          !health?.globalEntriesEnabled ||
                           !a.workerLeaseActive ||
                           a.reconciliationState !== "ready" ||
                           !a.riskEnabled
