@@ -12,12 +12,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from sqlalchemy import and_, desc, func, literal, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -173,6 +173,21 @@ class _Body(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
 
 
+def _json_uuid(value: object) -> object:
+    """Convert the canonical JSON representation before strict UUID validation."""
+    if type(value) is UUID:
+        return value
+    if type(value) is not str or len(value) != 36:
+        return value
+    try:
+        return UUID(value)
+    except ValueError:
+        return value
+
+
+JsonUUID = Annotated[UUID, BeforeValidator(_json_uuid)]
+
+
 class LoginBody(_Body):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=1024)
@@ -204,7 +219,7 @@ class UpdateAccountBody(_Body):
 
 
 class AssignmentBody(_Body):
-    user_id: UUID
+    user_id: JsonUUID
     permission: Literal["view", "trade", "manage"]
 
 
@@ -227,7 +242,7 @@ class WatchlistGroupItemBody(WatchlistBody):
 
 
 class GttBody(_Body):
-    account_id: UUID
+    account_id: JsonUUID
     product_id: int = Field(gt=0)
     symbol: str = Field(min_length=1, max_length=128)
     side: Literal["buy", "sell"]
@@ -261,7 +276,7 @@ class GlobalEntryGateBody(_Body):
 
 
 class OrderPreviewBody(_Body):
-    account_id: UUID
+    account_id: JsonUUID
     product_id: int = Field(gt=0)
     side: Literal["buy", "sell"]
     contracts: int = Field(gt=0, lt=2**63)
@@ -271,11 +286,11 @@ class OrderPreviewBody(_Body):
 
 
 class OrderIntentBody(_Body):
-    preview_id: UUID
+    preview_id: JsonUUID
 
 
 class OrderActionBody(_Body):
-    account_id: UUID
+    account_id: JsonUUID
     action: Literal["cancel", "modify"]
     order_id: int = Field(gt=0, lt=2**63)
     product_id: int = Field(gt=0, lt=2**63)
@@ -289,7 +304,7 @@ class GeneralSettingsBody(_Body):
 
 
 class TradingViewStrategyBody(_Body):
-    account_id: UUID
+    account_id: JsonUUID
     name: str = Field(min_length=1, max_length=128)
     product_id: int = Field(gt=0)
     symbol: str = Field(min_length=1, max_length=128)
