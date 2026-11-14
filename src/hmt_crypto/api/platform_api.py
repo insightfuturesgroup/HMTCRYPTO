@@ -33,7 +33,9 @@ from hmt_crypto.api.delta_verification import (
     verify_delta_credentials,
 )
 from hmt_crypto.api.live_order_admission import (
+    InsufficientAvailableBalanceError,
     LiveOrderAdmissionError,
+    ensure_sufficient_available_balance,
     evaluate_order_sizing,
     position_notional,
     projected_position_contracts,
@@ -2937,13 +2939,15 @@ def install_platform_routes(
             assert quote is not None
             assert qualification is not None
             try:
+                balances = json.loads(reconciliation.balances_payload or "")
                 positions = json.loads(reconciliation.positions_payload or "")
                 open_orders = json.loads(reconciliation.open_orders_payload or "")
                 wallet = json.loads(reconciliation.wallet_transactions_payload or "")
             except (TypeError, ValueError):
                 raise HTTPException(status_code=409, detail="account_state_not_ready") from None
             if (
-                not isinstance(positions, list)
+                not isinstance(balances, list)
+                or not isinstance(positions, list)
                 or not isinstance(open_orders, list)
                 or not isinstance(wallet, list)
             ):
@@ -2964,6 +2968,19 @@ def install_platform_routes(
                 )
             except LiveOrderAdmissionError:
                 raise HTTPException(status_code=400, detail="invalid_order_sizing") from None
+            if not body.reduce_only:
+                try:
+                    ensure_sufficient_available_balance(
+                        product=product,
+                        balances=balances,
+                        notional=sizing.notional,
+                    )
+                except InsufficientAvailableBalanceError:
+                    raise HTTPException(
+                        status_code=409, detail="insufficient_available_balance"
+                    ) from None
+                except LiveOrderAdmissionError:
+                    raise HTTPException(status_code=409, detail="account_state_not_ready") from None
             signed_position = 0
             for item in positions:
                 if isinstance(item, dict) and item.get("product_id") == body.product_id:

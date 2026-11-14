@@ -5,7 +5,9 @@ from decimal import Decimal
 import pytest
 
 from hmt_crypto.api.live_order_admission import (
+    InsufficientAvailableBalanceError,
     LiveOrderAdmissionError,
+    ensure_sufficient_available_balance,
     evaluate_order_sizing,
     position_notional,
     projected_position_contracts,
@@ -59,6 +61,44 @@ def test_limit_preview_uses_exact_contract_notional() -> None:
     assert evidence.price == Decimal("50000.5")
     assert evidence.price_basis == "limit"
     assert evidence.notional == Decimal("150.0015")
+
+
+def test_available_balance_covers_estimated_initial_margin() -> None:
+    ensure_sufficient_available_balance(
+        product=product(initial_margin="0.02"),
+        balances=[
+            {
+                "asset_id": 2,
+                "asset_symbol": "USD",
+                "available_balance": "1.01",
+            }
+        ],
+        notional=Decimal("50"),
+    )
+
+
+def test_available_balance_rejects_below_estimated_initial_margin() -> None:
+    with pytest.raises(InsufficientAvailableBalanceError):
+        ensure_sufficient_available_balance(
+            product=product(initial_margin="0.02"),
+            balances=[
+                {
+                    "asset_id": 2,
+                    "asset_symbol": "USD",
+                    "available_balance": "0.99",
+                }
+            ],
+            notional=Decimal("50"),
+        )
+
+
+def test_available_balance_rejects_missing_settlement_evidence() -> None:
+    with pytest.raises(LiveOrderAdmissionError):
+        ensure_sufficient_available_balance(
+            product=product(initial_margin="0.02"),
+            balances=[],
+            notional=Decimal("50"),
+        )
 
 
 @pytest.mark.parametrize(

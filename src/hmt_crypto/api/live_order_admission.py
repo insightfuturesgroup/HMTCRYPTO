@@ -10,6 +10,7 @@ from hmt_crypto.exchange.delta.sizing_math import (
     is_zero,
     multiply,
     multiply_integer,
+    nonnegative_result_decimal,
     positive_decimal,
     positive_integer,
 )
@@ -20,11 +21,47 @@ class LiveOrderAdmissionError(Exception):
     pass
 
 
+class InsufficientAvailableBalanceError(LiveOrderAdmissionError):
+    """The reconciled settlement balance cannot cover estimated initial margin."""
+
+
 @dataclass(frozen=True, slots=True)
 class OrderSizingEvidence:
     price: Decimal
     price_basis: str
     notional: Decimal
+
+
+def ensure_sufficient_available_balance(
+    *, product: Product, balances: list[object], notional: Decimal
+) -> None:
+    """Fail closed when settlement collateral cannot cover initial margin.
+
+    This is an admission guard, not a replacement for Delta's authoritative
+    margin calculation. Delta may still reject for fees or portfolio margin.
+    """
+    try:
+        if product.settling_asset is None or product.initial_margin is None:
+            raise NumericContractError
+        margin_rate = nonnegative_result_decimal(product.initial_margin)
+        required_margin = multiply(positive_decimal(notional), margin_rate)
+        matches: list[Decimal] = []
+        for row in balances:
+            if not isinstance(row, dict):
+                raise NumericContractError
+            if (
+                row.get("asset_id") == product.settling_asset.id
+                and row.get("asset_symbol") == product.settling_asset.symbol
+            ):
+                matches.append(nonnegative_result_decimal(row.get("available_balance")))
+        if len(matches) != 1:
+            raise NumericContractError
+        if matches[0] < required_margin:
+            raise InsufficientAvailableBalanceError
+    except InsufficientAvailableBalanceError:
+        raise
+    except Exception:
+        raise LiveOrderAdmissionError() from None
 
 
 def _integer(value: object, *, allow_zero: bool = False) -> int:
@@ -135,9 +172,11 @@ def evaluate_order_sizing(
 
 
 __all__ = [
+    "InsufficientAvailableBalanceError",
     "LiveOrderAdmissionError",
     "OrderSizingEvidence",
     "evaluate_order_sizing",
+    "ensure_sufficient_available_balance",
     "position_notional",
     "projected_position_contracts",
 ]

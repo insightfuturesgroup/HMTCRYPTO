@@ -1566,9 +1566,14 @@ function TradingPage({
         csrf,
       );
       setPreview(value);
-    } catch {
+    } catch (error) {
       setNotice(
-        "Preview rejected. Check account readiness, quote freshness, position and risk limits.",
+        error instanceof RequestError &&
+          ["insufficient_available_balance", "insufficient_margin", "insufficient_commission"].includes(
+            error.code,
+          )
+          ? "Order not placed: insufficient available balance. Reduce the contract quantity or add funds."
+          : "Preview rejected. Check account readiness, quote freshness, position and risk limits.",
       );
     }
   }
