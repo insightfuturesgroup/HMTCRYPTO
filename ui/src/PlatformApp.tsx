@@ -267,6 +267,7 @@ interface OrderPreview {
 
 interface GttRow {
   id: string;
+  accountId: string;
   productId: number;
   symbol: string;
   side: "buy" | "sell";
@@ -733,6 +734,22 @@ function money(value: string, currency = "USD") {
     currency,
     maximumFractionDigits: 2,
   }).format(parsed);
+}
+
+function displayPrice(value: string | number | null | undefined) {
+  if (value == null || value === "") return "—";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return String(value);
+  return parsed.toLocaleString("en-US", {
+    useGrouping: false,
+    maximumFractionDigits: 10,
+  });
+}
+
+function DateTimeCell({ value }: { readonly value: unknown }) {
+  const date = new Date(String(value ?? ""));
+  if (Number.isNaN(date.getTime())) return <>—</>;
+  return <span className="hmt-date-time"><span>{date.toLocaleDateString()}</span><small>{date.toLocaleTimeString()}</small></span>;
 }
 
 function StatusBadge({
@@ -2042,16 +2059,17 @@ function AccountStatePage({
                       ? undefined
                       : state?.openOrders.find((order) => Number(order.id ?? order.order_id) === intent.exchangeOrderId);
                     return <tr key={intent.intentId}>
-                    <td>{new Date(intent.createdAt).toLocaleString()}</td>
+                    <td><span className="hmt-date-time"><span>{new Date(intent.createdAt).toLocaleDateString()}</span><small>{new Date(intent.createdAt).toLocaleTimeString()}</small></span></td>
                     <td><strong>{intent.symbol}</strong><small>Product {intent.productId}</small></td>
                     <td><span className={`hmt-side-badge ${intent.side.toLowerCase()}`}>{intent.side.toUpperCase()}</span></td>
                     <td>{intent.orderType.toUpperCase()} · {intent.contracts}</td>
-                    <td>{intent.price}</td>
+                    <td>{displayPrice(intent.price)}</td>
                     <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus.replaceAll("_", " ")}</span></td>
                     <td>{intent.exchangeOrderId ?? "Awaiting acknowledgement"}</td>
                     <td>{intent.errorCode ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : intent.submissionStatus === "UNCERTAIN" ? "Check Delta before retrying" : "Waiting for Delta acknowledgement")}</td>
                     <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" || intent.submissionStatus === "UNCERTAIN" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
-                  </tr>)}
+                  </tr>;
+                  })}
                   {orderIntents.length === 0 ? <tr><td colSpan={9}>No locally submitted orders.</td></tr> : null}
                 </tbody>
               </table></div>
@@ -2223,51 +2241,6 @@ function AccountStatePage({
   );
 }
 
-function RecordTable({
-  rows,
-  empty,
-}: {
-  readonly rows: Record<string, unknown>[];
-  readonly empty: string;
-}) {
-  const columns = Array.from(
-    new Set(rows.flatMap((row) => Object.keys(row))),
-  ).slice(0, 10);
-  const text = (value: unknown) =>
-    value === null || value === undefined
-      ? "—"
-      : typeof value === "object"
-        ? JSON.stringify(value)
-        : String(value);
-  return (
-    <div className="overflow-x-auto border-t">
-      <table>
-        <thead>
-          <tr>
-            {columns.map((column) => (
-              <th key={column}>{column.replaceAll("_", " ")}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={String(row.id ?? row.asset_symbol ?? index)}>
-              {columns.map((column) => (
-                <td key={column}>{text(row[column])}</td>
-              ))}
-            </tr>
-          ))}
-          {rows.length === 0 ? (
-            <tr>
-              <td colSpan={Math.max(1, columns.length)}>{empty}</td>
-            </tr>
-          ) : null}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 function GttPage({
   user,
   csrf,
@@ -2279,7 +2252,8 @@ function GttPage({
 }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
-  const [accountId, setAccountId] = useState("");
+  const [accountIds, setAccountIds] = useState<string[]>([]);
+  const [createAccountIds, setCreateAccountIds] = useState<string[]>([]);
   const [productId, setProductId] = useState("");
   const [rows, setRows] = useState<GttRow[]>([]);
   const [side, setSide] = useState<"buy" | "sell">("sell");
@@ -2289,78 +2263,119 @@ function GttPage({
   const [trail, setTrail] = useState("");
   const [limit, setLimit] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [productSearch, setProductSearch] = useState("");
   const [search, setSearch] = useState("");
   const [kindFilter, setKindFilter] = useState("all");
   const [showCreate, setShowCreate] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const load = useCallback((selected: string) => {
-    if (selected)
-      void request<{ orders: GttRow[] }>(
-        `/api/v1/gtt?account_id=${encodeURIComponent(selected)}`,
-      ).then((value) => setRows(value.orders));
+  const canManageAccount = (account: Account) =>
+    user.role !== "viewer" &&
+    account.permission !== "view" &&
+    account.environment === "prod" &&
+    account.identityVerified &&
+    account.credentialState === "verified" &&
+    account.reconciliationState === "ready" &&
+    account.leaseActive === true &&
+    account.exitsEnabled;
+  const load = useCallback(async (selectedIds: string[]) => {
+    if (selectedIds.length === 0) {
+      setRows([]);
+      return;
+    }
+    const results = await Promise.allSettled(selectedIds.map((id) =>
+      request<{ orders: GttRow[] }>(`/api/v1/gtt?account_id=${encodeURIComponent(id)}`),
+    ));
+    const loaded = results.flatMap((result) => result.status === "fulfilled" ? result.value.orders : []);
+    setRows(loaded);
+    const failed = results.filter((result) => result.status === "rejected").length;
+    if (failed > 0) setNotice(`Could not load GTT data for ${failed} selected account${failed === 1 ? "" : "s"}. Other account data is shown.`);
   }, []);
   useEffect(() => {
+    let active = true;
     void Promise.all([
       request<{ accounts: Account[] }>("/api/v1/accounts"),
       request<{ products: Product[] }>("/api/v1/market/products"),
     ]).then(([a, p]) => {
+      if (!active) return;
       setAccounts(a.accounts);
       setProducts(p.products);
-      const first = a.accounts[0]?.id ?? "";
-      setAccountId(first);
-      setProductId(String(p.products[0]?.productId ?? ""));
-      load(first);
+      const allAccountIds = a.accounts.map((account) => account.id);
+      setAccountIds(allAccountIds);
+      setCreateAccountIds(a.accounts.filter(canManageAccount).map((account) => account.id));
+      const firstProduct = p.products.find((product) => product.contractType === "perpetual_futures") ?? p.products[0];
+      setProductId(String(firstProduct?.productId ?? ""));
+      void load(allAccountIds);
     });
+    return () => { active = false; };
   }, [load]);
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible" && accountId) load(accountId);
+      if (document.visibilityState === "visible" && accountIds.length > 0) void load(accountIds);
     }, 5_000);
     return () => window.clearInterval(timer);
-  }, [accountId, load]);
+  }, [accountIds, load]);
   async function create(event: FormEvent) {
     event.preventDefault();
     const product = products.find(
       (item) => item.productId === Number(productId),
     );
-    try {
-      await request(
-        "/api/v1/gtt",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            account_id: accountId,
-            product_id: Number(productId),
-            symbol: product?.symbol ?? String(productId),
-            side,
-            contracts: Number(contracts),
-            trigger_kind: kind,
-            trigger_price: kind === "trailing_stop" ? null : trigger,
-            trail_offset: kind === "trailing_stop" ? trail : null,
-            limit_price: limit || null,
-          }),
-        },
-        csrf,
-      );
-      setNotice("Protected exit armed.");
-      setShowCreate(false);
-      load(accountId);
-    } catch {
-      setNotice(
-        "GTT rejected. Confirm Live readiness, fresh quotes and risk policy.",
-      );
+    const succeeded: string[] = [];
+    const failures: string[] = [];
+    for (const selectedAccountId of createAccountIds) {
+      const account = accounts.find((item) => item.id === selectedAccountId);
+      if (!account || !canManageAccount(account)) {
+        failures.push(`${account?.profileName ?? "Account"}: not ready or no exit permission`);
+        continue;
+      }
+      try {
+        await request(
+          "/api/v1/gtt",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              account_id: selectedAccountId,
+              product_id: Number(productId),
+              symbol: product?.symbol ?? String(productId),
+              side,
+              contracts: Number(contracts),
+              trigger_kind: kind,
+              trigger_price: kind === "trailing_stop" ? null : trigger,
+              trail_offset: kind === "trailing_stop" ? trail : null,
+              limit_price: limit || null,
+            }),
+          },
+          csrf,
+        );
+        succeeded.push(selectedAccountId);
+      } catch (error) {
+        const accountName = account.profileName;
+        const reason = error instanceof RequestError ? error.code.replaceAll("_", " ") : "request failed";
+        failures.push(`${accountName}: ${reason}`);
+      }
     }
+    setCreateAccountIds((current) => current.filter((id) => !succeeded.includes(id)));
+    const successNames = succeeded.map((id) => accounts.find((account) => account.id === id)?.profileName ?? "Account");
+    setNotice([
+      succeeded.length ? `Protected exit armed for: ${successNames.join(", ")}.` : "No protected exit was armed.",
+      ...failures,
+    ].join(" "));
+    await load(accountIds);
+    if (failures.length === 0) setShowCreate(false);
   }
-  async function cancel(id: string) {
-    await request(`/api/v1/gtt/${id}/cancel`, { method: "POST" }, csrf);
-    load(accountId);
+  async function cancel(row: GttRow) {
+    await request(`/api/v1/gtt/${row.id}/cancel`, { method: "POST" }, csrf);
+    setSelected((current) => { const next = new Set(current); next.delete(`${row.accountId}:${row.id}`); return next; });
+    await load(accountIds);
   }
-  const canTrade =
-    !readOnlyMode &&
-    user.role !== "viewer" &&
-    accounts.find((account) => account.id === accountId)?.permission !== "view";
-  const accountName =
-    accounts.find((account) => account.id === accountId)?.profileName ?? "—";
+  const createableAccounts = accounts.filter(canManageAccount);
+  const canTrade = !readOnlyMode && createableAccounts.length > 0;
+  const canCreate = !readOnlyMode && createAccountIds.some((id) =>
+    createableAccounts.some((account) => account.id === id),
+  );
+  const accountName = (id: string) => accounts.find((account) => account.id === id)?.profileName ?? "—";
+  const toggleAccount = (id: string, checked: boolean) => setAccountIds((current) => checked ? [...new Set([...current, id])] : current.filter((value) => value !== id));
+  const toggleCreateAccount = (id: string, checked: boolean) => setCreateAccountIds((current) => checked ? [...new Set([...current, id])] : current.filter((value) => value !== id));
+  const rowKey = (row: GttRow) => `${row.accountId}:${row.id}`;
   const filteredRows = rows.filter(
     (row) =>
       (kindFilter === "all" || row.triggerKind === kindFilter) &&
@@ -2369,19 +2384,20 @@ function GttPage({
   const quoteFor = (row: GttRow) =>
     products.find((product) => product.productId === row.productId);
   const allSelected =
-    filteredRows.length > 0 && filteredRows.every((row) => selected.has(row.id));
+    filteredRows.length > 0 && filteredRows.every((row) => selected.has(rowKey(row)));
+  const eligibleProducts = products.filter((product) => product.contractType === "perpetual_futures" && product.state === "live" && !product.onlyReduceOnlyOrdersAllowed);
+  const searchedProducts = eligibleProducts.filter((product) => product.symbol.toLowerCase().includes(productSearch.trim().toLowerCase()));
   return (
     <div className="hmt-page gtt-page">
       <div className="hmt-page-heading gtt-page__heading">
         <div className="gtt-page__title-row">
           <h1>HMT GTT ({rows.length})</h1>
-          <button className="hmt-primary-button" disabled={!canTrade} onClick={() => setShowCreate(true)} type="button">
+          <button className="hmt-primary-button" disabled={!canTrade} onClick={() => { setCreateAccountIds(accountIds.filter((id) => createableAccounts.some((account) => account.id === id))); setShowCreate(true); }} type="button">
             <Plus size={18} /> New HMT GTT
           </button>
         </div>
         <div className="gtt-page__bulk-actions">
-          <button disabled={selected.size === 0 || !canTrade} type="button"><Pencil size={16} /> Edit selected</button>
-          <button disabled={selected.size === 0 || !canTrade} onClick={() => void Promise.all([...selected].map(cancel)).then(() => { setSelected(new Set()); load(accountId); })} type="button"><Trash2 size={16} /> Cancel selected</button>
+          <button disabled={selected.size === 0 || readOnlyMode || user.role === "viewer"} onClick={() => void Promise.allSettled(filteredRows.filter((row) => selected.has(rowKey(row))).map(cancel)).then(() => { setSelected(new Set()); void load(accountIds); })} type="button"><Trash2 size={16} /> Cancel selected</button>
           <span>Selected actions&nbsp; {selected.size}</span>
         </div>
       </div>
@@ -2395,20 +2411,6 @@ function GttPage({
 
       <div className="gtt-page__filters">
         <label className="gtt-search"><Search size={18} /><input aria-label="Search instrument" onChange={(event) => setSearch(event.target.value)} placeholder="Search instrument" value={search} /></label>
-        <select
-          aria-label="Account"
-          onChange={(event) => {
-            setAccountId(event.target.value);
-            load(event.target.value);
-          }}
-          value={accountId}
-        >
-          {accounts.map((account) => (
-            <option key={account.id} value={account.id}>
-              {account.profileName}
-            </option>
-          ))}
-        </select>
         <select aria-label="Trade type" onChange={(event) => setKindFilter(event.target.value)} value={kindFilter}>
           <option value="all">All protection types</option>
           <option value="stop_loss">Stop loss</option>
@@ -2421,23 +2423,28 @@ function GttPage({
         </select>
       </div>
 
+      <section className="gtt-account-filter" aria-label="Filter by accounts">
+        <div className="hmt-order-accounts__heading"><strong>Accounts ({accountIds.length} selected)</strong><button className="hmt-text-button" onClick={() => { const all = accounts.map((account) => account.id); setAccountIds(all); void load(all); }} type="button">Select all</button><button className="hmt-text-button" onClick={() => { setAccountIds([]); void load([]); }} type="button">Clear</button></div>
+        <div className="hmt-order-accounts__grid">{accounts.map((account) => <label className={`hmt-order-account ${accountIds.includes(account.id) ? "is-selected" : ""}`} key={account.id}><input checked={accountIds.includes(account.id)} onChange={(event) => { toggleAccount(account.id, event.target.checked); const next = event.target.checked ? [...new Set([...accountIds, account.id])] : accountIds.filter((id) => id !== account.id); void load(next); }} type="checkbox" /><span><strong>{account.profileName}</strong><small>{account.environment === "prod" ? "Delta India" : "Testnet"}</small></span></label>)}</div>
+      </section>
+
       {notice ? <p className="gtt-page__notice" role="status">{notice}</p> : null}
 
       <div className="gtt-table-wrap">
         <table className="gtt-table">
-          <thead><tr><th><input aria-label="Select all" checked={allSelected} onChange={(event) => setSelected(event.target.checked ? new Set(filteredRows.map((row) => row.id)) : new Set())} type="checkbox" /></th><th>Instrument</th><th>Account</th><th>Trigger / protection</th><th>Qty.</th><th>LTP / mark</th><th>Status</th><th aria-label="Actions" /></tr></thead>
+          <thead><tr><th><input aria-label="Select all" checked={allSelected} onChange={(event) => setSelected(event.target.checked ? new Set(filteredRows.map(rowKey)) : new Set())} type="checkbox" /></th><th>Instrument</th><th>Account</th><th>Trigger / protection</th><th>Qty.</th><th>LTP / mark</th><th>Status</th><th aria-label="Actions" /></tr></thead>
           <tbody>
             {filteredRows.map((row) => {
               const quote = quoteFor(row);
-              return <tr key={row.id}>
-                <td><input aria-label={`Select ${row.symbol}`} checked={selected.has(row.id)} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(row.id); else next.delete(row.id); return next; })} type="checkbox" /></td>
-                <td><strong>{row.symbol}</strong><small>Delta India · perpetual</small><div className="gtt-tags"><span>OCO</span><span className={`is-${row.side}`}>{row.side.toUpperCase()}</span></div></td>
-                <td><strong>{accountName}</strong><small>Production</small></td>
-                <td><strong>{row.triggerKind.replaceAll("_", " ")}</strong><small>{row.triggerKind === "trailing_stop" ? `Trail ${row.trailOffset ?? "—"}` : `Trigger ${row.triggerPrice ?? "—"}`}{row.limitPrice ? ` · Limit ${row.limitPrice}` : ""}</small></td>
+              return <tr key={rowKey(row)}>
+                <td><input aria-label={`Select ${row.symbol} for ${accountName(row.accountId)}`} checked={selected.has(rowKey(row))} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(rowKey(row)); else next.delete(rowKey(row)); return next; })} type="checkbox" /></td>
+                <td><strong>{row.symbol}</strong><small>Delta India · perpetual</small><div className="gtt-tags"><span>{row.triggerKind === "stop_loss" ? "STOP" : row.triggerKind === "target" ? "TARGET" : "TRAIL"}</span><span className={`is-${row.side}`}>{row.side.toUpperCase()}</span></div></td>
+                <td><strong>{accountName(row.accountId)}</strong><small>Production</small></td>
+                <td><strong>{row.triggerKind.replaceAll("_", " ")}</strong><small>{row.triggerKind === "trailing_stop" ? `Trail ${displayPrice(row.trailOffset)}` : `Trigger ${displayPrice(row.triggerPrice)}`}{row.limitPrice ? ` · Limit ${displayPrice(row.limitPrice)}` : ""}</small></td>
                 <td className={row.side === "sell" ? "is-negative" : "is-positive"}>{row.side === "sell" ? "−" : "+"}{row.contracts}</td>
-                <td><strong>{quote?.markPrice ?? "—"}</strong><small className={quote?.quoteFresh ? "is-ready" : "is-blocked"}>{quote?.quoteFresh ? "Live" : "Stale"}</small></td>
-                <td><StatusBadge good={row.status === "armed"} value={row.status} /><small>{new Date(row.updatedAt).toLocaleString()}</small></td>
-                <td><button aria-label={`Actions for ${row.symbol}`} className="gtt-row-action" disabled={!canTrade || !["armed", "triggered"].includes(row.status)} onClick={() => void cancel(row.id)} title="Cancel protected exit" type="button"><MoreVertical size={18} /></button></td>
+                <td><strong>{displayPrice(quote?.markPrice)}</strong><small className={quote?.quoteFresh ? "is-ready" : "is-blocked"}>{quote?.quoteFresh ? "Live" : "Stale"}</small></td>
+                <td><StatusBadge good={row.status === "armed"} value={row.status} /><DateTimeCell value={row.updatedAt} /></td>
+                <td><button aria-label={`Actions for ${row.symbol}`} className="gtt-row-action" disabled={readOnlyMode || user.role === "viewer" || !canManageAccount(accounts.find((account) => account.id === row.accountId) ?? { permission: "view" } as Account) || !["armed", "triggered"].includes(row.status)} onClick={() => void cancel(row)} title="Cancel protected exit" type="button"><MoreVertical size={18} /></button></td>
               </tr>;
             })}
             {filteredRows.length === 0 ? <tr><td className="gtt-empty" colSpan={8}>No protected exits match these filters.</td></tr> : null}
@@ -2445,68 +2452,17 @@ function GttPage({
         </table>
       </div>
 
-      {showCreate ? <div aria-modal="true" className="hmt-modal-backdrop" role="dialog"><form className="hmt-modal gtt-create-modal" onSubmit={(event) => void create(event)}><div className="hmt-modal__header"><div><h2>New HMT GTT</h2><p>Create a reduce-only protected exit for a Delta position.</p></div><button aria-label="Close" onClick={() => setShowCreate(false)} type="button"><X size={20} /></button></div><div className="gtt-create-grid">
-        <select
-          aria-label="Product"
-          onChange={(event) => setProductId(event.target.value)}
-          value={productId}
-        >
-          {products.map((product) => (
-            <option key={product.productId} value={product.productId}>
-              {product.symbol}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Exit side"
-          onChange={(event) => setSide(event.target.value as "buy" | "sell")}
-          value={side}
-        >
-          <option value="sell">Sell to close long</option>
-          <option value="buy">Buy to close short</option>
-        </select>
-        <input
-          aria-label="Contracts"
-          min="1"
-          onChange={(event) => setContracts(event.target.value)}
-          type="number"
-          value={contracts}
-        />
-        <select
-          aria-label="Protection type"
-          onChange={(event) =>
-            setKind(event.target.value as GttRow["triggerKind"])
-          }
-          value={kind}
-        >
-          <option value="stop_loss">Stop loss</option>
-          <option value="target">Target</option>
-          <option value="trailing_stop">Trailing stop</option>
-        </select>
-        {kind === "trailing_stop" ? (
-          <input
-            aria-label="Trail offset"
-            onChange={(event) => setTrail(event.target.value)}
-            placeholder="Trail offset"
-            required
-            value={trail}
-          />
-        ) : (
-          <input
-            aria-label="Trigger price"
-            onChange={(event) => setTrigger(event.target.value)}
-            placeholder="Trigger price"
-            required
-            value={trigger}
-          />
-        )}
-        <input
-          aria-label="Limit price"
-          onChange={(event) => setLimit(event.target.value)}
-          placeholder="Optional limit price"
-          value={limit}
-        />
-      </div><div className="hmt-modal__actions"><button onClick={() => setShowCreate(false)} type="button">Cancel</button><button className="hmt-primary-button" disabled={!canTrade} type="submit">Arm protected exit</button></div></form></div> : null}
+      {showCreate ? <div aria-modal="true" className="hmt-modal-backdrop hmt-order-backdrop" role="dialog"><form className="hmt-order-dialog gtt-create-modal" onSubmit={(event) => void create(event)}>
+        <header className="hmt-order-dialog__header"><div><h2>New HMT GTT</h2><p>Delta Exchange India · one protected exit per selected account</p></div><button aria-label="Close" onClick={() => setShowCreate(false)} type="button"><X size={20} /></button></header>
+        <div className="gtt-create-body">
+          <section className="hmt-order-accounts"><div className="hmt-order-accounts__heading"><strong>Select Accounts ({createAccountIds.length} selected)</strong><div><button className="hmt-text-button" onClick={() => setCreateAccountIds(createableAccounts.map((account) => account.id))} type="button">Select all ready accounts</button><button className="hmt-text-button" onClick={() => setCreateAccountIds([])} type="button">Clear</button></div></div><div className="hmt-order-accounts__grid">{accounts.map((account) => { const eligible = createableAccounts.some((item) => item.id === account.id); return <label className={`hmt-order-account ${createAccountIds.includes(account.id) ? "is-selected" : ""} ${eligible ? "" : "is-disabled"}`} key={account.id} title={eligible ? "" : "Needs manage or trade access, verified credentials, a ready reconciliation and active exits"}><input checked={createAccountIds.includes(account.id)} disabled={!eligible} onChange={(event) => toggleCreateAccount(account.id, event.target.checked)} type="checkbox" /><span><strong>{account.profileName}</strong><small>{eligible ? "Delta India · ready" : "Not ready or no exit permission"}</small></span></label>; })}</div></section>
+          <section className="gtt-form-section"><h3>Instrument</h3><p>Search and select an active perpetual contract.</p><label className="hmt-order-search"><span>Contract</span><div className="hmt-order-search__control"><Search size={17} /><input aria-label="Search perpetual contracts" onChange={(event) => setProductSearch(event.target.value)} placeholder="Search perpetual contracts" value={productSearch} /><select aria-label="Contract" onChange={(event) => setProductId(event.target.value)} value={productId}>{searchedProducts.map((product) => <option key={product.productId} value={product.productId}>{product.symbol}</option>)}</select></div></label>{eligibleProducts.length === 0 ? <p className="gtt-inline-warning">No active perpetual contracts are available.</p> : null}</section>
+          <section className="gtt-form-section"><h3>1. Setup</h3><div className="gtt-create-grid"><label>Exit side<select aria-label="Exit side" onChange={(event) => setSide(event.target.value as "buy" | "sell")} value={side}><option value="sell">Sell to close long</option><option value="buy">Buy to close short</option></select></label><label>Trigger type<select aria-label="Protection type" onChange={(event) => setKind(event.target.value as GttRow["triggerKind"])} value={kind}><option value="stop_loss">Stop loss</option><option value="target">Target</option><option value="trailing_stop">Trailing stop</option></select></label></div></section>
+          <section className="gtt-form-section gtt-form-section--order"><h3>2. Order</h3><div className="gtt-create-grid"><label>{kind === "trailing_stop" ? "Trail offset" : "Trigger price"}<input aria-label={kind === "trailing_stop" ? "Trail offset" : "Trigger price"} min="0" onChange={(event) => kind === "trailing_stop" ? setTrail(event.target.value) : setTrigger(event.target.value)} placeholder={kind === "trailing_stop" ? "Trail offset" : "0.00"} required type="number" value={kind === "trailing_stop" ? trail : trigger} /></label><label>Contracts<input aria-label="Contracts" min="1" onChange={(event) => setContracts(event.target.value)} required step="1" type="number" value={contracts} /></label><label>Optional limit price<input aria-label="Limit price" min="0" onChange={(event) => setLimit(event.target.value)} placeholder="Market trigger" type="number" value={limit} /></label></div><p className="gtt-modal-note">This creates a reduce-only exit for each selected account. Crypto GTTs are submitted individually; the result is reported per account.</p></section>
+          {notice ? <p className="gtt-page__notice" role="status">{notice}</p> : null}
+        </div>
+        <footer className="hmt-order-ticket__footer"><span>{createAccountIds.length} account(s) selected</span><div><button className="hmt-secondary-button" onClick={() => setShowCreate(false)} type="button">Cancel</button><button className="hmt-primary-button" disabled={!canCreate || !productId || Number(contracts) < 1 || (kind === "trailing_stop" ? !trail : !trigger)} type="submit">Create GTT</button></div></footer>
+      </form></div> : null}
     </div>
   );
 }
