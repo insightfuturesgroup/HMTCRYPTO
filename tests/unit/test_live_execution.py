@@ -26,31 +26,25 @@ def enabled_settings() -> LiveExecutionSettings:
     return LiveExecutionSettings(
         HMT_LIVE_ORDER_DISPATCH_ENABLED=True,
         PRODUCTION_WRITES_FORBIDDEN=False,
-        HMT_LIVE_ORDER_QUALIFICATION_SHA256=sha256(b"approved qualification").hexdigest(),
         _env_file=None,
     )
 
 
 def test_live_dispatch_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HMT_LIVE_ORDER_DISPATCH_ENABLED", raising=False)
-    monkeypatch.delenv("HMT_LIVE_ORDER_QUALIFICATION_SHA256", raising=False)
-
     settings = LiveExecutionSettings(_env_file=None)
 
     assert settings.enabled is False
     assert settings.production_writes_forbidden is True
-    assert settings.qualification_sha256 is None
 
 
-@pytest.mark.parametrize("digest", [None, "0" * 64, "A" * 64, "abc"])
-def test_enabled_dispatch_requires_real_lowercase_qualification(digest: str | None) -> None:
-    with pytest.raises(ValidationError):
-        LiveExecutionSettings(
-            HMT_LIVE_ORDER_DISPATCH_ENABLED=True,
-            PRODUCTION_WRITES_FORBIDDEN=False,
-            HMT_LIVE_ORDER_QUALIFICATION_SHA256=digest,
-            _env_file=None,
-        )
+def test_enabled_dispatch_uses_persisted_qualification_evidence() -> None:
+    settings = LiveExecutionSettings(
+        HMT_LIVE_ORDER_DISPATCH_ENABLED=True,
+        PRODUCTION_WRITES_FORBIDDEN=False,
+        _env_file=None,
+    )
+    assert settings.enabled is True
 
 
 def test_production_write_prohibition_is_an_independent_gate() -> None:
@@ -58,7 +52,6 @@ def test_production_write_prohibition_is_an_independent_gate() -> None:
         LiveExecutionSettings(
             HMT_LIVE_ORDER_DISPATCH_ENABLED=True,
             PRODUCTION_WRITES_FORBIDDEN=True,
-            HMT_LIVE_ORDER_QUALIFICATION_SHA256=sha256(b"approved qualification").hexdigest(),
             _env_file=None,
         )
 

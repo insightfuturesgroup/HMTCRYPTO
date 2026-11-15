@@ -211,6 +211,7 @@ interface HealthAccount {
   workerLeaseActive: boolean;
   riskConfigured: boolean;
   riskEnabled: boolean;
+  riskMode: "MISSING" | "ENFORCED" | "OWNER_OVERRIDE";
   entriesEnabled: boolean;
   exitsEnabled: boolean;
   lastErrorCode: string | null;
@@ -1958,6 +1959,21 @@ function AccountStatePage({
       setCancellingIntentId(null);
     }
   }
+  async function hideCancelledIntent(intentId: string) {
+    setError(null);
+    try {
+      await request(
+        `/api/v1/accounts/${encodeURIComponent(accountId)}/order-intents/${encodeURIComponent(intentId)}`,
+        { method: "DELETE" },
+        csrf,
+      );
+      setError("Cancelled order removed from this view. Its audit record was retained.");
+      void load(accountId);
+    } catch (requestError) {
+      const code = requestError instanceof RequestError ? requestError.code : "request_failed";
+      setError(`Could not remove cancelled order (${code}).`);
+    }
+  }
   async function exitPositionImmediately(row: Record<string, unknown>) {
     const productId = Number(row.product_id ?? row.productId);
     const signedSize = Number(row.size ?? row.contracts);
@@ -2085,7 +2101,7 @@ function AccountStatePage({
                     <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus.replaceAll("_", " ")}</span></td>
                     <td>{intent.exchangeOrderId ?? "Awaiting acknowledgement"}</td>
                     <td>{intent.errorCode ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : intent.submissionStatus === "UNCERTAIN" ? "Check Delta before retrying" : "Waiting for Delta acknowledgement")}</td>
-                    <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" || intent.submissionStatus === "UNCERTAIN" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
+                    <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : intent.submissionStatus === "BLOCKED" && intent.errorCode === "cancelled_before_dispatch" && canTrade ? <button onClick={() => void hideCancelledIntent(intent.intentId)} type="button">Delete</button> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" || intent.submissionStatus === "UNCERTAIN" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
                   </tr>;
                   })}
                   {orderIntents.length === 0 ? <tr><td colSpan={9}>No locally submitted orders.</td></tr> : null}
@@ -4271,6 +4287,7 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
     globalReason: string | null;
     accounts: HealthAccount[];
   } | null>(null);
+  const [controlError, setControlError] = useState<string | null>(null);
   const load = useCallback(() => {
     void request<{ events: AuditRow[] }>("/api/v1/admin/audit").then((v) =>
       setEvents(v.events),
@@ -4299,25 +4316,33 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
     load();
   }
   async function accountGate(accountId: string, enabled: boolean) {
-    await request(
-      `/api/v1/admin/accounts/${accountId}/live-control`,
-      {
-        method: "PUT",
-        body: JSON.stringify({
-          entries_enabled: enabled,
-          exits_enabled: enabled,
-          reason: enabled
-            ? "administrator account activation approval"
-            : "administrator emergency account disable",
-        }),
-      },
-      csrf,
-    );
-    load();
+    setControlError(null);
+    try {
+      await request(
+        `/api/v1/admin/accounts/${accountId}/live-control`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            entries_enabled: enabled,
+            exits_enabled: enabled,
+            reason: enabled
+              ? "administrator account activation approval"
+              : "administrator emergency account disable",
+          }),
+        },
+        csrf,
+      );
+      load();
+    } catch (error) {
+      const code = error instanceof RequestError ? error.code : "request_failed";
+      setControlError(`Account control rejected: ${code.replaceAll("_", " ")}.`);
+      load();
+    }
   }
   return (
     <>
       <Panel title="Live platform health">
+        {controlError ? <p className="m-4 text-red-700" role="alert">{controlError}</p> : null}
         <div className="flex items-center gap-3 p-4">
           <strong>
             Global entries:{" "}
@@ -4361,10 +4386,10 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
                     {a.reconciliationAgeSeconds ?? "—"}s
                   </td>
                   <td>
-                    {a.riskEnabled
-                      ? "Enabled"
-                      : a.riskConfigured
-                        ? "Disabled"
+                    {a.riskMode === "ENFORCED"
+                      ? "Enforced"
+                      : a.riskMode === "OWNER_OVERRIDE"
+                        ? "Owner override"
                         : "Missing"}
                   </td>
                   <td>
@@ -4386,7 +4411,7 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
                         disabled={
                           !a.workerLeaseActive ||
                           a.reconciliationState !== "ready" ||
-                          !a.riskEnabled
+                          !a.riskConfigured
                         }
                         onClick={() => void accountGate(a.accountId, true)}
                         type="button"

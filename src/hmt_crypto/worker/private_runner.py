@@ -620,9 +620,6 @@ async def _dispatch_qualification_is_current(
     claim: _Claim,
     execution: LiveExecutionSettings,
 ) -> bool:
-    digest = execution.qualification_sha256
-    if digest is None:
-        return False
     now = datetime.now(UTC)
     async with database.transaction() as session:
         account = await session.get(Account, claim.account_id)

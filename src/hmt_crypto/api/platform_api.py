@@ -3471,7 +3471,10 @@ def install_platform_routes(
                     select(LiveOrderIntent, LiveOrderPreview, LiveOrderSubmission)
                     .join(LiveOrderPreview, LiveOrderPreview.id == LiveOrderIntent.preview_id)
                     .join(LiveOrderSubmission, LiveOrderSubmission.intent_id == LiveOrderIntent.id)
-                    .where(LiveOrderIntent.account_id == account_id)
+                    .where(
+                        LiveOrderIntent.account_id == account_id,
+                        LiveOrderIntent.hidden_at.is_(None),
+                    )
                     .order_by(desc(LiveOrderIntent.created_at))
                     .limit(100)
                 )
@@ -3554,18 +3557,22 @@ def install_platform_routes(
             if submission.status != "PENDING":
                 raise HTTPException(status_code=409, detail="submission_already_claimed")
             account = await session.get(Account, account_id)
-            if (
-                lease is None
-                or lease.lease_until <= now
-                or account is None
-                or account.current_credential_version != lease.credential_version
-            ):
-                raise HTTPException(status_code=409, detail="worker_lease_unavailable")
-
-            fence = SubmissionFence(
-                _database_uuid(lease.owner_id),
-                lease.generation,
-                lease.credential_version,
+            if account is None:
+                raise HTTPException(status_code=404, detail="account_not_found")
+            if account.current_credential_version is None:
+                raise HTTPException(status_code=409, detail="credential_not_configured")
+            fence = (
+                SubmissionFence(
+                    _database_uuid(lease.owner_id),
+                    lease.generation,
+                    lease.credential_version,
+                )
+                if lease is not None
+                else SubmissionFence(
+                    _database_uuid(actor.profile_id),
+                    1,
+                    account.current_credential_version,
+                )
             )
             try:
                 # A PENDING row has no persisted fence; the locked current
@@ -3602,7 +3609,7 @@ def install_platform_routes(
             submission.worker_owner_id = fence.owner_id
             submission.worker_generation = fence.generation
             submission.credential_version = fence.credential_version
-            submission.claim_until = lease.lease_until
+            submission.claim_until = lease.lease_until if lease is not None else now
             submission.last_error_code = "cancelled_before_dispatch"
             submission.resolved_at = now
             submission.updated_at = now
@@ -3637,6 +3644,53 @@ def install_platform_routes(
                 "status": "BLOCKED",
                 "errorCode": "cancelled_before_dispatch",
             }
+
+    @app.delete("/api/v1/accounts/{account_id}/order-intents/{intent_id}")
+    async def hide_cancelled_order_intent(
+        account_id: UUID, intent_id: UUID, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        request_id = _request_id(request)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            permission = await account_permission(session, actor, account_id)
+            if actor.role == "viewer" or permission == "view":
+                raise HTTPException(status_code=403, detail="trading_permission_required")
+            intent = await session.scalar(
+                select(LiveOrderIntent)
+                .where(
+                    LiveOrderIntent.id == intent_id,
+                    LiveOrderIntent.account_id == account_id,
+                )
+                .with_for_update()
+            )
+            submission = (
+                None
+                if intent is None
+                else await session.scalar(
+                    select(LiveOrderSubmission).where(LiveOrderSubmission.intent_id == intent_id)
+                )
+            )
+            if intent is None or submission is None:
+                raise HTTPException(status_code=404, detail="order_intent_not_found")
+            if (
+                submission.status != "BLOCKED"
+                or submission.last_error_code != "cancelled_before_dispatch"
+            ):
+                raise HTTPException(status_code=409, detail="order_intent_not_hideable")
+            intent.hidden_at = now
+            intent.hidden_by_user_id = actor.profile_id
+            await append_audit(
+                session,
+                actor=actor,
+                action="LIVE_ORDER_HIDDEN",
+                target_type="live_order_intent",
+                target_id=str(intent_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={"accountId": str(account_id)},
+            )
+        return {"intentId": str(intent_id), "hidden": True}
 
     @app.post("/api/v1/trading/actions")
     async def create_order_action(body: OrderActionBody, request: Request) -> dict[str, object]:
@@ -4252,6 +4306,13 @@ def install_platform_routes(
                         "workerGeneration": None if lease is None else lease.generation,
                         "riskConfigured": risk is not None,
                         "riskEnabled": bool(risk and risk.enabled),
+                        "riskMode": (
+                            "MISSING"
+                            if risk is None
+                            else "ENFORCED"
+                            if risk.enabled
+                            else "OWNER_OVERRIDE"
+                        ),
                         "entriesEnabled": control.entries_enabled,
                         "exitsEnabled": control.exits_enabled,
                         "lastErrorCode": control.last_error_code,

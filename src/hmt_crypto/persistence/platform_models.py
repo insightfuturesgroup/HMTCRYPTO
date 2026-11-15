@@ -852,6 +852,10 @@ class LiveOrderIntent(Base):
     idempotency_key: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
     intent_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    hidden_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    hidden_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT")
+    )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
