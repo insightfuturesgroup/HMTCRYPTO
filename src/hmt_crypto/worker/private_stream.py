@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -14,6 +15,9 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from websockets.asyncio.client import connect as websocket_connect
 
+from hmt_crypto.exchange.delta.private_ws_models import OrderUpdate, PositionUpdate, UserTradeUpdate
+from hmt_crypto.exchange.delta.private_ws_parsers import parse_private_ws_observation
+from hmt_crypto.exchange.delta.websocket_codec import WsNumberToken, decode_ws_object
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
@@ -180,6 +184,7 @@ async def run_private_stream(
     api_key: str,
     api_secret: str,
     stop: asyncio.Event,
+    publish_update: Callable[[dict[str, object]], Awaitable[None]] | None = None,
 ) -> None:
     logger = get_logger("worker.private.websocket")
     backoff = 1
@@ -235,7 +240,11 @@ async def run_private_stream(
                 last_heartbeat_persisted = 0.0
                 backoff = 1
                 async for raw in socket:
-                    frame = json.loads(raw)
+                    frame = decode_ws_object(
+                        raw,
+                        max_bytes=1_048_576,
+                        stream_label="private",
+                    )
                     if not isinstance(frame, dict):
                         continue
                     if frame.get("type") in {"heartbeat", "pong"}:
@@ -269,7 +278,13 @@ async def run_private_stream(
                     candidate = frame.get("sequence_id")
                     if candidate is None and isinstance(meta, dict):
                         candidate = meta.get("seq_no")
-                    sequence = candidate if type(candidate) is int and candidate >= 0 else None
+                    sequence = (
+                        int(candidate.value)
+                        if isinstance(candidate, WsNumberToken)
+                        and candidate.value == candidate.value.to_integral_value()
+                        and candidate.value >= 0
+                        else None
+                    )
                     prior = sequences.get(stream_key)
                     state = "snapshot" if frame.get("action") == "snapshot" else "live"
                     if sequence is not None and prior is not None and sequence != prior + 1:
@@ -291,6 +306,64 @@ async def run_private_stream(
                         )
                         if not persisted:
                             return
+                    if state == "gap" or publish_update is None:
+                        continue
+                    try:
+                        observation = parse_private_ws_observation(frame)
+                        payload: dict[str, object] | None = None
+                        if isinstance(observation, OrderUpdate):
+                            row = observation.row
+                            payload = {
+                                "kind": "order",
+                                "clientOrderId": row.client_order_id,
+                                "exchangeOrderId": row.order_id,
+                                "productId": row.product_id,
+                                "symbol": row.symbol,
+                                "side": row.side,
+                                "size": row.size,
+                                "unfilledSize": row.unfilled_size,
+                                "state": row.state,
+                                "averageFillPrice": (
+                                    None
+                                    if row.average_fill_price is None
+                                    else format(row.average_fill_price, "f")
+                                ),
+                            }
+                        elif isinstance(observation, PositionUpdate):
+                            row = observation.row
+                            payload = {
+                                "kind": "position",
+                                "action": observation.action.value,
+                                "position": {
+                                    "product_id": row.product_id,
+                                    "product_symbol": row.symbol,
+                                    "size": row.size,
+                                    "entry_price": format(row.entry_price, "f"),
+                                    "liquidation_price": format(row.liquidation_price, "f"),
+                                    "margin": format(row.margin, "f"),
+                                    "commission": format(row.commission, "f"),
+                                },
+                            }
+                        elif isinstance(observation, UserTradeUpdate):
+                            payload = {
+                                "kind": "fill",
+                                "clientOrderId": observation.client_order_id,
+                                "exchangeOrderId": observation.order_id,
+                                "symbol": observation.symbol,
+                                "side": observation.side,
+                                "size": observation.size,
+                                "price": format(observation.price, "f"),
+                                "positionAfter": observation.position_after,
+                            }
+                        if payload is not None:
+                            await publish_update(payload)
+                    except Exception as error:
+                        logger.warning(
+                            "private_stream_projection_ignored",
+                            account_id=str(account_id),
+                            channel=channel,
+                            error_type=type(error).__name__,
+                        )
         except asyncio.CancelledError:
             raise
         except Exception:

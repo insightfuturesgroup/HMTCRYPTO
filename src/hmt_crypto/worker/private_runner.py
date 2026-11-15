@@ -760,6 +760,21 @@ async def _recover_live_submission(
         await adapter.aclose()
 
 
+async def _publish_private_stream_update(
+    account_id: UUID, update: dict[str, object]
+) -> None:
+    """Wake recovery and push a compact venue-confirmed account delta."""
+    payload = {
+        "accountId": str(account_id),
+        "reason": "private_stream_update",
+        "observedAt": datetime.now(UTC).isoformat(),
+        **update,
+    }
+    await publish_json(ACCOUNT_CHANNEL, payload)
+    if update.get("kind") in {"order", "fill"}:
+        await publish_json(ORDER_CHANNEL, {"accountId": str(account_id)})
+
+
 async def _run_immediate_execution_loop(
     database: Database,
     process: PrivateWorkerSettings,
@@ -782,6 +797,14 @@ async def _run_immediate_execution_loop(
                         ),
                     )
                     .union(
+                        select(LiveOrderSubmission.account_id)
+                        .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
+                        .where(
+                            LiveOrderSubmission.status == "UNCERTAIN",
+                            LiveOrderIntent.hidden_at.is_(None),
+                            LiveOrderSubmission.updated_at
+                            >= datetime.now(UTC) - timedelta(seconds=4),
+                        ),
                         select(LiveOrderAction.account_id).where(
                             LiveOrderAction.status == "PENDING"
                         ),
@@ -839,9 +862,30 @@ async def _run_immediate_execution_loop(
                             account_id=str(account_id),
                             outcome=result.kind,
                         )
+                    recovery = LiveRecoveryResult("IDLE", None)
+                    if result.kind in {"UNCERTAIN", "IDLE", "DISABLED"}:
+                        recovery = await _recover_live_submission(
+                            database,
+                            process,
+                            claim,
+                            api_key=api_key,
+                            api_secret=api_secret,
+                        )
+                        if recovery.kind != "IDLE":
+                            logger.info(
+                                "immediate_live_recovery",
+                                account_id=str(account_id),
+                                outcome=recovery.kind,
+                                submission_id=(
+                                    None
+                                    if recovery.submission_id is None
+                                    else str(recovery.submission_id)
+                                ),
+                            )
                     if (
                         action.kind not in {"IDLE", "DISABLED"}
                         or result.kind not in {"IDLE", "DISABLED"}
+                        or recovery.kind != "IDLE"
                         or tradingview.kind not in {"IDLE", "DEFERRED"}
                     ):
                         await publish_json(
@@ -963,6 +1007,13 @@ async def run_private_worker(
                                             api_key=api_key,
                                             api_secret=api_secret,
                                             stop=stop,
+                                            publish_update=(
+                                                lambda update, account_id=claim.account_id: (
+                                                    _publish_private_stream_update(
+                                                        account_id, update
+                                                    )
+                                                )
+                                            ),
                                         )
                                     )
                                     stream_tasks[account_id] = (*identity, task)

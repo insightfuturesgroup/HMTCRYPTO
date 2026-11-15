@@ -1871,6 +1871,7 @@ function AccountStatePage({
   const [showOrderTicket, setShowOrderTicket] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const accountStreamOpen = useRef(false);
+  const streamRefreshTimer = useRef<number | null>(null);
   const loadAllPositions = useCallback((source: Account[]) => {
     if (mode !== "positions" || source.length === 0) return;
     void Promise.allSettled(source.map(async (account) => ({
@@ -1949,7 +1950,45 @@ function AccountStatePage({
     };
     const refresh = (event: MessageEvent<string>) => {
       try {
-        const payload = JSON.parse(event.data) as { accountId?: string };
+        const payload = JSON.parse(event.data) as {
+          accountId?: string;
+          kind?: string;
+          action?: string;
+          position?: Record<string, unknown>;
+        };
+        if (payload.kind === "position" && payload.accountId && payload.position) {
+          const productId = Number(payload.position.product_id);
+          const mergePosition = (current: AccountState): AccountState => {
+            const remaining = current.positions.filter(
+              (row) => Number(row.product_id ?? row.productId) !== productId,
+            );
+            const size = Number(payload.position?.size ?? 0);
+            return {
+              ...current,
+              positions:
+                payload.action === "delete" || size === 0
+                  ? remaining
+                  : [...remaining, payload.position as Record<string, unknown>],
+            };
+          };
+          setState((current) =>
+            current && current.accountId === payload.accountId
+              ? mergePosition(current)
+              : current,
+          );
+          setPositionStates((current) =>
+            current.map((item) =>
+              item.account.id === payload.accountId
+                ? { ...item, state: mergePosition(item.state) }
+                : item,
+            ),
+          );
+          if (streamRefreshTimer.current !== null) {
+            window.clearTimeout(streamRefreshTimer.current);
+          }
+          streamRefreshTimer.current = window.setTimeout(() => load(accountId), 1_500);
+          return;
+        }
         if (accountId === "all" || payload.accountId === accountId) load(accountId);
       } catch {
         /* Ignore malformed notifications; EventSource reconnects automatically. */
@@ -1960,6 +1999,10 @@ function AccountStatePage({
     stream.addEventListener("error", disconnected);
     return () => {
       accountStreamOpen.current = false;
+      if (streamRefreshTimer.current !== null) {
+        window.clearTimeout(streamRefreshTimer.current);
+        streamRefreshTimer.current = null;
+      }
       stream.close();
     };
   }, [accountId, load]);
@@ -2221,9 +2264,9 @@ function AccountStatePage({
                     <td><span className={`hmt-side-badge ${intent.side.toLowerCase()}`}>{intent.side.toUpperCase()}</span></td>
                     <td>{intent.orderType.toUpperCase()} · {intent.contracts}</td>
                     <td>{displayPrice(intent.price)}</td>
-                    <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus.replaceAll("_", " ")}</span></td>
+                    <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus === "UNCERTAIN" ? "CONFIRMING" : intent.submissionStatus.replaceAll("_", " ")}</span></td>
                     <td>{deltaOrderLabel}</td>
-                    <td>{fillLabel ?? intent.exchangeCancellationReason ?? intent.errorCode ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : intent.submissionStatus === "UNCERTAIN" ? "Check Delta before retrying" : "Waiting for Delta acknowledgement")}</td>
+                    <td>{fillLabel ?? intent.exchangeCancellationReason ?? (intent.submissionStatus === "UNCERTAIN" ? "Confirming with Delta; do not retry" : intent.errorCode) ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : "Waiting for Delta acknowledgement")}</td>
                     <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : intent.submissionStatus === "UNCERTAIN" && user.role === "admin" ? <button onClick={() => void resolveUncertainIntent(intent.intentId)} type="button">Delete uncertain</button> : ["BLOCKED", "REJECTED", "ACCEPTED"].includes(intent.submissionStatus) && canTrade ? <button onClick={() => void hideCancelledIntent(intent.intentId)} type="button">Delete</button> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
                   </tr>;
                   })}
