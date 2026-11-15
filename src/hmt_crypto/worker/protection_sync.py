@@ -45,6 +45,31 @@ async def sync_one_protection_group(
     """Create or resize one fill-bound group; never dispatch an exchange mutation."""
     now = datetime.now(UTC)
     async with database.transaction() as session:
+        # Most cycles have no newly accepted entry to protect. Check that first so
+        # idle accounts do not repeatedly read reconciliation, risk and
+        # qualification history from the database.
+        submission = await session.scalar(
+            select(LiveOrderSubmission)
+            .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
+            .join(LiveOrderPreview, LiveOrderPreview.id == LiveOrderIntent.preview_id)
+            .where(
+                LiveOrderSubmission.account_id == account_id,
+                LiveOrderSubmission.status == "ACCEPTED",
+                LiveOrderSubmission.exchange_order_id.is_not(None),
+                LiveOrderPreview.reduce_only.is_(False),
+            )
+            .order_by(desc(LiveOrderSubmission.resolved_at), desc(LiveOrderSubmission.id))
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        if submission is None or submission.exchange_order_id is None:
+            return False
+        intent = await session.get(LiveOrderIntent, submission.intent_id)
+        if intent is None:
+            return False
+        preview = await session.get(LiveOrderPreview, intent.preview_id)
+        if preview is None:
+            return False
         lease = await session.scalar(
             select(PrivateWorkerLease).where(
                 PrivateWorkerLease.account_id == account_id,
@@ -53,7 +78,8 @@ async def sync_one_protection_group(
             )
         )
         reconciliation = await session.scalar(
-            select(PrivateReconciliationSnapshot).options(
+            select(PrivateReconciliationSnapshot)
+            .options(
                 load_only(
                     PrivateReconciliationSnapshot.id,
                     PrivateReconciliationSnapshot.fills_payload,
@@ -79,28 +105,6 @@ async def sync_one_protection_group(
             .limit(1)
         )
         if lease is None or reconciliation is None or risk is None or qualification is None:
-            return False
-        submission = await session.scalar(
-            select(LiveOrderSubmission)
-            .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
-            .join(LiveOrderPreview, LiveOrderPreview.id == LiveOrderIntent.preview_id)
-            .where(
-                LiveOrderSubmission.account_id == account_id,
-                LiveOrderSubmission.status == "ACCEPTED",
-                LiveOrderSubmission.exchange_order_id.is_not(None),
-                LiveOrderPreview.reduce_only.is_(False),
-            )
-            .order_by(desc(LiveOrderSubmission.resolved_at), desc(LiveOrderSubmission.id))
-            .limit(1)
-            .with_for_update(skip_locked=True)
-        )
-        if submission is None or submission.exchange_order_id is None:
-            return False
-        intent = await session.get(LiveOrderIntent, submission.intent_id)
-        if intent is None:
-            return False
-        preview = await session.get(LiveOrderPreview, intent.preview_id)
-        if preview is None:
             return False
         matching_fills = [
             row
