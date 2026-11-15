@@ -67,9 +67,7 @@ async def admit_one_tradingview_signal(
     database: Database, *, account_id: UUID, owner_id: UUID
 ) -> TradingViewCycleResult:
     """Admit at most one signal under the current lease and exchange snapshot."""
-    account_id = normalize_worker_uuid(
-        account_id, message="invalid TradingView worker scope"
-    )
+    account_id = normalize_worker_uuid(account_id, message="invalid TradingView worker scope")
     owner_id = normalize_worker_uuid(owner_id, message="invalid TradingView worker scope")
     now = datetime.now(UTC)
     async with database.transaction() as session:
@@ -126,7 +124,6 @@ async def admit_one_tradingview_signal(
             or control.reconciliation_state != "ready"
             or not gate_open
             or risk is None
-            or not risk.enabled
             or reconciliation is None
             or reconciliation.outcome != "ready"
             or reconciliation.observed_at < now - timedelta(seconds=60)
@@ -185,14 +182,14 @@ async def admit_one_tradingview_signal(
                 limit_price=signal.limit_price,
                 market_price=market_price,
                 reduce_only=strategy.reduce_only,
-                max_order_notional=risk.max_order_notional,
+                max_order_notional=(risk.max_order_notional if risk.enabled else Decimal("1e30")),
             )
             positions = _payload_rows(reconciliation.positions_payload)
             open_orders = _payload_rows(reconciliation.open_orders_payload)
             wallet = _payload_rows(reconciliation.wallet_transactions_payload)
         except (LiveOrderAdmissionError, ValueError):
             return _reject(signal, now=now, reason="invalid_order_or_state")
-        if len(open_orders) >= risk.max_open_orders and not strategy.reduce_only:
+        if risk.enabled and len(open_orders) >= risk.max_open_orders and not strategy.reduce_only:
             return _reject(signal, now=now, reason="open_order_limit")
         signed_position = 0
         for item in positions:
@@ -230,7 +227,7 @@ async def admit_one_tradingview_signal(
             )
         except LiveOrderAdmissionError:
             return _reject(signal, now=now, reason="position_sizing_invalid")
-        if projected_notional > risk.max_position_notional:
+        if risk.enabled and projected_notional > risk.max_position_notional:
             return _reject(signal, now=now, reason="position_limit")
         daily_net = Decimal(0)
         for item in wallet:
@@ -246,7 +243,11 @@ async def admit_one_tradingview_signal(
                     daily_net += Decimal(str(item.get("amount")))
                 except InvalidOperation:
                     return _reject(signal, now=now, reason="invalid_wallet_state")
-        if max(Decimal(0), -daily_net) >= risk.max_daily_loss and not strategy.reduce_only:
+        if (
+            risk.enabled
+            and max(Decimal(0), -daily_net) >= risk.max_daily_loss
+            and not strategy.reduce_only
+        ):
             return _reject(signal, now=now, reason="daily_loss_limit")
         preview_id, intent_id, submission_id = uuid4(), uuid4(), uuid4()
         evidence = hashlib.sha256(

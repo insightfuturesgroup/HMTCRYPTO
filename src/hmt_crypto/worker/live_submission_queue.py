@@ -254,7 +254,6 @@ async def claim_next_live_submission(
                 not preview.reduce_only
                 and (
                     risk is None
-                    or not risk.enabled
                     or preview.risk_policy_version != risk.version
                     or not control.entries_enabled
                     or global_control is None

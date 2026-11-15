@@ -171,12 +171,53 @@ async def _auto_activate_healthy_account(
         risk = await session.scalar(
             select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == claim.account_id)
         )
-        if risk is None or not risk.enabled:
-            return "risk_policy_disabled"
-        try:
-            product_ids = {int(value) for value in json.loads(risk.allowed_product_ids)}
-        except (TypeError, ValueError):
-            return "risk_product_scope_invalid"
+        if risk is None:
+            return "risk_policy_missing"
+        if not risk.auto_activation_enabled:
+            return "automatic_activation_disabled"
+        if control.emergency_disabled or global_control.emergency_disabled:
+            return "emergency_disabled"
+        if risk.product_scope_mode == "ALL_SUPPORTED":
+            catalogue = await session.scalar(
+                select(CatalogueSnapshot)
+                .where(
+                    CatalogueSnapshot.region == account.region,
+                    CatalogueSnapshot.environment == account.environment,
+                    CatalogueSnapshot.fresh_until > now,
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            if catalogue is None:
+                return "catalogue_not_ready"
+            rows = list(
+                await session.scalars(
+                    select(CatalogueProduct).where(CatalogueProduct.snapshot_id == catalogue.id)
+                )
+            )
+            product_ids = {
+                row.product_id
+                for row in rows
+                if row.to_product().contract_type.value in ("perpetual_futures", "futures")
+                and row.to_product().notional_type.value == "vanilla"
+                and not row.to_product().is_quanto
+                and row.to_product().quoting_asset.symbol == "USD"
+                and row.to_product().contract_unit_currency
+                == row.to_product().underlying_asset.symbol
+                and row.to_product().state.value == "live"
+                and row.to_product().trading_status.value == "operational"
+                and not row.to_product().only_reduce_only_orders_allowed
+            }
+            rendered_scope = json.dumps(sorted(product_ids))
+            if risk.allowed_product_ids != rendered_scope:
+                risk.allowed_product_ids = rendered_scope
+                risk.version += 1
+                risk.updated_at = now
+        else:
+            try:
+                product_ids = {int(value) for value in json.loads(risk.allowed_product_ids)}
+            except (TypeError, ValueError):
+                return "risk_product_scope_invalid"
         if not product_ids:
             return "risk_product_scope_empty"
         quotes = list(
@@ -288,9 +329,7 @@ async def _auto_activate_healthy_account(
                     created_at=now,
                 )
             )
-        emergency_lock = (not global_control.entries_enabled) and any(
-            marker in global_control.reason.lower() for marker in ("emergency", "kill")
-        )
+        emergency_lock = control.emergency_disabled or global_control.emergency_disabled
         changed = not control.exits_enabled
         control.exits_enabled = True
         if not emergency_lock:

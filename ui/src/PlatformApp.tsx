@@ -120,6 +120,8 @@ interface RiskPolicyView {
   maxPositionNotional: string;
   allowedProductIds: number[];
   enabled: boolean;
+  productScopeMode?: "SELECTED" | "ALL_SUPPORTED";
+  autoActivationEnabled?: boolean;
   qualified?: boolean;
   qualificationReason?: string;
   qualificationWindowHours?: number;
@@ -1744,7 +1746,7 @@ function OrderTicketDialog({
       : 0;
   const estimatedMargin =
     estimatedNotional * Number(selectedProduct?.initialMargin ?? "0");
-  const productApproved = selectedProduct !== undefined && selectedPolicies.length > 0 && selectedPolicies.every((policy) => Boolean(policy?.enabled && policy.allowedProductIds.includes(selectedProduct.productId)));
+  const productApproved = selectedProduct !== undefined && selectedPolicies.length > 0 && selectedPolicies.every((policy) => Boolean(policy?.allowedProductIds.includes(selectedProduct.productId)));
   const qualificationFailures = selectedPolicies.filter((policy) => !policy?.qualified);
   const qualificationReady = selectedPolicies.length > 0 && qualificationFailures.length === 0;
   const canTrade =
@@ -3131,6 +3133,9 @@ function RiskPage({
   const [policyLoaded, setPolicyLoaded] = useState(false);
   const [riskLoadError, setRiskLoadError] = useState<string | null>(null);
   const [productIds, setProductIds] = useState<number[]>([]);
+  const [riskEnabled, setRiskEnabled] = useState(true);
+  const [allSupported, setAllSupported] = useState(true);
+  const [autoActivation, setAutoActivation] = useState(false);
   const [productSearch, setProductSearch] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [qualification, setQualification] = useState<{
@@ -3145,7 +3150,7 @@ function RiskPage({
     ]).then(([accountResult, marketResult]) => {
       const eligible = marketResult.products
         .filter((product) =>
-          product.contractType === "perpetual_futures" &&
+          ["perpetual_futures", "futures"].includes(product.contractType) &&
           product.state === "live" &&
           product.tradingStatus === "operational" &&
           !product.onlyReduceOnlyOrdersAllowed
@@ -3174,6 +3179,9 @@ function RiskPage({
         maxInflightSignals: number;
         usdInrRate: string;
         allowedProductIds: number[];
+        enabled: boolean;
+        productScopeMode: "SELECTED" | "ALL_SUPPORTED";
+        autoActivationEnabled: boolean;
       };
     }>(`/api/v1/risk/${accountId}`).then((result) => {
       if (!active) return;
@@ -3190,6 +3198,9 @@ function RiskPage({
       setMaxSignals(String(result.policy.maxInflightSignals));
       setUsdInrRate(result.policy.usdInrRate);
       setProductIds(result.policy.allowedProductIds);
+      setRiskEnabled(result.policy.enabled);
+      setAllSupported(result.policy.productScopeMode === "ALL_SUPPORTED");
+      setAutoActivation(result.policy.autoActivationEnabled);
     }).catch(() => {
       if (active) setRiskLoadError("Could not load the saved policy. Refresh before changing the product scope.");
     }).finally(() => {
@@ -3215,7 +3226,9 @@ function RiskPage({
             max_inflight_signals: Number(maxSignals),
             usd_inr_rate: usdInrRate,
             allowed_product_ids: productIds,
-            enabled: true,
+            product_scope_mode: allSupported ? "ALL_SUPPORTED" : "SELECTED",
+            enabled: riskEnabled,
+            auto_activation_enabled: autoActivation,
           }),
         },
         csrf,
@@ -3273,6 +3286,14 @@ function RiskPage({
             </option>
           ))}
         </select>
+        <label className="flex items-center gap-3 rounded border p-3">
+          <input checked={riskEnabled} onChange={(e) => setRiskEnabled(e.target.checked)} type="checkbox" />
+          <span><strong>Risk {riskEnabled ? "ON" : "OFF"}</strong><br /><small>OFF bypasses owner-configurable limits; exchange validation, reduce-only checks, credentials, health gates, and emergency stop remain enforced.</small></span>
+        </label>
+        <label className="flex items-center gap-3 rounded border p-3">
+          <input checked={autoActivation} onChange={(e) => setAutoActivation(e.target.checked)} type="checkbox" />
+          <span><strong>Automatic healthy activation</strong><br /><small>Reopens healthy gates after recovery unless an emergency stop is latched.</small></span>
+        </label>
         <label>
           Maximum order notional (INR)
           <input
@@ -3334,7 +3355,11 @@ function RiskPage({
           />
         </label>
         <fieldset className="rounded border p-3 md:col-span-2">
-          <legend className="px-1 font-medium">Approved active Delta perpetuals</legend>
+          <legend className="px-1 font-medium">Approved active Delta futures</legend>
+          <label className="mb-3 flex items-center gap-2">
+            <input checked={allSupported} onChange={(e) => setAllSupported(e.target.checked)} type="checkbox" />
+            Automatically include all currently supported linear USD futures and perpetuals
+          </label>
           <p className="mb-3 text-sm text-slate-600">
             Only live, operational contracts that allow new positions can be selected. Contracts that are upcoming, expired, disrupted, or reduce-only are excluded. Changing this allowlist resets the account gates and requires requalification before trading. Select all is an explicit scope expansion and may require a fresh qualification window.
           </p>
@@ -3374,7 +3399,7 @@ function RiskPage({
             <label className="mr-6 inline-flex items-center gap-2" key={product.productId}>
               <input
                 checked={productIds.includes(product.productId)}
-                disabled={!policyLoaded || Boolean(riskLoadError)}
+                disabled={allSupported || !policyLoaded || Boolean(riskLoadError)}
                 onChange={(event) =>
                   setProductIds((current) =>
                     event.target.checked
@@ -3400,7 +3425,7 @@ function RiskPage({
               !policyLoaded ||
               Boolean(riskLoadError) ||
               catalogueProducts.length === 0 ||
-              productIds.length === 0
+              (!allSupported && productIds.length === 0)
             }
             type="submit"
           >

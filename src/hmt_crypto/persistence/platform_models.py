@@ -535,6 +535,7 @@ class AccountLiveControl(Base):
     reconciliation_state: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
     entries_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     exits_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    emergency_disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     reconciled_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     last_error_code: Mapped[str | None] = mapped_column(NulFreeString(64))
@@ -650,6 +651,10 @@ class AccountRiskPolicy(Base):
         CheckConstraint("version >= 1", name="version_pos"),
         UniqueConstraint("account_id", name="uq_account_risk_policies_account"),
         Index("ix_account_risk_policies_updated_by", "updated_by_user_id"),
+        CheckConstraint(
+            "product_scope_mode IN ('SELECTED','ALL_SUPPORTED')",
+            name="product_scope_mode_allowed",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -675,7 +680,11 @@ class AccountRiskPolicy(Base):
         Numeric(38, 18), nullable=False, default=Decimal("2000")
     )
     allowed_product_ids: Mapped[str] = mapped_column(Text, nullable=False)
+    product_scope_mode: Mapped[str] = mapped_column(
+        NulFreeString(24), nullable=False, default="SELECTED"
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    auto_activation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_by_user_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
     )
@@ -761,6 +770,7 @@ class PlatformLiveControl(Base):
 
     control_key: Mapped[str] = mapped_column(NulFreeString(16), primary_key=True)
     entries_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    emergency_disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     reason: Mapped[str] = mapped_column(NulFreeString(256), nullable=False)
     updated_by_user_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT")

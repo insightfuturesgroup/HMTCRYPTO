@@ -282,8 +282,10 @@ class RiskPolicyBody(_Body):
     max_open_orders: int = Field(ge=1, le=10_000)
     max_inflight_signals: int = Field(default=5, ge=1, le=100)
     usd_inr_rate: str = Field(default="100", min_length=1, max_length=64)
-    allowed_product_ids: list[int] = Field(min_length=1, max_length=500)
+    allowed_product_ids: list[int] = Field(default_factory=list, max_length=500)
+    product_scope_mode: Literal["SELECTED", "ALL_SUPPORTED"] = "SELECTED"
     enabled: bool
+    auto_activation_enabled: bool = False
 
 
 class LiveGateBody(_Body):
@@ -648,8 +650,8 @@ def install_platform_routes(
         risk = await session.scalar(  # type: ignore[attr-defined]
             select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
         )
-        if risk is None or not risk.enabled:
-            return "risk_policy_disabled"
+        if risk is None:
+            return "risk_policy_missing"
         try:
             product_ids = tuple(int(value) for value in json.loads(risk.allowed_product_ids))
         except (TypeError, ValueError):
@@ -2281,9 +2283,9 @@ def install_platform_routes(
                     account_findings.append(
                         ("critical", "worker_lease", "No active private worker lease")
                     )
-                if risk is None or not risk.enabled:
+                if risk is None:
                     account_findings.append(
-                        ("warning", "risk_policy", "Live risk policy is not enabled")
+                        ("warning", "risk_policy", "Live risk policy is not configured")
                     )
                 if control is not None and control.last_error_code is not None:
                     account_findings.append(
@@ -3051,7 +3053,6 @@ def install_platform_routes(
                 and control.reconciled_at >= now - timedelta(seconds=60)
                 and gate_open
                 and risk is not None
-                and risk.enabled
                 and body.product_id in allowed
                 and lease is not None
                 and lease.lease_until > now
@@ -3097,7 +3098,7 @@ def install_platform_routes(
                 or not isinstance(wallet, list)
             ):
                 raise HTTPException(status_code=409, detail="account_state_not_ready")
-            if len(open_orders) >= risk.max_open_orders and not body.reduce_only:
+            if risk.enabled and len(open_orders) >= risk.max_open_orders and not body.reduce_only:
                 raise HTTPException(status_code=409, detail="open_order_limit_reached")
             product = product_row.to_product()
             market_price = quote.best_ask if body.side == "buy" else quote.best_bid
@@ -3109,7 +3110,9 @@ def install_platform_routes(
                     limit_price=body.limit_price,
                     market_price=market_price,
                     reduce_only=body.reduce_only,
-                    max_order_notional=risk.max_order_notional,
+                    max_order_notional=(
+                        risk.max_order_notional if risk.enabled else Decimal("1e30")
+                    ),
                 )
             except LiveOrderAdmissionError:
                 raise HTTPException(status_code=400, detail="invalid_order_sizing") from None
@@ -3194,7 +3197,7 @@ def install_platform_routes(
                     contracts=abs(other_size),
                     price=Decimal(other_quote.mark_price),
                 )
-            if aggregate_exposure > risk.max_position_notional:
+            if risk.enabled and aggregate_exposure > risk.max_position_notional:
                 raise HTTPException(status_code=409, detail="position_limit_exceeded")
             daily_net = Decimal(0)
             for item in wallet:
@@ -3217,7 +3220,11 @@ def install_platform_routes(
                         raise HTTPException(
                             status_code=409, detail="account_state_not_ready"
                         ) from None
-            if max(Decimal(0), -daily_net) >= risk.max_daily_loss and not body.reduce_only:
+            if (
+                risk.enabled
+                and max(Decimal(0), -daily_net) >= risk.max_daily_loss
+                and not body.reduce_only
+            ):
                 raise HTTPException(status_code=409, detail="daily_loss_limit_reached")
             evidence_values = {
                 "accountId": str(body.account_id),
@@ -3340,7 +3347,6 @@ def install_platform_routes(
                 or preview.expires_at <= now
                 or control is None
                 or risk is None
-                or not risk.enabled
                 or risk.version != preview.risk_policy_version
                 or control.reconciliation_state != "ready"
                 or control.reconciled_at is None
@@ -3857,7 +3863,9 @@ def install_platform_routes(
                     "maxPositionLimitInr": str(row.max_position_limit_inr),
                     "maxDailyLossLimitInr": str(row.max_daily_loss_limit_inr),
                     "allowedProductIds": json.loads(row.allowed_product_ids),
+                    "productScopeMode": row.product_scope_mode,
                     "enabled": row.enabled,
+                    "autoActivationEnabled": row.auto_activation_enabled,
                     "updatedAt": _utc(row.updated_at),
                 },
             }
@@ -3873,8 +3881,10 @@ def install_platform_routes(
         ):
             raise HTTPException(status_code=403, detail="fresh_authentication_required")
         product_ids = tuple(sorted(set(body.allowed_product_ids)))
-        if len(product_ids) != len(body.allowed_product_ids) or any(
-            value <= 0 for value in product_ids
+        if (
+            (body.product_scope_mode == "SELECTED" and not product_ids)
+            or len(product_ids) != len(body.allowed_product_ids)
+            or any(value <= 0 for value in product_ids)
         ):
             raise HTTPException(status_code=400, detail="invalid_product_scope")
         inr_limits = (
@@ -3908,6 +3918,29 @@ def install_platform_routes(
             )
             if catalogue is None:
                 raise HTTPException(status_code=409, detail="catalogue_not_ready")
+            if body.product_scope_mode == "ALL_SUPPORTED":
+                catalogue_rows = list(
+                    await session.scalars(
+                        select(CatalogueProduct).where(CatalogueProduct.snapshot_id == catalogue.id)
+                    )
+                )
+                product_ids = tuple(
+                    sorted(
+                        row.product_id
+                        for row in catalogue_rows
+                        if row.to_product().contract_type.value in ("perpetual_futures", "futures")
+                        and row.to_product().notional_type.value == "vanilla"
+                        and not row.to_product().is_quanto
+                        and row.to_product().quoting_asset.symbol == "USD"
+                        and row.to_product().contract_unit_currency
+                        == row.to_product().underlying_asset.symbol
+                        and row.to_product().state.value == "live"
+                        and row.to_product().trading_status.value == "operational"
+                        and not row.to_product().only_reduce_only_orders_allowed
+                    )
+                )
+                if not product_ids:
+                    raise HTTPException(status_code=409, detail="no_supported_futures")
             selected_products = list(
                 await session.scalars(
                     select(CatalogueProduct).where(
@@ -3920,7 +3953,11 @@ def install_platform_routes(
                 raise HTTPException(status_code=400, detail="invalid_product_scope")
             products = [row.to_product() for row in selected_products]
             if any(
-                product.contract_type.value != "perpetual_futures"
+                product.contract_type.value not in ("perpetual_futures", "futures")
+                or product.notional_type.value != "vanilla"
+                or product.is_quanto
+                or product.quoting_asset.symbol != "USD"
+                or product.contract_unit_currency != product.underlying_asset.symbol
                 or product.state.value != "live"
                 or product.trading_status.value != "operational"
                 or product.only_reduce_only_orders_allowed
@@ -3948,7 +3985,9 @@ def install_platform_routes(
                     max_position_limit_inr=inr_limits[1],
                     max_daily_loss_limit_inr=inr_limits[2],
                     allowed_product_ids=json.dumps(product_ids),
+                    product_scope_mode=body.product_scope_mode,
                     enabled=body.enabled,
+                    auto_activation_enabled=body.auto_activation_enabled,
                     updated_by_user_id=actor.profile_id,
                     version=1,
                     created_at=now,
@@ -3969,7 +4008,9 @@ def install_platform_routes(
                     or row.max_position_limit_inr != inr_limits[1]
                     or row.max_daily_loss_limit_inr != inr_limits[2]
                     or current_product_ids != product_ids
+                    or row.product_scope_mode != body.product_scope_mode
                     or row.enabled != body.enabled
+                    or row.auto_activation_enabled != body.auto_activation_enabled
                 )
                 row.max_order_notional, row.max_position_notional, row.max_daily_loss = limits
                 row.max_open_orders = body.max_open_orders
@@ -3982,7 +4023,9 @@ def install_platform_routes(
                     row.max_daily_loss_limit_inr,
                 ) = inr_limits
                 row.allowed_product_ids = json.dumps(product_ids)
+                row.product_scope_mode = body.product_scope_mode
                 row.enabled = body.enabled
+                row.auto_activation_enabled = body.auto_activation_enabled
                 row.updated_by_user_id = actor.profile_id
                 row.updated_at = now
                 if policy_changed:
@@ -3997,6 +4040,9 @@ def install_platform_routes(
                 request_id=request_id,
                 details={
                     "enabled": body.enabled,
+                    "mode": "ENFORCED" if body.enabled else "OWNER_OVERRIDE",
+                    "productScopeMode": body.product_scope_mode,
+                    "autoActivationEnabled": body.auto_activation_enabled,
                     "productCount": len(product_ids),
                     "policyVersion": row.version,
                     "qualificationReset": False,
@@ -4007,6 +4053,9 @@ def install_platform_routes(
             "accountId": str(account_id),
             "configured": True,
             "enabled": body.enabled,
+            "mode": "ENFORCED" if body.enabled else "OWNER_OVERRIDE",
+            "productScopeMode": body.product_scope_mode,
+            "autoActivationEnabled": body.auto_activation_enabled,
             "policyVersion": row.version,
             "qualificationReset": False,
         }
@@ -4029,6 +4078,7 @@ def install_platform_routes(
             if row is None:
                 raise HTTPException(status_code=503, detail="live_control_unavailable")
             row.entries_enabled = body.entries_enabled
+            row.emergency_disabled = not body.entries_enabled
             row.reason = body.reason
             row.updated_by_user_id = actor.profile_id
             row.updated_at = now
@@ -4038,6 +4088,7 @@ def install_platform_routes(
                 ).scalars()
                 for control in controls:
                     control.entries_enabled = False
+                    control.emergency_disabled = True
                     control.updated_at = now
             await append_audit(
                 session,
@@ -4084,6 +4135,7 @@ def install_platform_routes(
                     raise HTTPException(status_code=409, detail=failure)
             control.entries_enabled = body.entries_enabled
             control.exits_enabled = body.exits_enabled
+            control.emergency_disabled = not body.entries_enabled
             control.updated_at = now
             await append_audit(
                 session,
@@ -4731,7 +4783,7 @@ def install_platform_routes(
                     TradingViewSignal.status.in_(("received", "admitted")),
                 )
             )
-            if risk is None or int(inflight or 0) >= risk.max_inflight_signals:
+            if risk is None or (risk.enabled and int(inflight or 0) >= risk.max_inflight_signals):
                 raise HTTPException(status_code=409, detail="signal_concurrency_exceeded")
             if (strategy.order_type == "limit") != (body.limit_price is not None):
                 raise HTTPException(status_code=409, detail="strategy_signal_incompatible")
