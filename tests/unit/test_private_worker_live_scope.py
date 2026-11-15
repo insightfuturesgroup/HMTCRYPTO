@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 
-from hmt_crypto.worker import private_runner
+from hmt_crypto.worker import live_submission_queue, private_runner
 from hmt_crypto.worker.live_execution import LiveExecutionResult, LiveExecutionSettings
 from hmt_crypto.worker.live_order_actions import LiveOrderActionResult
 from hmt_crypto.worker.live_recovery import LiveRecoveryResult
@@ -17,6 +17,13 @@ pytestmark = pytest.mark.unit
 
 class _DriverUUID(UUID):
     """Model asyncpg's UUID subtype returned by PostgreSQL."""
+
+
+def test_live_submission_queue_normalizes_asyncpg_uuid_subtype() -> None:
+    driver_id = _DriverUUID("30000000-0000-4000-8000-000000000001")
+    normalized = live_submission_queue._database_uuid(driver_id)
+    assert type(normalized) is UUID
+    assert normalized == driver_id
 
 
 def _claim() -> private_runner._Claim:

@@ -764,9 +764,11 @@ async def run_private_worker(
                     claim = await _claim(database, process, account_id)
                     if claim is None:
                         continue
+                    stage = "secret_read"
                     try:
                         api_key, api_secret = await secrets.read(claim.secret_arn)
                         try:
+                            stage = "private_reconciliation"
                             evidence = await read_private_reconciliation(
                                 api_key=api_key,
                                 api_secret=api_secret,
@@ -774,6 +776,7 @@ async def run_private_worker(
                                 allowed_product_ids=claim.product_ids,
                             )
                             if await _publish(database, process, claim, evidence):
+                                stage = "private_stream"
                                 stream = stream_tasks.get(account_id)
                                 identity = (claim.credential_version, claim.generation)
                                 if stream is None or stream[:2] != identity or stream[2].done():
@@ -821,6 +824,7 @@ async def run_private_worker(
                                     )
                                 if process.read_only:
                                     continue
+                                stage = "gtt"
                                 gtt_result = await evaluate_one_gtt(
                                     database,
                                     account_id=claim.account_id,
@@ -842,6 +846,7 @@ async def run_private_worker(
                                             else str(gtt_result.submission_id)
                                         ),
                                     )
+                                stage = "tradingview"
                                 tradingview_result = await admit_one_tradingview_signal(
                                     database,
                                     account_id=claim.account_id,
@@ -864,6 +869,7 @@ async def run_private_worker(
                                         ),
                                         reason=tradingview_result.reason,
                                     )
+                                stage = "live_order_action"
                                 action_result = await _execute_qualified_live_action(
                                     database,
                                     process,
@@ -883,6 +889,7 @@ async def run_private_worker(
                                             else str(action_result.action_id)
                                         ),
                                     )
+                                stage = "live_order_recovery"
                                 recovery = await _recover_live_submission(
                                     database,
                                     process,
@@ -901,6 +908,7 @@ async def run_private_worker(
                                             else str(recovery.submission_id)
                                         ),
                                     )
+                                stage = "live_submission"
                                 result = await _execute_qualified_live_submission(
                                     database,
                                     process,
@@ -925,9 +933,14 @@ async def run_private_worker(
                             api_secret = ""
                     except asyncio.CancelledError:
                         raise
-                    except Exception:
+                    except Exception as error:
                         await _degrade(database, process, claim)
-                        logger.error("private_account_cycle_failed", account_id=str(account_id))
+                        logger.error(
+                            "private_account_cycle_failed",
+                            account_id=str(account_id),
+                            stage=stage,
+                            error_type=type(error).__name__,
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:

@@ -34,6 +34,11 @@ from hmt_crypto.persistence.models import (
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
 )
+from hmt_crypto.worker.scope import normalize_worker_uuid
+
+
+def _database_uuid(value: object) -> UUID:
+    return normalize_worker_uuid(value, message="invalid database Live submission UUID")
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +125,7 @@ async def claim_live_submission_recovery(
             submission.last_error_code = "worker_recovery_required"
             submission.updated_at = now
             evidence = submission_event_sha256(
-                submission_id=submission.id,
+                submission_id=_database_uuid(submission.id),
                 sequence=4,
                 from_status="SENDING",
                 to_status="UNCERTAIN",
@@ -143,7 +148,7 @@ async def claim_live_submission_recovery(
                 )
             )
         return ClaimedLiveSubmission(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             account_id=submission.account_id,
             intent_id=intent.id,
             preview_id=preview.id,
@@ -271,7 +276,7 @@ async def claim_next_live_submission(
         submission.claim_until = claim_until
         submission.updated_at = now
         evidence = submission_event_sha256(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             sequence=1,
             from_status="PENDING",
             to_status="CLAIMED",
@@ -294,7 +299,7 @@ async def claim_next_live_submission(
             )
         )
         return ClaimedLiveSubmission(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             account_id=account_id,
             intent_id=intent.id,
             preview_id=preview.id,
@@ -374,7 +379,7 @@ async def prepare_claimed_live_submission(
         submission.attempt_number = 1
         submission.updated_at = now
         event_hash = submission_event_sha256(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             sequence=2,
             from_status="CLAIMED",
             to_status="PREPARED",
@@ -465,7 +470,7 @@ async def mark_live_submission_sending(
         submission.sent_at = now
         submission.updated_at = now
         event_hash = submission_event_sha256(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             sequence=3,
             from_status="PREPARED",
             to_status="SENDING",
@@ -537,7 +542,7 @@ async def record_live_submission_outcome(
         submission.resolved_at = None if outcome.kind == "UNCERTAIN" else now
         submission.updated_at = now
         event_hash = submission_event_sha256(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             sequence=4,
             from_status="SENDING",
             to_status=outcome.kind,
@@ -601,7 +606,7 @@ async def record_uncertain_recovery_lookup(
         )
         attempt = 1 if prior is None else int(prior) + 1
         evidence = recovery_check_sha256(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             attempt=attempt,
             result=observation.result,
             client_order_id=submission.client_order_id,
@@ -633,7 +638,7 @@ async def record_uncertain_recovery_lookup(
         submission.resolved_at = now
         submission.updated_at = now
         event_hash = submission_event_sha256(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             sequence=5,
             from_status="UNCERTAIN",
             to_status="ACCEPTED",
