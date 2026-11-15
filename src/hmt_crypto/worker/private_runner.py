@@ -842,16 +842,28 @@ async def run_private_worker(
                                         )
                                     )
                                     stream_tasks[account_id] = (*identity, task)
-                                protection_created = await sync_one_protection_group(
-                                    database,
-                                    account_id=claim.account_id,
-                                    owner_id=process.owner_id,
-                                )
+                                stage = "protection_sync"
+                                try:
+                                    protection_created = await sync_one_protection_group(
+                                        database,
+                                        account_id=claim.account_id,
+                                        owner_id=process.owner_id,
+                                    )
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception as error:
+                                    protection_created = False
+                                    logger.error(
+                                        "protection_sync_failed",
+                                        account_id=str(account_id),
+                                        error_type=type(error).__name__,
+                                    )
                                 if protection_created:
                                     logger.info(
                                         "protection_group_armed",
                                         account_id=str(account_id),
                                     )
+                                stage = "reconciliation_published"
                                 logger.info(
                                     "private_reconciliation_published",
                                     account_id=str(account_id),
