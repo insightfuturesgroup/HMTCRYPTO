@@ -1989,6 +1989,17 @@ function AccountStatePage({
           streamRefreshTimer.current = window.setTimeout(() => load(accountId), 1_500);
           return;
         }
+        if (payload.kind === "order" || payload.kind === "fill") {
+          if (streamRefreshTimer.current !== null) {
+            window.clearTimeout(streamRefreshTimer.current);
+          }
+          streamRefreshTimer.current = window.setTimeout(() => load(accountId), 250);
+          return;
+        }
+        if (streamRefreshTimer.current !== null) {
+          window.clearTimeout(streamRefreshTimer.current);
+          streamRefreshTimer.current = null;
+        }
         if (accountId === "all" || payload.accountId === accountId) load(accountId);
       } catch {
         /* Ignore malformed notifications; EventSource reconnects automatically. */
