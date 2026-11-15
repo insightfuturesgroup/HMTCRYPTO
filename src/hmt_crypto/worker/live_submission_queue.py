@@ -43,6 +43,14 @@ def _database_uuid(value: object) -> UUID:
     return normalize_worker_uuid(value, message="invalid database Live submission UUID")
 
 
+def _database_fence(owner_id: object, generation: int, credential_version: int) -> SubmissionFence:
+    return SubmissionFence(
+        _database_uuid(owner_id),
+        generation,
+        credential_version,
+    )
+
+
 async def _next_submission_sequence(session: AsyncSession, submission_id: UUID) -> int:
     current = await session.scalar(
         select(func.max(LiveOrderSubmissionEvent.sequence)).where(
@@ -130,7 +138,7 @@ async def claim_live_submission_recovery(
         preview = None if intent is None else await session.get(LiveOrderPreview, intent.preview_id)
         if intent is None or preview is None:
             raise ValueError("live recovery evidence is unavailable")
-        active = SubmissionFence(lease.owner_id, lease.generation, lease.credential_version)
+        active = _database_fence(lease.owner_id, lease.generation, lease.credential_version)
         if submission.status == "SENDING":
             submission.status = "UNCERTAIN"
             submission.last_error_code = "worker_recovery_required"
@@ -263,7 +271,7 @@ async def claim_next_live_submission(
             ):
                 raise ValueError("expired pre-dispatch submission has no fence")
             expired_status = expired.status
-            expired_fence = SubmissionFence(
+            expired_fence = _database_fence(
                 expired.worker_owner_id,
                 expired.worker_generation,
                 expired.credential_version,
@@ -427,12 +435,12 @@ async def prepare_claimed_live_submission(
             or lease.lease_until <= now
         ):
             raise ValueError("live submission claim is stale")
-        stored_fence = SubmissionFence(
+        stored_fence = _database_fence(
             submission.worker_owner_id,
             submission.worker_generation,
             submission.credential_version,
         )
-        active_fence = SubmissionFence(
+        active_fence = _database_fence(
             lease.owner_id,
             lease.generation,
             lease.credential_version,
@@ -520,12 +528,12 @@ async def mark_live_submission_sending(
             or submission.credential_version is None
         ):
             raise ValueError("prepared live submission is stale")
-        stored_fence = SubmissionFence(
+        stored_fence = _database_fence(
             submission.worker_owner_id,
             submission.worker_generation,
             submission.credential_version,
         )
-        active_fence = SubmissionFence(lease.owner_id, lease.generation, lease.credential_version)
+        active_fence = _database_fence(lease.owner_id, lease.generation, lease.credential_version)
         require_transition(
             current="PREPARED",
             target="SENDING",
@@ -613,7 +621,7 @@ async def record_live_submission_outcome(
             or submission.credential_version is None
         ):
             raise ValueError("sending live submission is unavailable")
-        fence = SubmissionFence(
+        fence = _database_fence(
             submission.worker_owner_id,
             submission.worker_generation,
             submission.credential_version,
@@ -682,7 +690,7 @@ async def record_uncertain_recovery_lookup(
             or submission.client_order_id != claim.client_order_id
         ):
             raise ValueError("uncertain live submission is unavailable")
-        active = SubmissionFence(lease.owner_id, lease.generation, lease.credential_version)
+        active = _database_fence(lease.owner_id, lease.generation, lease.credential_version)
         if active != claim.fence or lease.lease_until <= now:
             raise ValueError("uncertain recovery fence is stale")
         prior = await session.scalar(

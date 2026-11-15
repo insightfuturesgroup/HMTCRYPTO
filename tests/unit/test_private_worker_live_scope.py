@@ -26,6 +26,13 @@ def test_live_submission_queue_normalizes_asyncpg_uuid_subtype() -> None:
     assert normalized == driver_id
 
 
+def test_live_submission_queue_normalizes_asyncpg_uuid_in_database_fence() -> None:
+    driver_id = _DriverUUID("30000000-0000-4000-8000-000000000002")
+    fence = live_submission_queue._database_fence(driver_id, 21, 1)
+    assert type(fence.owner_id) is UUID
+    assert fence.owner_id == driver_id
+
+
 def _claim() -> private_runner._Claim:
     return private_runner._Claim(
         account_id=_DriverUUID("32468e34-b2a5-4d5e-9a82-64aa3e8ab148"),
