@@ -117,7 +117,7 @@ services:
       HMT_WORKER_KIND: private
       HMT_PRIVATE_READ_ONLY: "true"
       HMT_REDIS_URL: redis://redis:6379/0
-      HMT_PRIVATE_INTERVAL_SECONDS: "2"
+      HMT_PRIVATE_INTERVAL_SECONDS: "30"
       HMT_PRIVATE_LEASE_SECONDS: "90"
     volumes:
       - /etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro

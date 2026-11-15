@@ -78,7 +78,7 @@ class PrivateWorkerSettings(BaseSettings):
     owner_id: UUID = Field(default_factory=uuid4, alias="HMT_PRIVATE_WORKER_ID")
     aws_region: str = Field(min_length=3, max_length=64, alias="HMT_AWS_REGION")
     secret_prefix: str = Field(default="hmt-crypto/delta", alias="HMT_DELTA_SECRET_PREFIX")
-    interval_seconds: int = Field(default=2, ge=1, le=300, alias="HMT_PRIVATE_INTERVAL_SECONDS")
+    interval_seconds: int = Field(default=30, ge=5, le=300, alias="HMT_PRIVATE_INTERVAL_SECONDS")
     lease_seconds: int = Field(default=90, ge=15, le=900, alias="HMT_PRIVATE_LEASE_SECONDS")
     read_only: bool = Field(default=True, alias="HMT_PRIVATE_READ_ONLY")
     operational_retention_days: int = Field(
