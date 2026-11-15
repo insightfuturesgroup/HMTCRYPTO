@@ -50,17 +50,13 @@ async def sync_one_protection_group(
         # qualification history from the database.
         submission = await session.scalar(
             select(LiveOrderSubmission)
-            .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
-            .join(LiveOrderPreview, LiveOrderPreview.id == LiveOrderIntent.preview_id)
             .where(
                 LiveOrderSubmission.account_id == account_id,
                 LiveOrderSubmission.status == "ACCEPTED",
                 LiveOrderSubmission.exchange_order_id.is_not(None),
-                LiveOrderPreview.reduce_only.is_(False),
             )
-            .order_by(desc(LiveOrderSubmission.resolved_at), desc(LiveOrderSubmission.id))
+            .order_by(desc(LiveOrderSubmission.created_at), desc(LiveOrderSubmission.id))
             .limit(1)
-            .with_for_update(skip_locked=True)
         )
         if submission is None or submission.exchange_order_id is None:
             return False
@@ -68,7 +64,7 @@ async def sync_one_protection_group(
         if intent is None:
             return False
         preview = await session.get(LiveOrderPreview, intent.preview_id)
-        if preview is None:
+        if preview is None or preview.reduce_only:
             return False
         lease = await session.scalar(
             select(PrivateWorkerLease).where(
