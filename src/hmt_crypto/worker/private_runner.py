@@ -41,6 +41,7 @@ from hmt_crypto.persistence.models import (
     CatalogueSnapshot,
     CredentialSecretReference,
     LiveOrderAction,
+    LiveOrderIntent,
     LiveOrderSubmission,
     LiveQualificationEvidence,
     MarketQuote,
@@ -251,9 +252,11 @@ async def _auto_activate_healthy_account(
             return "quote_stale"
         uncertain_submission = await session.scalar(
             select(LiveOrderSubmission.id)
+            .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
             .where(
                 LiveOrderSubmission.account_id == claim.account_id,
                 LiveOrderSubmission.status == "UNCERTAIN",
+                LiveOrderIntent.hidden_at.is_(None),
             )
             .limit(1)
         )

@@ -86,9 +86,11 @@ async def has_live_submission_recovery_debt(database: Database, *, account_id: U
     async with database.transaction() as session:
         submission_id = await session.scalar(
             select(LiveOrderSubmission.id)
+            .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
             .where(
                 LiveOrderSubmission.account_id == account_id,
                 LiveOrderSubmission.status.in_(("SENDING", "UNCERTAIN")),
+                LiveOrderIntent.hidden_at.is_(None),
             )
             .limit(1)
         )
@@ -124,9 +126,11 @@ async def claim_live_submission_recovery(
             return None
         submission = await session.scalar(
             select(LiveOrderSubmission)
+            .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
             .where(
                 LiveOrderSubmission.account_id == account_id,
                 LiveOrderSubmission.status.in_(("SENDING", "UNCERTAIN")),
+                LiveOrderIntent.hidden_at.is_(None),
             )
             .order_by(LiveOrderSubmission.created_at, LiveOrderSubmission.id)
             .limit(1)
