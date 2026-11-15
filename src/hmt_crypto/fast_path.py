@@ -10,6 +10,7 @@ from typing import Any
 
 MARKET_CHANNEL = "hmt:market:updates"
 ORDER_CHANNEL = "hmt:orders:wake"
+ACCOUNT_CHANNEL = "hmt:accounts:updates"
 
 
 def redis_client() -> Any:

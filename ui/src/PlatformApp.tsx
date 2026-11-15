@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Navigate,
@@ -352,7 +352,9 @@ interface PerformanceSummary {
   commission: string;
   liquidationFees: string;
   settlement: string;
+  unrealizedPnl: string;
   totals: Record<string, string>;
+  fills: Record<string, unknown>[];
 }
 
 interface NotificationRow {
@@ -719,6 +721,7 @@ const desktopNavigation = [
   {
     label: "Settings",
     items: [
+      { label: "Crypto Contract Settings", path: "/contract-settings" },
       { label: "Risk Management", path: "/risk" },
       { label: "General Settings", path: "/settings" },
     ],
@@ -737,14 +740,14 @@ function Panel({
   title,
   children,
 }: {
-  readonly title: string;
+  readonly title?: string;
   readonly children: React.ReactNode;
 }) {
   return (
     <section className="data-panel">
-      <div className="data-panel__header">
+      {title ? <div className="data-panel__header">
         <h2>{title}</h2>
-      </div>
+      </div> : null}
       {children}
     </section>
   );
@@ -1852,6 +1855,9 @@ function AccountStatePage({
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState("");
   const [state, setState] = useState<AccountState | null>(null);
+  const [positionStates, setPositionStates] = useState<Array<{ account: Account; state: AccountState }>>([]);
+  const [positionSearch, setPositionSearch] = useState("");
+  const accountsRef = useRef<Account[]>([]);
   const [orderIntents, setOrderIntents] = useState<LocalOrderIntent[]>([]);
   const [actions, setActions] = useState<LiveOrderActionRow[]>([]);
   const [modifyOrder, setModifyOrder] = useState<Record<
@@ -1864,35 +1870,59 @@ function AccountStatePage({
   const [cancellingIntentId, setCancellingIntentId] = useState<string | null>(null);
   const [showOrderTicket, setShowOrderTicket] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loadAllPositions = useCallback((source: Account[]) => {
+    if (mode !== "positions" || source.length === 0) return;
+    void Promise.allSettled(source.map(async (account) => ({
+      account,
+      state: await request<AccountState>(`/api/v1/accounts/${account.id}/state?view=positions`),
+    }))).then((results) => {
+      const loaded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      if (loaded.length > 0) {
+        setPositionStates(loaded);
+        setError(loaded.length === source.length ? null : "Some accounts are reconnecting. Available positions are shown.");
+      } else {
+        setError("Live position refresh is reconnecting. Last known positions are still shown.");
+      }
+    });
+  }, [mode]);
   const load = useCallback(
     (selected: string) => {
       if (!selected) return;
+      if (mode === "positions" && selected === "all") {
+        loadAllPositions(accountsRef.current);
+        return;
+      }
       setError(null);
       void request<AccountState>(`/api/v1/accounts/${selected}/state?view=${mode}`)
-        .then(setState)
+        .then((value) => {
+          setState(value);
+          setError(null);
+        })
         .catch(() => {
-          setState(null);
-          setError("Reconciled account state is unavailable or stale.");
+          setError("Live refresh is reconnecting. Last known account data is still shown.");
         });
       if (mode === "orders") {
         void request<{ actions: LiveOrderActionRow[] }>(
           `/api/v1/trading/actions?account_id=${encodeURIComponent(selected)}`,
-        ).then((value) => setActions(value.actions)).catch(() => setActions([]));
+        ).then((value) => setActions(value.actions)).catch(() => undefined);
         void request<{ intents: LocalOrderIntent[] }>(
           `/api/v1/accounts/${encodeURIComponent(selected)}/order-intents`,
-        ).then((value) => setOrderIntents(value.intents)).catch(() => setOrderIntents([]));
+        ).then((value) => setOrderIntents(value.intents)).catch(() => undefined);
       }
     },
-    [mode],
+    [loadAllPositions, mode],
   );
   useEffect(() => {
-    void request<{ accounts: Account[] }>("/api/v1/accounts").then((value) => {
-      setAccounts(value.accounts);
-      const first = value.accounts[0]?.id ?? "";
-      setAccountId(first);
-      load(first);
-    });
-  }, [load]);
+    void request<{ accounts: Account[] }>("/api/v1/accounts")
+      .then((value) => {
+        setAccounts(value.accounts);
+        accountsRef.current = value.accounts;
+        const first = mode === "positions" ? "all" : value.accounts[0]?.id ?? "";
+        setAccountId(first);
+        if (mode === "positions") loadAllPositions(value.accounts); else load(first);
+      })
+      .catch(() => setError("Accounts could not be loaded. Retrying automatically."));
+  }, [load, loadAllPositions, mode]);
   useEffect(() => {
     if (!accountId) return;
     const refresh = () => {
@@ -1904,6 +1934,20 @@ function AccountStatePage({
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", refresh);
     };
+  }, [accountId, load]);
+  useEffect(() => {
+    if (!accountId) return;
+    const stream = new EventSource("/api/v1/accounts/stream", { withCredentials: true });
+    const refresh = (event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as { accountId?: string };
+        if (accountId === "all" || payload.accountId === accountId) load(accountId);
+      } catch {
+        /* Ignore malformed notifications; EventSource reconnects automatically. */
+      }
+    };
+    stream.addEventListener("message", refresh as EventListener);
+    return () => stream.close();
   }, [accountId, load]);
   const selected = accounts.find((account) => account.id === accountId);
   const canTrade =
@@ -2017,6 +2061,7 @@ function AccountStatePage({
     }
   }
   async function exitPositionImmediately(row: Record<string, unknown>) {
+    const targetAccountId = String(row._accountId ?? accountId);
     const productId = Number(row.product_id ?? row.productId);
     const signedSize = Number(row.size ?? row.contracts);
     const contracts = Math.abs(signedSize);
@@ -2034,7 +2079,7 @@ function AccountStatePage({
         {
           method: "POST",
           body: JSON.stringify({
-            account_id: accountId,
+            account_id: targetAccountId,
             product_id: productId,
             side,
             contracts,
@@ -2065,6 +2110,19 @@ function AccountStatePage({
       setExitingPosition(false);
     }
   }
+  const positionRows: Array<Record<string, unknown> & {
+    _accountId: string;
+    _accountName: string;
+    _fresh: boolean;
+  }> = (accountId === "all"
+    ? positionStates.flatMap(({ account, state: accountState }) => accountState.positions.map((row) => ({ ...row, _accountId: account.id, _accountName: account.profileName, _fresh: accountState.fresh })))
+    : (state?.positions ?? []).map((row) => ({ ...row, _accountId: accountId, _accountName: selected?.profileName ?? "—", _fresh: state?.fresh ?? false })))
+    .filter((row) => String(
+      ("product_symbol" in row ? row.product_symbol : undefined)
+      ?? ("product_id" in row ? row.product_id : undefined)
+      ?? "",
+    ).toLowerCase().includes(positionSearch.trim().toLowerCase()));
+  const totalPositionPnl = positionRows.reduce((total, row) => total + Number(row.unrealized_pnl ?? 0), 0);
   return (
     <>
       <Panel
@@ -2083,6 +2141,7 @@ function AccountStatePage({
             }}
             value={accountId}
           >
+            {mode === "positions" ? <option value="all">All Accounts</option> : null}
             {accounts.map((account) => (
               <option key={account.id} value={account.id}>
                 {account.profileName}
@@ -2097,7 +2156,9 @@ function AccountStatePage({
             <RefreshCw size={16} /> Refresh
           </button>
           <span className="self-center text-sm">
-            {state
+            {accountId === "all" && mode === "positions"
+              ? `${positionStates.length}/${accounts.length} accounts refreshed`
+              : state
               ? `${state.fresh ? "Fresh" : "Stale"} · ${state.ageSeconds}s · reconciliation ${state.reconciliationState} · lease ${state.leaseActive ? "active" : "inactive"} · credential v${state.credentialVersion}`
               : "No state"}
           </span>
@@ -2176,23 +2237,27 @@ function AccountStatePage({
             </section>
           </>
         ) : (
-          <section className="hmt-data-section">
-            <header><div><h3>Open positions</h3><p>Reconciled perpetual positions · {state?.fresh ? "Fresh" : "Stale or unavailable"}</p></div></header>
+          <section className="hmt-data-section hmt-positions-workspace">
+            <header><div><h3>Open positions ({positionRows.length})</h3><p>Delta India perpetual positions · live private reconciliation</p></div><strong className={totalPositionPnl < 0 ? "hmt-negative" : "hmt-positive"}>Unrealized P&amp;L&nbsp; {totalPositionPnl >= 0 ? "+" : ""}{totalPositionPnl.toFixed(8)}</strong></header>
+            <div className="hmt-position-filters"><label className="gtt-search"><Search size={18} /><input aria-label="Search positions" onChange={(event) => setPositionSearch(event.target.value)} placeholder="Search instrument" value={positionSearch} /></label><select aria-label="Position account" onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} value={accountId}><option value="all">All Accounts</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><button className="hmt-secondary-button" onClick={() => load(accountId)} type="button"><RefreshCw size={16} /> Refresh</button></div>
             <div className="overflow-x-auto"><table className="hmt-trading-table">
-              <thead><tr><th>Contract</th><th>Side</th><th>Contracts</th><th>Entry</th><th>Mark</th><th>Liquidation</th><th>Margin</th><th>Unrealized P&amp;L</th><th>Action</th></tr></thead>
+              <thead><tr><th>Contract</th><th>Account</th><th>Side</th><th>Contracts</th><th>Entry</th><th>Mark</th><th>Liquidation</th><th>Margin</th><th>Unrealized P&amp;L</th><th>Action</th></tr></thead>
               <tbody>
-                {(state?.positions ?? []).map((row, index) => {
+                {positionRows.map((row, index) => {
                   const size = Number(row.size ?? row.contracts ?? 0);
                   const pnl = Number(row.unrealized_pnl ?? 0);
+                  const rowAccount = accounts.find((account) => account.id === row._accountId);
+                  const canExitRow = !readOnlyMode && user.role !== "viewer" && rowAccount?.permission !== "view";
                   return <tr key={`${String(row.product_id ?? index)}-${index}`}>
                     <td><strong>{String(row.product_symbol ?? `Product ${row.product_id ?? "—"}`)}</strong><small>{String(row.margin_mode ?? "Perpetual")}</small></td>
+                    <td><strong>{String(row._accountName)}</strong><small>{row._fresh ? "Live" : "Reconnecting"}</small></td>
                     <td><span className={`hmt-side-badge ${size < 0 ? "sell" : "buy"}`}>{size < 0 ? "SHORT" : "LONG"}</span></td>
                     <td>{Math.abs(size)}</td><td>{String(row.entry_price ?? "—")}</td><td>{String(row.mark_price ?? "—")}</td><td>{String(row.liquidation_price ?? "—")}</td><td>{String(row.margin ?? "—")}</td>
                     <td className={pnl < 0 ? "hmt-negative" : "hmt-positive"}>{String(row.unrealized_pnl ?? "—")}</td>
-                    <td>{canTrade ? <button className="hmt-exit-button" disabled={exitingPosition} onClick={() => void exitPositionImmediately(row)} type="button">{exitingPosition ? "Sending…" : "Exit now"}</button> : "—"}</td>
+                    <td>{canExitRow ? <button className="hmt-exit-button" disabled={exitingPosition} onClick={() => void exitPositionImmediately(row)} type="button">{exitingPosition ? "Sending…" : "Exit now"}</button> : "—"}</td>
                   </tr>;
                 })}
-                {(state?.positions ?? []).length === 0 ? <tr><td colSpan={9}>No open positions.</td></tr> : null}
+                {positionRows.length === 0 ? <tr><td className="hmt-position-empty" colSpan={10}><strong>No open positions</strong><span>Active Delta positions will appear here automatically.</span></td></tr> : null}
               </tbody>
             </table></div>
           </section>
@@ -2547,11 +2612,11 @@ function GttPage({
       </div>
 
       {showCreate ? <div aria-modal="true" className="hmt-modal-backdrop hmt-order-backdrop" role="dialog"><form className="hmt-order-dialog gtt-create-modal" onSubmit={(event) => void create(event)}>
-        <header className="hmt-order-dialog__header"><div><h2>New HMT GTT</h2><p>Delta Exchange India · one protected exit per selected account</p></div><button aria-label="Close" onClick={() => setShowCreate(false)} type="button"><X size={20} /></button></header>
+        <header className="hmt-order-dialog__header gtt-create-header"><div><small>NEW HMT GTT</small><h2>Select instrument <span>{products.find((item) => item.productId === Number(productId))?.symbol ?? "—"}</span></h2><p className={side === "buy" ? "is-buy" : "is-sell"}>{side === "buy" ? "BUY exit for short position" : "SELL exit for long position"}</p></div><button aria-label="Close" onClick={() => setShowCreate(false)} type="button"><X size={24} /></button></header>
         <div className="gtt-create-body">
           <section className="hmt-order-accounts"><div className="hmt-order-accounts__heading"><strong>Select Accounts ({createAccountIds.length} selected)</strong><div><button className="hmt-text-button" onClick={() => setCreateAccountIds(createableAccounts.map((account) => account.id))} type="button">Select all ready accounts</button><button className="hmt-text-button" onClick={() => setCreateAccountIds([])} type="button">Clear</button></div></div><div className="hmt-order-accounts__grid">{accounts.map((account) => { const eligible = createableAccounts.some((item) => item.id === account.id); return <label className={`hmt-order-account ${createAccountIds.includes(account.id) ? "is-selected" : ""} ${eligible ? "" : "is-disabled"}`} key={account.id} title={eligible ? "" : "Needs manage or trade access, verified credentials, a ready reconciliation and active exits"}><input checked={createAccountIds.includes(account.id)} disabled={!eligible} onChange={(event) => toggleCreateAccount(account.id, event.target.checked)} type="checkbox" /><span><strong>{account.profileName}</strong><small>{eligible ? "Delta India · ready" : "Not ready or no exit permission"}</small></span></label>; })}</div></section>
-          <section className="gtt-form-section"><h3>Instrument</h3><p>Search and select an active perpetual contract.</p><label className="hmt-order-search"><span>Contract</span><div className="hmt-order-search__control"><Search size={17} /><input aria-label="Search perpetual contracts" onChange={(event) => setProductSearch(event.target.value)} placeholder="Search perpetual contracts" value={productSearch} /><select aria-label="Contract" onChange={(event) => setProductId(event.target.value)} value={productId}>{searchedProducts.map((product) => <option key={product.productId} value={product.productId}>{product.symbol}</option>)}</select></div></label>{eligibleProducts.length === 0 ? <p className="gtt-inline-warning">No active perpetual contracts are available.</p> : null}</section>
-          <section className="gtt-form-section"><h3>1. Setup</h3><div className="gtt-create-grid"><label>Exit side<select aria-label="Exit side" onChange={(event) => setSide(event.target.value as "buy" | "sell")} value={side}><option value="sell">Sell to close long</option><option value="buy">Buy to close short</option></select></label><label>Trigger type<select aria-label="Protection type" onChange={(event) => setKind(event.target.value as GttRow["triggerKind"])} value={kind}><option value="stop_loss">Stop loss</option><option value="target">Target</option><option value="trailing_stop">Trailing stop</option></select></label></div></section>
+          <section className="gtt-form-section"><h3>Instrument</h3><p>Search and select the Delta perpetual contract for this trigger.</p><div className="gtt-instrument-fields"><label><span>Search symbol</span><div className="gtt-symbol-search"><Search size={18} /><input aria-label="Search perpetual contracts" onChange={(event) => setProductSearch(event.target.value)} placeholder="Search symbol (e.g. BTCUSD)" value={productSearch} /></div></label><label><span>Contract</span><select aria-label="Contract" onChange={(event) => setProductId(event.target.value)} value={productId}>{searchedProducts.map((product) => <option key={product.productId} value={product.productId}>{product.symbol}</option>)}</select></label></div>{eligibleProducts.length === 0 ? <p className="gtt-inline-warning">No active perpetual contracts are available.</p> : null}</section>
+          <section className="gtt-form-section"><h3>1. Setup</h3><div className="gtt-create-grid"><fieldset><legend>Transaction type</legend><div className="gtt-segmented"><button className={side === "buy" ? "is-active" : ""} onClick={() => setSide("buy")} type="button">BUY exit</button><button className={side === "sell" ? "is-active" : ""} onClick={() => setSide("sell")} type="button">SELL exit</button></div></fieldset><fieldset><legend>Protection type</legend><div className="gtt-segmented gtt-segmented--three"><button className={kind === "stop_loss" ? "is-active" : ""} onClick={() => setKind("stop_loss")} type="button">Stop loss</button><button className={kind === "target" ? "is-active" : ""} onClick={() => setKind("target")} type="button">Target</button><button className={kind === "trailing_stop" ? "is-active" : ""} onClick={() => setKind("trailing_stop")} type="button">Trailing</button></div></fieldset></div></section>
           <section className="gtt-form-section gtt-form-section--order"><h3>2. Order</h3><div className="gtt-create-grid"><label>{kind === "trailing_stop" ? "Trail offset" : "Trigger price"}<input aria-label={kind === "trailing_stop" ? "Trail offset" : "Trigger price"} min="0" onChange={(event) => kind === "trailing_stop" ? setTrail(event.target.value) : setTrigger(event.target.value)} placeholder={kind === "trailing_stop" ? "Trail offset" : "0.00"} required type="number" value={kind === "trailing_stop" ? trail : trigger} /></label><label>Contracts<input aria-label="Contracts" min="1" onChange={(event) => setContracts(event.target.value)} required step="1" type="number" value={contracts} /></label><label>Optional limit price<input aria-label="Limit price" min="0" onChange={(event) => setLimit(event.target.value)} placeholder="Market trigger" type="number" value={limit} /></label></div><p className="gtt-modal-note">This creates a reduce-only exit for each selected account. Crypto GTTs are submitted individually; the result is reported per account.</p></section>
           {notice ? <p className="gtt-page__notice" role="status">{notice}</p> : null}
         </div>
@@ -3675,112 +3740,54 @@ function TradingViewLogsPage() {
 
 function PerformancePage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [accountId, setAccountId] = useState("");
-  const [summary, setSummary] = useState<PerformanceSummary | null>(null);
+  const [accountId, setAccountId] = useState("all");
+  const [summaries, setSummaries] = useState<Array<PerformanceSummary & { accountName: string }>>([]);
+  const [symbol, setSymbol] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const load = useCallback((selected: string) => {
-    if (!selected) return;
-    setError(null);
-    void request<PerformanceSummary>(`/api/v1/performance/${selected}`)
-      .then(setSummary)
-      .catch(() => {
-        setSummary(null);
-        setError("Fresh reconciled performance data is unavailable.");
-      });
+  const load = useCallback((source: Account[], selected: string) => {
+    const targets = selected === "all" ? source : source.filter((account) => account.id === selected);
+    if (targets.length === 0) return;
+    void Promise.allSettled(targets.map(async (account) => ({
+      ...await request<PerformanceSummary>(`/api/v1/performance/${account.id}`),
+      accountName: account.profileName,
+    }))).then((results) => {
+      const loaded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      if (loaded.length > 0) setSummaries(loaded);
+      setError(loaded.length === targets.length ? null : "Some accounts are reconnecting. Available report data is shown.");
+    });
   }, []);
   useEffect(() => {
     void request<{ accounts: Account[] }>("/api/v1/accounts").then((value) => {
-      const first = value.accounts[0]?.id ?? "";
       setAccounts(value.accounts);
-      setAccountId(first);
-      load(first);
+      load(value.accounts, "all");
     });
   }, [load]);
-  return (
-    <Panel title="Performance, funding and fees">
-      <div className="flex gap-3 p-4">
-        <select
-          className="rounded border px-3 py-2"
-          onChange={(event) => {
-            setAccountId(event.target.value);
-            load(event.target.value);
-          }}
-          value={accountId}
-        >
-          {accounts.map((account) => (
-            <option key={account.id} value={account.id}>
-              {account.profileName}
-            </option>
-          ))}
-        </select>
-        <button
-          className="rounded border px-3 py-2"
-          onClick={() => load(accountId)}
-          type="button"
-        >
-          Refresh
-        </button>
-      </div>
-      {error ? (
-        <p className="px-4 pb-4" role="alert">
-          {error}
-        </p>
-      ) : null}
-      {summary ? (
-        <>
-          <div className="grid gap-4 p-4 md:grid-cols-5">
-            <div>
-              <small>Wallet net</small>
-              <strong className="block">{summary.netWalletChange}</strong>
-            </div>
-            <div>
-              <small>Funding</small>
-              <strong className="block">{summary.funding}</strong>
-            </div>
-            <div>
-              <small>Commission</small>
-              <strong className="block">{summary.commission}</strong>
-            </div>
-            <div>
-              <small>Liquidation fees</small>
-              <strong className="block">{summary.liquidationFees}</strong>
-            </div>
-            <div>
-              <small>Fills</small>
-              <strong className="block">{summary.fillCount}</strong>
-            </div>
-          </div>
-          <div className="overflow-x-auto">
-            <table>
-              <thead>
-                <tr>
-                  <th>Wallet transaction type</th>
-                  <th>Exact total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(summary.totals).map(([kind, amount]) => (
-                  <tr key={kind}>
-                    <td>{kind}</td>
-                    <td>{amount}</td>
-                  </tr>
-                ))}
-                {Object.keys(summary.totals).length === 0 ? (
-                  <tr>
-                    <td colSpan={2}>
-                      No wallet transactions in the reconciled window.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </>
-      ) : (
-        <p className="p-4">No performance snapshot.</p>
-      )}
-    </Panel>
-  );
+  const allFills: Array<Record<string, unknown> & { accountName: string }> = summaries.flatMap((summary) => summary.fills.map((fill) => ({ ...fill, accountName: summary.accountName })));
+  const fills = allFills.filter((row) => {
+    const created = String(row.created_at ?? "").slice(0, 10);
+    return String(row.product_symbol ?? row.product_id ?? "").toLowerCase().includes(symbol.trim().toLowerCase()) && (!dateFrom || created >= dateFrom) && (!dateTo || created <= dateTo);
+  });
+  const totals = summaries.reduce((value, summary) => ({
+    net: value.net + Number(summary.netWalletChange), funding: value.funding + Number(summary.funding),
+    commission: value.commission + Number(summary.commission), unrealized: value.unrealized + Number(summary.unrealizedPnl),
+    fills: value.fills + summary.fillCount,
+  }), { net: 0, funding: 0, commission: 0, unrealized: 0, fills: 0 });
+  const exportCsv = () => {
+    const rows = fills.map((row) => [row.created_at, row.accountName, row.product_symbol ?? row.product_id, row.side, row.size, row.price, row.commission, row.role, row.order_id].map((value) => JSON.stringify(String(value ?? ""))).join(","));
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([["time,account,contract,side,contracts,price,commission,role,order_id", ...rows].join("\n")], { type: "text/csv" }));
+    link.download = "hmt-crypto-performance.csv";
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+  return <div className="hmt-page performance-page">
+    <div className="hmt-page-heading"><div><h1>Performance Reports</h1><p>Account-level Delta fills, fees, funding and reconciled P&amp;L.</p></div><button className="hmt-secondary-button" onClick={() => load(accounts, accountId)} type="button"><RefreshCw size={17} /> Refresh</button></div>
+    <Panel><div className="performance-filters"><label>Symbol<input onChange={(event) => setSymbol(event.target.value)} placeholder="e.g. BTCUSD" value={symbol} /></label><label>From<input onChange={(event) => setDateFrom(event.target.value)} type="date" value={dateFrom} /></label><label>To<input onChange={(event) => setDateTo(event.target.value)} type="date" value={dateTo} /></label><label>Accounts<select onChange={(event) => { setAccountId(event.target.value); load(accounts, event.target.value); }} value={accountId}><option value="all">All Accounts</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select></label><button className="hmt-primary-button" onClick={() => load(accounts, accountId)} type="button">Run report</button></div>{error ? <p className="gtt-page__notice">{error}</p> : null}</Panel>
+    <section className="performance-summary">{[["Net wallet change", totals.net], ["Funding", totals.funding], ["Commission", totals.commission], ["Unrealized P&L", totals.unrealized]].map(([label, value]) => <div key={String(label)}><small>{label}</small><strong className={Number(value) < 0 ? "hmt-negative" : "hmt-positive"}>{Number(value) >= 0 ? "+" : ""}{Number(value).toFixed(8)}</strong></div>)}<div><small>Fills</small><strong>{totals.fills}</strong></div><div><small>Accounts</small><strong>{summaries.length}</strong></div></section>
+    <Panel><div className="performance-table-heading"><div><h3>Account fills</h3><p>{fills.length} report rows</p></div><button className="hmt-secondary-button" onClick={exportCsv} type="button"><Download size={17} /> Export CSV</button></div><div className="overflow-x-auto"><table className="hmt-trading-table"><thead><tr><th>Time</th><th>Account</th><th>Contract</th><th>Direction</th><th>Contracts</th><th>Fill price</th><th>Commission</th><th>Role</th><th>Order ID</th></tr></thead><tbody>{fills.map((row, index) => <tr key={`${String(row.order_id ?? index)}-${index}`}><td>{String(row.created_at ?? "—")}</td><td><strong>{String(row.accountName)}</strong></td><td><strong>{String(row.product_symbol ?? row.product_id ?? "—")}</strong></td><td><span className={`hmt-side-badge ${String(row.side ?? "").toLowerCase()}`}>{String(row.side ?? "—").toUpperCase()}</span></td><td>{String(row.size ?? "—")}</td><td>{String(row.price ?? "—")}</td><td>{String(row.commission ?? "—")}</td><td>{String(row.role ?? "—")}</td><td>{String(row.order_id ?? "—")}</td></tr>)}{fills.length === 0 ? <tr><td colSpan={9}>No fills match these report filters.</td></tr> : null}</tbody></table></div></Panel>
+  </div>;
 }
 
 function NotificationsPage() {
@@ -4522,6 +4529,11 @@ function DashboardPage({
   }, []);
   useEffect(load, [load]);
   useEffect(() => {
+    const stream = new EventSource("/api/v1/accounts/stream", { withCredentials: true });
+    stream.addEventListener("message", load as EventListener);
+    return () => stream.close();
+  }, [load]);
+  useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") load();
     }, 30_000);
@@ -4792,6 +4804,10 @@ function Shell({
               />
               <Route
                 path="/risk"
+                element={<RiskPage csrf={csrf} user={user} />}
+              />
+              <Route
+                path="/contract-settings"
                 element={<RiskPage csrf={csrf} user={user} />}
               />
               <Route path="/performance" element={<PerformancePage />} />

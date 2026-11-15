@@ -55,7 +55,13 @@ from hmt_crypto.api.platform_auth import (
 )
 from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlApiSettings
-from hmt_crypto.fast_path import MARKET_CHANNEL, ORDER_CHANNEL, publish_json, subscribe_json
+from hmt_crypto.fast_path import (
+    ACCOUNT_CHANNEL,
+    MARKET_CHANNEL,
+    ORDER_CHANNEL,
+    publish_json,
+    subscribe_json,
+)
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_WINDOW_HOURS,
 )
@@ -2084,7 +2090,12 @@ def install_platform_routes(
         state = await account_state(account_id, request)
         wallet = state["walletTransactions"]
         fills = state["fills"]
-        if not isinstance(wallet, list) or not isinstance(fills, list):
+        positions = state["positions"]
+        if (
+            not isinstance(wallet, list)
+            or not isinstance(fills, list)
+            or not isinstance(positions, list)
+        ):
             raise HTTPException(status_code=409, detail="account_state_not_ready")
         totals: dict[str, Decimal] = {}
         for row in wallet:
@@ -2099,6 +2110,10 @@ def install_platform_routes(
             kind = str(row["transaction_type"])
             totals[kind] = totals.get(kind, Decimal(0)) + amount
         net = sum(totals.values(), Decimal(0))
+        unrealized = sum(
+            (_payload_decimal(row, "unrealized_pnl") for row in positions if isinstance(row, dict)),
+            Decimal(0),
+        )
         return {
             "accountId": str(account_id),
             "observedAt": state["observedAt"],
@@ -2109,7 +2124,9 @@ def install_platform_routes(
             "commission": format(totals.get("commission", Decimal(0)), "f"),
             "liquidationFees": format(totals.get("liquidation_fee", Decimal(0)), "f"),
             "settlement": format(totals.get("settlement", Decimal(0)), "f"),
+            "unrealizedPnl": format(unrealized, "f"),
             "totals": {key: format(value, "f") for key, value in sorted(totals.items())},
+            "fills": fills[:500],
         }
 
     @app.get("/api/v1/dashboard/overview")
@@ -2675,6 +2692,50 @@ def install_platform_routes(
                         payload = await market_products_payload()
                         encoded = json.dumps(payload, separators=(",", ":"))
                         yield f"event: market\ndata: {encoded}\n\n"
+                    await asyncio.sleep(5)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @app.get("/api/v1/accounts/stream")
+    async def account_stream(request: Request) -> StreamingResponse:
+        """Notify assigned users when a private account projection changes."""
+        actor = await principal(request)
+        async with database.transaction() as session:
+            allowed = set(
+                await session.scalars(
+                    select(AccountAssignment.account_id).where(
+                        AccountAssignment.user_id == actor.profile_id
+                    )
+                )
+            )
+
+        async def events() -> AsyncIterator[str]:
+            yield "event: ready\ndata: {}\n\n"
+            try:
+                async for payload in subscribe_json(ACCOUNT_CHANNEL):
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        account_id = UUID(str(payload.get("accountId", "")))
+                    except ValueError:
+                        continue
+                    if actor.role != "admin" and account_id not in allowed:
+                        continue
+                    encoded = json.dumps(payload, separators=(",", ":"))
+                    yield f"event: account\ndata: {encoded}\n\n"
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                while not await request.is_disconnected():
+                    yield "event: heartbeat\ndata: {}\n\n"
                     await asyncio.sleep(5)
 
         return StreamingResponse(

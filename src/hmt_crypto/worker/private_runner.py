@@ -8,7 +8,7 @@ import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Self
+from typing import Any, Self
 from uuid import UUID, uuid4
 
 from pydantic import Field, SecretStr, model_validator
@@ -26,7 +26,7 @@ from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion, ExecutionMode
 from hmt_crypto.exchange.delta.signer import DeltaSigner
-from hmt_crypto.fast_path import ORDER_CHANNEL, wait_for_message
+from hmt_crypto.fast_path import ACCOUNT_CHANNEL, ORDER_CHANNEL, publish_json, wait_for_message
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_MIN_MINUTES,
     LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS,
@@ -759,6 +759,99 @@ async def _recover_live_submission(
         await adapter.aclose()
 
 
+async def _run_immediate_execution_loop(
+    database: Database,
+    process: PrivateWorkerSettings,
+    execution: LiveExecutionSettings,
+    secrets: AwsDeltaSecretStore,
+    logger: Any,
+    *,
+    stop: asyncio.Event,
+) -> None:
+    """Dispatch durable order commands independently of reconciliation latency."""
+    while not stop.is_set():
+        try:
+            async with database.transaction() as session:
+                submission_accounts = set(
+                    await session.scalars(
+                        select(LiveOrderSubmission.account_id).where(
+                            LiveOrderSubmission.status.in_(
+                                ("PENDING", "CLAIMED", "PREPARED", "SENDING", "UNCERTAIN")
+                            ),
+                            LiveOrderSubmission.intent_id.in_(
+                                select(LiveOrderIntent.id).where(
+                                    LiveOrderIntent.hidden_at.is_(None)
+                                )
+                            ),
+                        )
+                    )
+                )
+                action_accounts = set(
+                    await session.scalars(
+                        select(LiveOrderAction.account_id).where(
+                            LiveOrderAction.status.in_(("PENDING", "UNCERTAIN"))
+                        )
+                    )
+                )
+            for account_id in submission_accounts | action_accounts:
+                claim = await _claim(database, process, account_id)
+                if claim is None:
+                    continue
+                api_key, api_secret = await secrets.read(claim.secret_arn)
+                try:
+                    action = await _execute_qualified_live_action(
+                        database, process, claim, execution,
+                        api_key=api_key, api_secret=api_secret,
+                    )
+                    if action.kind not in {"IDLE", "DISABLED"}:
+                        logger.info(
+                            "immediate_live_order_action",
+                            account_id=str(account_id),
+                            outcome=action.kind,
+                        )
+                    recovery = await _recover_live_submission(
+                        database, process, claim, api_key=api_key, api_secret=api_secret,
+                    )
+                    if recovery.kind != "IDLE":
+                        logger.info(
+                            "immediate_live_recovery",
+                            account_id=str(account_id),
+                            outcome=recovery.kind,
+                        )
+                    result = await _execute_qualified_live_submission(
+                        database, process, claim, execution,
+                        api_key=api_key, api_secret=api_secret,
+                    )
+                    if result.kind not in {"IDLE", "DISABLED"}:
+                        logger.info(
+                            "immediate_live_submission",
+                            account_id=str(account_id),
+                            outcome=result.kind,
+                        )
+                    if (
+                        action.kind not in {"IDLE", "DISABLED"}
+                        or recovery.kind != "IDLE"
+                        or result.kind not in {"IDLE", "DISABLED"}
+                    ):
+                        await publish_json(
+                            ACCOUNT_CHANNEL,
+                            {"accountId": str(account_id), "reason": "order_state_changed"},
+                        )
+                finally:
+                    api_key = ""
+                    api_secret = ""
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error("immediate_execution_cycle_failed", error_type=type(error).__name__)
+        try:
+            await wait_for_message(ORDER_CHANNEL, 1.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await asyncio.sleep(1.0)
+
+
 async def run_private_worker(
     runtime: ControlRuntimeSettings,
     process: PrivateWorkerSettings,
@@ -776,9 +869,16 @@ async def run_private_worker(
     execution = LiveExecutionSettings()
     logger = get_logger("worker.private")
     stream_tasks: dict[UUID, tuple[int, int, asyncio.Task[None]]] = {}
+    execution_task: asyncio.Task[None] | None = None
     next_retention_at = 0.0
     logger.info("private_worker_started", owner_id=str(process.owner_id))
     try:
+        if not process.read_only and execution.enabled:
+            execution_task = asyncio.create_task(
+                _run_immediate_execution_loop(
+                    database, process, execution, secrets, logger, stop=stop
+                )
+            )
         while not stop.is_set():
             if time.monotonic() >= next_retention_at:
                 try:
@@ -823,6 +923,19 @@ async def run_private_worker(
                                 allowed_product_ids=claim.product_ids,
                             )
                             if await _publish(database, process, claim, evidence):
+                                try:
+                                    await publish_json(
+                                        ACCOUNT_CHANNEL,
+                                        {
+                                            "accountId": str(claim.account_id),
+                                            "observedAt": datetime.now(UTC).isoformat(),
+                                        },
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "account_update_publish_failed",
+                                        account_id=str(account_id),
+                                    )
                                 stage = "private_stream"
                                 stream = stream_tasks.get(account_id)
                                 identity = (claim.credential_version, claim.generation)
@@ -1025,6 +1138,9 @@ async def run_private_worker(
                 except TimeoutError:
                     pass
     finally:
+        if execution_task is not None:
+            execution_task.cancel()
+            await asyncio.gather(execution_task, return_exceptions=True)
         for _, _, task in stream_tasks.values():
             task.cancel()
         await asyncio.gather(
