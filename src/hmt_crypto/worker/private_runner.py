@@ -775,9 +775,7 @@ async def _run_immediate_execution_loop(
                 submission_accounts = set(
                     await session.scalars(
                         select(LiveOrderSubmission.account_id).where(
-                            LiveOrderSubmission.status.in_(
-                                ("PENDING", "CLAIMED", "PREPARED", "SENDING", "UNCERTAIN")
-                            ),
+                            LiveOrderSubmission.status == "PENDING",
                             LiveOrderSubmission.intent_id.in_(
                                 select(LiveOrderIntent.id).where(
                                     LiveOrderIntent.hidden_at.is_(None)
@@ -789,7 +787,7 @@ async def _run_immediate_execution_loop(
                 action_accounts = set(
                     await session.scalars(
                         select(LiveOrderAction.account_id).where(
-                            LiveOrderAction.status.in_(("PENDING", "UNCERTAIN"))
+                            LiveOrderAction.status == "PENDING"
                         )
                     )
                 )
@@ -809,15 +807,6 @@ async def _run_immediate_execution_loop(
                             account_id=str(account_id),
                             outcome=action.kind,
                         )
-                    recovery = await _recover_live_submission(
-                        database, process, claim, api_key=api_key, api_secret=api_secret,
-                    )
-                    if recovery.kind != "IDLE":
-                        logger.info(
-                            "immediate_live_recovery",
-                            account_id=str(account_id),
-                            outcome=recovery.kind,
-                        )
                     result = await _execute_qualified_live_submission(
                         database, process, claim, execution,
                         api_key=api_key, api_secret=api_secret,
@@ -830,7 +819,6 @@ async def _run_immediate_execution_loop(
                         )
                     if (
                         action.kind not in {"IDLE", "DISABLED"}
-                        or recovery.kind != "IDLE"
                         or result.kind not in {"IDLE", "DISABLED"}
                     ):
                         await publish_json(
