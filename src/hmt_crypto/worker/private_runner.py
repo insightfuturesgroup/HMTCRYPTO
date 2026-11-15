@@ -26,6 +26,7 @@ from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion, ExecutionMode
 from hmt_crypto.exchange.delta.signer import DeltaSigner
+from hmt_crypto.fast_path import ORDER_CHANNEL, wait_for_message
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_MIN_MINUTES,
     LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS,
@@ -76,7 +77,7 @@ class PrivateWorkerSettings(BaseSettings):
     owner_id: UUID = Field(default_factory=uuid4, alias="HMT_PRIVATE_WORKER_ID")
     aws_region: str = Field(min_length=3, max_length=64, alias="HMT_AWS_REGION")
     secret_prefix: str = Field(default="hmt-crypto/delta", alias="HMT_DELTA_SECRET_PREFIX")
-    interval_seconds: int = Field(default=30, ge=5, le=300, alias="HMT_PRIVATE_INTERVAL_SECONDS")
+    interval_seconds: int = Field(default=2, ge=1, le=300, alias="HMT_PRIVATE_INTERVAL_SECONDS")
     lease_seconds: int = Field(default=90, ge=15, le=900, alias="HMT_PRIVATE_LEASE_SECONDS")
     read_only: bool = Field(default=True, alias="HMT_PRIVATE_READ_ONLY")
     operational_retention_days: int = Field(
@@ -139,7 +140,8 @@ async def _auto_activate_healthy_account(
         if control.credential_state != "verified" or lease is None:
             return "worker_or_credential_not_ready"
         snapshot = await session.scalar(
-            select(PrivateReconciliationSnapshot).options(
+            select(PrivateReconciliationSnapshot)
+            .options(
                 load_only(
                     PrivateReconciliationSnapshot.id,
                     PrivateReconciliationSnapshot.observed_at,
@@ -512,7 +514,8 @@ async def _publish(
             return False
         outcome = "ready" if evidence.complete and not evidence.foreign_product_ids else "blocked"
         latest = await session.scalar(
-            select(PrivateReconciliationSnapshot).options(
+            select(PrivateReconciliationSnapshot)
+            .options(
                 load_only(
                     PrivateReconciliationSnapshot.id,
                     PrivateReconciliationSnapshot.observed_at,
@@ -787,9 +790,7 @@ async def run_private_worker(
                         market_candles=retention.market_candles,
                     )
                 except Exception as error:
-                    logger.error(
-                        "operational_retention_failed", error_type=type(error).__name__
-                    )
+                    logger.error("operational_retention_failed", error_type=type(error).__name__)
                 next_retention_at = time.monotonic() + 86_400
             try:
                 async with database.transaction() as session:
@@ -989,9 +990,25 @@ async def run_private_worker(
             except Exception:
                 logger.error("private_supervision_cycle_failed")
             try:
-                await asyncio.wait_for(stop.wait(), timeout=process.interval_seconds)
-            except TimeoutError:
-                pass
+                wake = asyncio.create_task(
+                    wait_for_message(ORDER_CHANNEL, float(process.interval_seconds))
+                )
+                stopped = asyncio.create_task(stop.wait())
+                done, pending = await asyncio.wait(
+                    {wake, stopped}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    await task
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=process.interval_seconds)
+                except TimeoutError:
+                    pass
     finally:
         for _, _, task in stream_tasks.values():
             task.cancel()

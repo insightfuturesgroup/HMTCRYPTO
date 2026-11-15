@@ -55,6 +55,7 @@ from hmt_crypto.api.platform_auth import (
 )
 from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlApiSettings
+from hmt_crypto.fast_path import MARKET_CHANNEL, ORDER_CHANNEL, publish_json, subscribe_json
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_WINDOW_HOURS,
 )
@@ -506,8 +507,11 @@ def install_platform_routes(
                 <= now - timedelta(seconds=settings.session_idle_seconds)
             ):
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
-            platform_session.last_seen_at = now
-            platform_session.expires_at = now + timedelta(seconds=settings.session_absolute_seconds)
+            if platform_session.last_seen_at <= now - timedelta(seconds=60):
+                platform_session.last_seen_at = now
+                platform_session.expires_at = now + timedelta(
+                    seconds=settings.session_absolute_seconds
+                )
             return Principal(
                 row.id,
                 row.auth_user_id,
@@ -958,8 +962,11 @@ def install_platform_routes(
                 or platform_session.revoked_at is not None
             ):
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
-            platform_session.last_seen_at = now
-            platform_session.expires_at = now + timedelta(seconds=settings.session_absolute_seconds)
+            if platform_session.last_seen_at <= now - timedelta(seconds=60):
+                platform_session.last_seen_at = now
+                platform_session.expires_at = now + timedelta(
+                    seconds=settings.session_absolute_seconds
+                )
             actor = Principal(
                 row.id,
                 row.auth_user_id,
@@ -2648,19 +2655,27 @@ def install_platform_routes(
         await principal(request)
 
         async def events() -> AsyncIterator[str]:
-            previous_token = ""
-            idle_ticks = 0
-            while not await request.is_disconnected():
-                token = await market_change_token()
-                if token != previous_token or idle_ticks >= 15:
-                    previous_token = token
-                    idle_ticks = 0
-                    payload = await market_products_payload()
-                    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            initial = await market_products_payload()
+            encoded = json.dumps(initial, separators=(",", ":"))
+            yield f"event: market\ndata: {encoded}\n\n"
+            try:
+                async for payload in subscribe_json(MARKET_CHANNEL):
+                    if await request.is_disconnected():
+                        return
+                    encoded = json.dumps(payload, separators=(",", ":"))
                     yield f"event: market\ndata: {encoded}\n\n"
-                else:
-                    idle_ticks += 1
-                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                previous_token = ""
+                while not await request.is_disconnected():
+                    token = await market_change_token()
+                    if token != previous_token:
+                        previous_token = token
+                        payload = await market_products_payload()
+                        encoded = json.dumps(payload, separators=(",", ":"))
+                        yield f"event: market\ndata: {encoded}\n\n"
+                    await asyncio.sleep(5)
 
         return StreamingResponse(
             events(),
@@ -3463,7 +3478,14 @@ def install_platform_routes(
                 request_id=str(request_id),
                 details={"previewId": str(preview.id)},
             )
-            return {"intentId": str(intent_id), "status": "ADMITTED", "dispatchable": True}
+        try:
+            await publish_json(
+                ORDER_CHANNEL,
+                {"accountId": str(preview.account_id), "intentId": str(intent_id)},
+            )
+        except Exception:
+            _LOGGER.warning("order_wakeup_publish_failed", account_id=str(preview.account_id))
+        return {"intentId": str(intent_id), "status": "ADMITTED", "dispatchable": True}
 
     @app.get("/api/v1/trading/actions")
     async def list_order_actions(request: Request, account_id: UUID) -> dict[str, object]:
@@ -3770,7 +3792,28 @@ def install_platform_routes(
                 or submission.worker_generation is None
                 or submission.credential_version is None
             ):
-                raise HTTPException(status_code=409, detail="submission_fence_missing")
+                # A pre-claim/legacy uncertain row has no worker fence to use
+                # for a state transition. The owner's explicit Delta check may
+                # still hide it; the immutable submission and audit are kept.
+                intent.hidden_at = now
+                intent.hidden_by_user_id = actor.profile_id
+                await append_audit(
+                    session,
+                    actor=actor,
+                    action="LIVE_ORDER_UNCERTAIN_HIDDEN",
+                    target_type="live_order_intent",
+                    target_id=str(intent_id),
+                    outcome="SUCCEEDED",
+                    request_id=request_id,
+                    details={
+                        "accountId": str(account_id),
+                        "resolution": body.resolution,
+                        "deltaChecked": body.delta_checked,
+                        "snapshotId": str(snapshot.id),
+                        "reason": "submission_fence_missing",
+                    },
+                )
+                return {"intentId": str(intent_id), "status": "UNCERTAIN", "hidden": True}
             fence = SubmissionFence(
                 _database_uuid(submission.worker_owner_id),
                 submission.worker_generation,

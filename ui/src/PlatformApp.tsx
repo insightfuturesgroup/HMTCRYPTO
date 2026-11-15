@@ -822,8 +822,19 @@ function CryptoMarketRail({
     });
     const receive = (event: MessageEvent<string>) => {
       try {
-        const value = JSON.parse(event.data) as { products: Product[] };
-        setProducts(value.products);
+        const value = JSON.parse(event.data) as {
+          products?: Product[];
+          quotes?: Array<Partial<Product> & { productId: number }>;
+        };
+        if (value.products) {
+          setProducts(value.products);
+        } else if (value.quotes) {
+          const updates = new Map(value.quotes.map((quote) => [quote.productId, quote]));
+          setProducts((current) => current.map((product) => {
+            const quote = updates.get(product.productId);
+            return quote ? { ...product, ...quote } : product;
+          }));
+        }
       } catch {
         /* A malformed frame is ignored; the stream reconnects automatically. */
       }
@@ -1980,10 +1991,10 @@ function AccountStatePage({
     }
   }
   async function resolveUncertainIntent(intentId: string) {
-    const confirmation = window.prompt(
-      "Confirm that you checked Delta order history and positions. Type NOT EXECUTED to resolve and remove this uncertain order.",
+    const confirmed = window.confirm(
+      "Delete this uncertain row only after checking Delta order history and positions and confirming it was not executed. Continue?",
     );
-    if (confirmation !== "NOT EXECUTED") return;
+    if (!confirmed) return;
     setError(null);
     try {
       await request(
@@ -1992,7 +2003,7 @@ function AccountStatePage({
           method: "POST",
           body: JSON.stringify({
             resolution: "not_executed",
-            confirmation,
+            confirmation: "NOT EXECUTED",
             delta_checked: true,
           }),
         },
@@ -2138,7 +2149,7 @@ function AccountStatePage({
                     <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus.replaceAll("_", " ")}</span></td>
                     <td>{deltaOrderLabel}</td>
                     <td>{fillLabel ?? intent.exchangeCancellationReason ?? intent.errorCode ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : intent.submissionStatus === "UNCERTAIN" ? "Check Delta before retrying" : "Waiting for Delta acknowledgement")}</td>
-                    <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : intent.submissionStatus === "UNCERTAIN" && user.role === "admin" ? <button onClick={() => void resolveUncertainIntent(intent.intentId)} type="button">Resolve / remove</button> : ["BLOCKED", "REJECTED", "ACCEPTED"].includes(intent.submissionStatus) && canTrade ? <button onClick={() => void hideCancelledIntent(intent.intentId)} type="button">Delete</button> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
+                    <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : intent.submissionStatus === "UNCERTAIN" && user.role === "admin" ? <button onClick={() => void resolveUncertainIntent(intent.intentId)} type="button">Delete uncertain</button> : ["BLOCKED", "REJECTED", "ACCEPTED"].includes(intent.submissionStatus) && canTrade ? <button onClick={() => void hideCancelledIntent(intent.intentId)} type="button">Delete</button> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
                   </tr>;
                   })}
                   {orderIntents.length === 0 ? <tr><td colSpan={9}>No locally submitted orders.</td></tr> : null}

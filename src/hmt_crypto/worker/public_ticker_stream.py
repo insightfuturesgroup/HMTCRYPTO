@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -34,6 +35,7 @@ from hmt_crypto.exchange.delta.websocket_subscriptions import (
     desired_subscriptions,
     parse_subscriptions_ack,
 )
+from hmt_crypto.fast_path import MARKET_CHANNEL, publish_json
 from hmt_crypto.logging import get_logger
 from hmt_crypto.market_data.contracts import TickerObservation
 from hmt_crypto.persistence.db import Database
@@ -43,6 +45,7 @@ _MAX_FRAME_BYTES = 16 * 1024 * 1024
 _SYMBOLS_PER_CONNECTION = 100
 _QUEUE_LIMIT = 10_000
 _COALESCE_SECONDS = 0.25
+_DATABASE_CHECKPOINT_SECONDS = 30.0
 _ConnectFactory = Callable[..., Any]
 
 
@@ -65,9 +68,7 @@ async def _persist_batch(
     updated = datetime.now(UTC)
     async with persistence_lock:
         async with database.transaction() as session:
-            insert = (
-                pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
-            )
+            insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
             quote_values = [
                 {
                     "id": uuid4(),
@@ -109,6 +110,8 @@ async def _consume(
     stop: asyncio.Event,
 ) -> None:
     logger = get_logger("worker.market.websocket")
+    last_checkpoint = 0.0
+    durable_latest: dict[int, TickerObservation] = {}
     while not stop.is_set():
         try:
             first = await asyncio.wait_for(queue.get(), timeout=1)
@@ -125,12 +128,42 @@ async def _consume(
             except TimeoutError:
                 break
         batch = _coalesce_latest(pending)
+        durable_latest.update({ticker.product_id: ticker for ticker in batch})
         try:
-            await _persist_batch(database, runtime, batch, persistence_lock)
+            quotes = [
+                {
+                    "productId": ticker.product_id,
+                    "symbol": ticker.symbol,
+                    "markPrice": None if ticker.mark_price is None else str(ticker.mark_price),
+                    "spotPrice": None if ticker.spot_price is None else str(ticker.spot_price),
+                    "bestBid": None if ticker.best_bid is None else str(ticker.best_bid),
+                    "bestAsk": None if ticker.best_ask is None else str(ticker.best_ask),
+                    "observedAt": ticker.source.observed_at.isoformat(),
+                    "quoteFresh": True,
+                }
+                for ticker in batch
+            ]
+            redis_available = True
+            try:
+                await publish_json(MARKET_CHANNEL, {"quotes": quotes})
+            except Exception:
+                redis_available = False
+                logger.warning("public_market_fast_path_unavailable")
+            monotonic = time.monotonic()
+            checkpoint_interval = _DATABASE_CHECKPOINT_SECONDS if redis_available else 1.0
+            if monotonic - last_checkpoint >= checkpoint_interval:
+                await _persist_batch(
+                    database,
+                    runtime,
+                    list(durable_latest.values()),
+                    persistence_lock,
+                )
+                last_checkpoint = monotonic
             logger.info(
                 "public_market_batch_published",
                 observation_count=len(pending),
                 product_count=len(batch),
+                database_checkpoint=monotonic == last_checkpoint,
             )
         except asyncio.CancelledError:
             raise

@@ -240,7 +240,7 @@ async def run_private_stream(
                         continue
                     if frame.get("type") in {"heartbeat", "pong"}:
                         monotonic = time.monotonic()
-                        if monotonic - last_heartbeat_persisted >= 10:
+                        if monotonic - last_heartbeat_persisted >= 30:
                             for channel in baselined:
                                 await _persist(
                                     database,
@@ -278,18 +278,19 @@ async def run_private_stream(
                         sequences[stream_key] = sequence
                     if state != "gap":
                         baselined.add(channel)
-                    persisted = await _persist(
-                        database,
-                        account_id=account_id,
-                        owner_id=owner_id,
-                        generation=generation,
-                        credential_version=credential_version,
-                        channel=channel,
-                        state=state,
-                        sequence=sequence,
-                    )
-                    if not persisted:
-                        return
+                    if state in {"snapshot", "gap"}:
+                        persisted = await _persist(
+                            database,
+                            account_id=account_id,
+                            owner_id=owner_id,
+                            generation=generation,
+                            credential_version=credential_version,
+                            channel=channel,
+                            state=state,
+                            sequence=sequence,
+                        )
+                        if not persisted:
+                            return
         except asyncio.CancelledError:
             raise
         except Exception:
