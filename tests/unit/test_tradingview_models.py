@@ -48,6 +48,21 @@ def test_tradingview_signal_accepts_native_iso_timenow_placeholder_value() -> No
     assert signal.timestamp == "2026-11-11T17:00:00Z"
 
 
+def test_tradingview_signal_accepts_stable_url_key_and_symbol() -> None:
+    signal = TradingViewSignalBody.model_validate(
+        {
+            "webhook_key": "k" * 32,
+            "signal_id": "tv-2",
+            "symbol": "BTCUSD",
+            "side": "sell",
+            "timestamp": "2026-11-11T17:00:00Z",
+        }
+    )
+
+    assert signal.webhook_key == "k" * 32
+    assert signal.symbol == "BTCUSD"
+
+
 def test_account_creation_assigns_authenticated_admin_without_owner_input() -> None:
     account = CreateAccountBody.model_validate_json(
         '{"profile_name":"delta-primary","environment":"prod"}'

@@ -50,6 +50,7 @@ from hmt_crypto.persistence.models import (
     PrivateReconciliationSnapshot,
     PrivateStreamEvidence,
     PrivateWorkerLease,
+    TradingViewSignal,
 )
 from hmt_crypto.worker.gtt_runner import evaluate_one_gtt
 from hmt_crypto.worker.live_execution import (
@@ -772,34 +773,51 @@ async def _run_immediate_execution_loop(
     while not stop.is_set():
         try:
             async with database.transaction() as session:
-                submission_accounts = set(
-                    await session.scalars(
-                        select(LiveOrderSubmission.account_id).where(
-                            LiveOrderSubmission.status == "PENDING",
-                            LiveOrderSubmission.intent_id.in_(
-                                select(LiveOrderIntent.id).where(
-                                    LiveOrderIntent.hidden_at.is_(None)
-                                )
-                            ),
-                        )
+                pending_accounts = (
+                    select(LiveOrderSubmission.account_id)
+                    .where(
+                        LiveOrderSubmission.status == "PENDING",
+                        LiveOrderSubmission.intent_id.in_(
+                            select(LiveOrderIntent.id).where(LiveOrderIntent.hidden_at.is_(None))
+                        ),
                     )
-                )
-                action_accounts = set(
-                    await session.scalars(
+                    .union(
                         select(LiveOrderAction.account_id).where(
                             LiveOrderAction.status == "PENDING"
-                        )
+                        ),
+                        select(TradingViewSignal.account_id).where(
+                            TradingViewSignal.status == "received"
+                        ),
                     )
                 )
-            for account_id in submission_accounts | action_accounts:
+                candidate_accounts = set(await session.scalars(pending_accounts))
+            for account_id in candidate_accounts:
                 claim = await _claim(database, process, account_id)
                 if claim is None:
                     continue
+                tradingview = await admit_one_tradingview_signal(
+                    database,
+                    account_id=claim.account_id,
+                    owner_id=process.owner_id,
+                )
+                if tradingview.kind not in {"IDLE", "DEFERRED"}:
+                    logger.info(
+                        "immediate_tradingview_signal",
+                        account_id=str(account_id),
+                        outcome=tradingview.kind,
+                        signal_id=(
+                            None if tradingview.signal_id is None else str(tradingview.signal_id)
+                        ),
+                    )
                 api_key, api_secret = await secrets.read(claim.secret_arn)
                 try:
                     action = await _execute_qualified_live_action(
-                        database, process, claim, execution,
-                        api_key=api_key, api_secret=api_secret,
+                        database,
+                        process,
+                        claim,
+                        execution,
+                        api_key=api_key,
+                        api_secret=api_secret,
                     )
                     if action.kind not in {"IDLE", "DISABLED"}:
                         logger.info(
@@ -808,8 +826,12 @@ async def _run_immediate_execution_loop(
                             outcome=action.kind,
                         )
                     result = await _execute_qualified_live_submission(
-                        database, process, claim, execution,
-                        api_key=api_key, api_secret=api_secret,
+                        database,
+                        process,
+                        claim,
+                        execution,
+                        api_key=api_key,
+                        api_secret=api_secret,
                     )
                     if result.kind not in {"IDLE", "DISABLED"}:
                         logger.info(
@@ -820,6 +842,7 @@ async def _run_immediate_execution_loop(
                     if (
                         action.kind not in {"IDLE", "DISABLED"}
                         or result.kind not in {"IDLE", "DISABLED"}
+                        or tradingview.kind not in {"IDLE", "DEFERRED"}
                     ):
                         await publish_json(
                             ACCOUNT_CHANNEL,

@@ -377,7 +377,9 @@ class TradingViewStrategyStateBody(_Body):
 
 
 class TradingViewSignalBody(_Body):
+    webhook_key: str | None = Field(default=None, min_length=32, max_length=128)
     signal_id: str = Field(min_length=1, max_length=128)
+    symbol: str | None = Field(default=None, min_length=1, max_length=128)
     side: Literal["buy", "sell"]
     timestamp: int | str
     limit_price: str | None = Field(default=None, max_length=64)
@@ -5114,6 +5116,7 @@ def install_platform_routes(
                     "limitPrice": body.limit_price,
                     "side": body.side,
                     "signalId": body.signal_id,
+                    "symbol": body.symbol,
                     "timestamp": body.timestamp,
                 },
                 ensure_ascii=True,
@@ -5121,6 +5124,7 @@ def install_platform_routes(
                 sort_keys=True,
             ).encode("ascii")
         ).hexdigest()
+        account_id: UUID | None = None
         async with database.transaction() as session:
             webhook_key = await session.scalar(
                 select(TradingViewWebhookKey).where(
@@ -5135,6 +5139,9 @@ def install_platform_routes(
             )
             if strategy is None or not strategy.enabled:
                 raise HTTPException(status_code=404, detail="webhook_not_found")
+            account_id = strategy.account_id
+            if body.symbol is not None and body.symbol != strategy.symbol:
+                raise HTTPException(status_code=409, detail="strategy_symbol_mismatch")
             if not strategy.protection_required:
                 raise HTTPException(status_code=409, detail="protection_required")
             qualified, reason, _, _ = await qualification_status(
@@ -5184,7 +5191,26 @@ def install_platform_routes(
                     processed_at=None,
                 )
             )
+        if account_id is not None:
+            try:
+                await publish_json(
+                    ORDER_CHANNEL,
+                    {"accountId": str(account_id), "reason": "tradingview_signal_received"},
+                )
+                await publish_json(
+                    ACCOUNT_CHANNEL,
+                    {"accountId": str(account_id), "reason": "tradingview_signal_received"},
+                )
+            except Exception:
+                _LOGGER.warning("tradingview_wakeup_publish_failed", account_id=str(account_id))
         return JSONResponse(status_code=202, content={"status": "received"})
+
+    @app.post("/api/v1/webhooks/tradingview")
+    async def stable_tradingview_webhook(body: TradingViewSignalBody) -> JSONResponse:
+        """Accept the preferred stable TradingView URL with the key in JSON."""
+        if body.webhook_key is None:
+            raise HTTPException(status_code=404, detail="webhook_not_found")
+        return await tradingview_webhook(body.webhook_key, body)
 
     @app.post("/api/v1/gtt")
     async def create_gtt(body: GttBody, request: Request) -> dict[str, object]:

@@ -1870,6 +1870,7 @@ function AccountStatePage({
   const [cancellingIntentId, setCancellingIntentId] = useState<string | null>(null);
   const [showOrderTicket, setShowOrderTicket] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const accountStreamOpen = useRef(false);
   const loadAllPositions = useCallback((source: Account[]) => {
     if (mode !== "positions" || source.length === 0) return;
     void Promise.allSettled(source.map(async (account) => ({
@@ -1928,7 +1929,9 @@ function AccountStatePage({
     const refresh = () => {
       if (document.visibilityState === "visible") load(accountId);
     };
-    const timer = window.setInterval(refresh, 30_000);
+    const timer = window.setInterval(() => {
+      if (!accountStreamOpen.current) refresh();
+    }, 15_000);
     document.addEventListener("visibilitychange", refresh);
     return () => {
       window.clearInterval(timer);
@@ -1938,6 +1941,12 @@ function AccountStatePage({
   useEffect(() => {
     if (!accountId) return;
     const stream = new EventSource("/api/v1/accounts/stream", { withCredentials: true });
+    const ready = () => {
+      accountStreamOpen.current = true;
+    };
+    const disconnected = () => {
+      accountStreamOpen.current = false;
+    };
     const refresh = (event: MessageEvent<string>) => {
       try {
         const payload = JSON.parse(event.data) as { accountId?: string };
@@ -1946,8 +1955,13 @@ function AccountStatePage({
         /* Ignore malformed notifications; EventSource reconnects automatically. */
       }
     };
-    stream.addEventListener("message", refresh as EventListener);
-    return () => stream.close();
+    stream.addEventListener("ready", ready);
+    stream.addEventListener("account", refresh as EventListener);
+    stream.addEventListener("error", disconnected);
+    return () => {
+      accountStreamOpen.current = false;
+      stream.close();
+    };
   }, [accountId, load]);
   const selected = accounts.find((account) => account.id === accountId);
   const canTrade =
@@ -2689,6 +2703,20 @@ function TradingViewPage({
       load(firstAccount);
     });
   }, [load]);
+  useEffect(() => {
+    if (!accountId) return;
+    const stream = new EventSource("/api/v1/accounts/stream", { withCredentials: true });
+    const refresh = (event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as { accountId?: string };
+        if (payload.accountId === accountId) load(accountId);
+      } catch {
+        /* Ignore malformed notifications; EventSource reconnects automatically. */
+      }
+    };
+    stream.addEventListener("account", refresh as EventListener);
+    return () => stream.close();
+  }, [accountId, load]);
   function resetEditor() {
     setEditingId(null);
     setShowCreate(false);
@@ -2890,20 +2918,17 @@ function TradingViewPage({
               order type.
             </li>
             <li>
-              Copy the one-time URL and JSON message into the TradingView alert.
+              Copy the stable URL and generated JSON message into the TradingView alert.
             </li>
           </ol>
           <div className="tv-endpoint">
-            <strong>Webhook endpoint format</strong>
-            <code>
-              {window.location.origin}
-              /api/v1/webhooks/tradingview/&lt;secret&gt;
-            </code>
+            <strong>Webhook URL</strong>
+            <code>{window.location.origin}/api/v1/webhooks/tradingview</code>
             <button
               aria-label="Copy webhook endpoint format"
               onClick={() =>
                 void navigator.clipboard.writeText(
-                  `${window.location.origin}/api/v1/webhooks/tradingview/<secret>`,
+                  `${window.location.origin}/api/v1/webhooks/tradingview`,
                 )
               }
               type="button"
@@ -2912,8 +2937,8 @@ function TradingViewPage({
             </button>
           </div>
           <p className="tv-guide__note">
-            <strong>Security:</strong> the full secret URL is displayed only
-            when generated or rotated. HMT Crypto stores only its hash.
+            <strong>Security:</strong> the webhook key and JSON template are displayed only
+            when generated or rotated. HMT Crypto stores only the key hash.
           </p>
         </div>
       </section> : (
@@ -3074,15 +3099,29 @@ function TradingViewPage({
       {shownOnceUrl ? (
         <section className="tv-secret">
           <div>
-            <strong>Copy this URL now — it will not be shown again</strong>
-            <code>{shownOnceUrl}</code>
+            <strong>Copy this TradingView JSON now — the key will not be shown again</strong>
+            <code>{JSON.stringify({
+              webhook_key: shownOnceUrl.split("/").at(-1),
+              signal_id: "{{strategy.order.id}}-{{timenow}}",
+              symbol: products.find((row) => row.productId === Number(productId))?.symbol ?? "BTCUSD",
+              side: "{{strategy.order.action}}",
+              timestamp: "{{timenow}}",
+              limit_price: null,
+            })}</code>
           </div>
           <button
-            onClick={() => void navigator.clipboard.writeText(shownOnceUrl)}
+            onClick={() => void navigator.clipboard.writeText(JSON.stringify({
+              webhook_key: shownOnceUrl.split("/").at(-1),
+              signal_id: "{{strategy.order.id}}-{{timenow}}",
+              symbol: products.find((row) => row.productId === Number(productId))?.symbol ?? "BTCUSD",
+              side: "{{strategy.order.action}}",
+              timestamp: "{{timenow}}",
+              limit_price: null,
+            }))}
             type="button"
           >
             <Copy size={17} />
-            Copy URL
+            Copy JSON
           </button>
         </section>
       ) : null}
