@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -180,6 +181,81 @@ async def claim_live_submission_recovery(
             request_sha256=submission.request_sha256,
             fence=active,
             claim_until=lease.lease_until,
+        )
+
+
+def _fill_recovery_observation(
+    fills_payload: str,
+    *,
+    product_id: int,
+    side: str,
+    contracts: int,
+    sent_at: datetime,
+) -> RecoveryObservation | None:
+    """Accept only one uniquely matching fully-filled Delta order."""
+    try:
+        rows = json.loads(fills_payload)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    grouped: dict[int, int] = {}
+    earliest = sent_at - timedelta(seconds=2)
+    for row in rows:
+        if not isinstance(row, dict) or row.get("product_id") != product_id:
+            continue
+        if row.get("side") != side:
+            continue
+        order_id, size, created_at = row.get("order_id"), row.get("size"), row.get("created_at")
+        try:
+            order_id = int(order_id)
+            size = int(size)
+            observed = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if observed.tzinfo is None or observed.astimezone(UTC) < earliest:
+            continue
+        if order_id > 0 and size > 0:
+            grouped[order_id] = grouped.get(order_id, 0) + size
+    matches = [order_id for order_id, filled in grouped.items() if filled == contracts]
+    if len(matches) != 1:
+        return None
+    return RecoveryObservation("FOUND", matches[0], "closed", contracts, 0, None)
+
+
+async def recover_from_reconciliation(
+    database: Database, claim: ClaimedLiveSubmission
+) -> RecoveryObservation | None:
+    """Resolve an uncertain market order from unique recent fill evidence."""
+    async with database.transaction() as session:
+        submission = await session.get(LiveOrderSubmission, claim.submission_id)
+        intent = (
+            None if submission is None else await session.get(LiveOrderIntent, submission.intent_id)
+        )
+        preview = None if intent is None else await session.get(LiveOrderPreview, intent.preview_id)
+        snapshot = await session.scalar(
+            select(PrivateReconciliationSnapshot)
+            .where(PrivateReconciliationSnapshot.account_id == claim.account_id)
+            .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+            .limit(1)
+        )
+        if (
+            submission is None
+            or submission.status != "UNCERTAIN"
+            or submission.sent_at is None
+            or preview is None
+            or preview.order_type != "market"
+            or snapshot is None
+            or snapshot.outcome != "ready"
+            or snapshot.observed_at < submission.sent_at
+        ):
+            return None
+        return _fill_recovery_observation(
+            snapshot.fills_payload,
+            product_id=preview.product_id,
+            side=preview.side,
+            contracts=preview.contracts,
+            sent_at=submission.sent_at,
         )
 
 
@@ -775,4 +851,5 @@ __all__ = [
     "prepare_claimed_live_submission",
     "record_live_submission_outcome",
     "record_uncertain_recovery_lookup",
+    "recover_from_reconciliation",
 ]
