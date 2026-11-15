@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
 from hmt_crypto.api.live_order_recovery import RecoveryObservation
@@ -40,6 +41,15 @@ from hmt_crypto.worker.scope import normalize_worker_uuid
 
 def _database_uuid(value: object) -> UUID:
     return normalize_worker_uuid(value, message="invalid database Live submission UUID")
+
+
+async def _next_submission_sequence(session: AsyncSession, submission_id: UUID) -> int:
+    current = await session.scalar(
+        select(func.max(LiveOrderSubmissionEvent.sequence)).where(
+            LiveOrderSubmissionEvent.submission_id == submission_id
+        )
+    )
+    return 1 if current is None else int(current) + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,9 +135,10 @@ async def claim_live_submission_recovery(
             submission.status = "UNCERTAIN"
             submission.last_error_code = "worker_recovery_required"
             submission.updated_at = now
+            sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
             evidence = submission_event_sha256(
                 submission_id=_database_uuid(submission.id),
-                sequence=4,
+                sequence=sequence,
                 from_status="SENDING",
                 to_status="UNCERTAIN",
                 fence=active,
@@ -138,7 +149,7 @@ async def claim_live_submission_recovery(
                     id=uuid4(),
                     submission_id=submission.id,
                     account_id=submission.account_id,
-                    sequence=4,
+                    sequence=sequence,
                     from_status="SENDING",
                     to_status="UNCERTAIN",
                     worker_owner_id=active.owner_id,
@@ -195,7 +206,8 @@ async def claim_next_live_submission(
             select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
         )
         reconciliation = await session.scalar(
-            select(PrivateReconciliationSnapshot).options(
+            select(PrivateReconciliationSnapshot)
+            .options(
                 load_only(
                     PrivateReconciliationSnapshot.id,
                     PrivateReconciliationSnapshot.observed_at,
@@ -231,6 +243,66 @@ async def claim_next_live_submission(
             or reconciliation.credential_version != lease.credential_version
         ):
             return None
+        expired = await session.scalar(
+            select(LiveOrderSubmission)
+            .where(
+                LiveOrderSubmission.account_id == account_id,
+                LiveOrderSubmission.status.in_(("CLAIMED", "PREPARED")),
+                LiveOrderSubmission.claim_until <= now,
+                LiveOrderSubmission.sent_at.is_(None),
+            )
+            .order_by(LiveOrderSubmission.created_at, LiveOrderSubmission.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        if expired is not None:
+            if (
+                expired.worker_owner_id is None
+                or expired.worker_generation is None
+                or expired.credential_version is None
+            ):
+                raise ValueError("expired pre-dispatch submission has no fence")
+            expired_status = expired.status
+            expired_fence = SubmissionFence(
+                expired.worker_owner_id,
+                expired.worker_generation,
+                expired.credential_version,
+            )
+            sequence = await _next_submission_sequence(session, _database_uuid(expired.id))
+            evidence = submission_event_sha256(
+                submission_id=_database_uuid(expired.id),
+                sequence=sequence,
+                from_status=expired_status,
+                to_status="PENDING",
+                fence=expired_fence,
+                occurred_at=now,
+            )
+            session.add(
+                LiveOrderSubmissionEvent(
+                    id=uuid4(),
+                    submission_id=expired.id,
+                    account_id=expired.account_id,
+                    sequence=sequence,
+                    from_status=expired_status,
+                    to_status="PENDING",
+                    worker_owner_id=expired_fence.owner_id,
+                    worker_generation=expired_fence.generation,
+                    credential_version=expired_fence.credential_version,
+                    evidence_sha256=evidence,
+                    occurred_at=now,
+                )
+            )
+            expired.status = "PENDING"
+            expired.worker_owner_id = None
+            expired.worker_generation = None
+            expired.credential_version = None
+            expired.claim_until = None
+            expired.attempt_number = 0
+            expired.prepared_request_payload = None
+            expired.prepared_request_sha256 = None
+            expired.last_error_code = "predispatch_claim_expired"
+            expired.updated_at = now
+
         statement = (
             select(LiveOrderSubmission)
             .join(
@@ -285,9 +357,10 @@ async def claim_next_live_submission(
         submission.credential_version = fence.credential_version
         submission.claim_until = claim_until
         submission.updated_at = now
+        sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
         evidence = submission_event_sha256(
             submission_id=_database_uuid(submission.id),
-            sequence=1,
+            sequence=sequence,
             from_status="PENDING",
             to_status="CLAIMED",
             fence=fence,
@@ -298,7 +371,7 @@ async def claim_next_live_submission(
                 id=uuid4(),
                 submission_id=submission.id,
                 account_id=account_id,
-                sequence=1,
+                sequence=sequence,
                 from_status="PENDING",
                 to_status="CLAIMED",
                 worker_owner_id=fence.owner_id,
@@ -388,9 +461,10 @@ async def prepare_claimed_live_submission(
         submission.prepared_request_sha256 = prepared.body_sha256
         submission.attempt_number = 1
         submission.updated_at = now
+        sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
         event_hash = submission_event_sha256(
             submission_id=_database_uuid(submission.id),
-            sequence=2,
+            sequence=sequence,
             from_status="CLAIMED",
             to_status="PREPARED",
             fence=stored_fence,
@@ -401,7 +475,7 @@ async def prepare_claimed_live_submission(
                 id=uuid4(),
                 submission_id=submission.id,
                 account_id=submission.account_id,
-                sequence=2,
+                sequence=sequence,
                 from_status="CLAIMED",
                 to_status="PREPARED",
                 worker_owner_id=stored_fence.owner_id,
@@ -479,9 +553,10 @@ async def mark_live_submission_sending(
         submission.status = "SENDING"
         submission.sent_at = now
         submission.updated_at = now
+        sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
         event_hash = submission_event_sha256(
             submission_id=_database_uuid(submission.id),
-            sequence=3,
+            sequence=sequence,
             from_status="PREPARED",
             to_status="SENDING",
             fence=stored_fence,
@@ -492,7 +567,7 @@ async def mark_live_submission_sending(
                 id=uuid4(),
                 submission_id=submission.id,
                 account_id=submission.account_id,
-                sequence=3,
+                sequence=sequence,
                 from_status="PREPARED",
                 to_status="SENDING",
                 worker_owner_id=stored_fence.owner_id,
@@ -551,9 +626,10 @@ async def record_live_submission_outcome(
         submission.last_error_code = "response_uncertain" if outcome.kind == "UNCERTAIN" else None
         submission.resolved_at = None if outcome.kind == "UNCERTAIN" else now
         submission.updated_at = now
+        sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
         event_hash = submission_event_sha256(
             submission_id=_database_uuid(submission.id),
-            sequence=4,
+            sequence=sequence,
             from_status="SENDING",
             to_status=outcome.kind,
             fence=fence,
@@ -564,7 +640,7 @@ async def record_live_submission_outcome(
                 id=uuid4(),
                 submission_id=submission.id,
                 account_id=submission.account_id,
-                sequence=4,
+                sequence=sequence,
                 from_status="SENDING",
                 to_status=outcome.kind,
                 worker_owner_id=fence.owner_id,
@@ -647,9 +723,10 @@ async def record_uncertain_recovery_lookup(
         submission.last_error_code = None
         submission.resolved_at = now
         submission.updated_at = now
+        sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
         event_hash = submission_event_sha256(
             submission_id=_database_uuid(submission.id),
-            sequence=5,
+            sequence=sequence,
             from_status="UNCERTAIN",
             to_status="ACCEPTED",
             fence=active,
@@ -660,7 +737,7 @@ async def record_uncertain_recovery_lookup(
                 id=uuid4(),
                 submission_id=submission.id,
                 account_id=submission.account_id,
-                sequence=5,
+                sequence=sequence,
                 from_status="UNCERTAIN",
                 to_status="ACCEPTED",
                 worker_owner_id=active.owner_id,
