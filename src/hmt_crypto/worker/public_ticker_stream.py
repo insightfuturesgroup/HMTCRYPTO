@@ -45,9 +45,10 @@ _MAX_FRAME_BYTES = 16 * 1024 * 1024
 _SYMBOLS_PER_CONNECTION = 100
 _QUEUE_LIMIT = 10_000
 _COALESCE_SECONDS = 0.25
-# Admission requires a quote newer than 15 seconds. Keep the durable fallback
-# comfortably inside that window while Redis carries sub-second UI updates.
-_DATABASE_CHECKPOINT_SECONDS = 10.0
+# Redis carries sub-second UI updates. PostgreSQL is the durable recovery
+# checkpoint, not the browser transport, so avoid rewriting the full catalogue
+# every ten seconds while the fast path is healthy.
+_DATABASE_CHECKPOINT_SECONDS = 30.0
 _ConnectFactory = Callable[..., Any]
 
 

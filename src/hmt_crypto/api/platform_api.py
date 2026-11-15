@@ -101,6 +101,8 @@ from hmt_crypto.persistence.models import (
     WatchlistItem,
 )
 
+_MAX_SESSION_TOUCH_INTERVAL_SECONDS = 300
+
 _ACCESS_COOKIE = "__Host-hmt_auth_access"
 _REFRESH_COOKIE = "__Host-hmt_auth_refresh"
 _CSRF_COOKIE = "__Host-hmt_auth_csrf"
@@ -513,7 +515,13 @@ def install_platform_routes(
                 <= now - timedelta(seconds=settings.session_idle_seconds)
             ):
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
-            if platform_session.last_seen_at <= now - timedelta(seconds=60):
+            touch_interval = timedelta(
+                seconds=min(
+                    _MAX_SESSION_TOUCH_INTERVAL_SECONDS,
+                    max(30, settings.session_idle_seconds // 2),
+                )
+            )
+            if platform_session.last_seen_at <= now - touch_interval:
                 platform_session.last_seen_at = now
                 platform_session.expires_at = now + timedelta(
                     seconds=settings.session_absolute_seconds
@@ -968,7 +976,13 @@ def install_platform_routes(
                 or platform_session.revoked_at is not None
             ):
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
-            if platform_session.last_seen_at <= now - timedelta(seconds=60):
+            touch_interval = timedelta(
+                seconds=min(
+                    _MAX_SESSION_TOUCH_INTERVAL_SECONDS,
+                    max(30, settings.session_idle_seconds // 2),
+                )
+            )
+            if platform_session.last_seen_at <= now - touch_interval:
                 platform_session.last_seen_at = now
                 platform_session.expires_at = now + timedelta(
                     seconds=settings.session_absolute_seconds

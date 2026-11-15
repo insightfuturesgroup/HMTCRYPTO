@@ -233,6 +233,7 @@ class MarketCandle(Base):
             name="uq_market_candles_identity",
         ),
         Index("ix_market_candles_product_time", "product_id", "resolution", text("timestamp DESC")),
+        Index("ix_market_candles_timestamp", "timestamp"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -707,6 +708,7 @@ class PrivateStreamEvidence(Base):
             "state IN ('connected','snapshot','live','gap','disconnected')", name="state_allowed"
         ),
         Index("ix_private_stream_account_observed", "account_id", "observed_at"),
+        Index("ix_private_stream_evidence_observed_at", "observed_at"),
         Index(
             "ix_private_stream_account_channel_observed",
             "account_id",

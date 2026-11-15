@@ -3573,6 +3573,91 @@ function RiskPage({
   );
 }
 
+function ContractSettingsPage() {
+  const navigate = useNavigate();
+  const [products, setProducts] = useState<Product[]>([]);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    void networkRequest<{ products: Product[] }>("/api/v1/market/products")
+      .then((result) => {
+        setProducts(
+          result.products
+            .filter((product) => ["perpetual_futures", "futures"].includes(product.contractType))
+            .sort((left, right) => left.symbol.localeCompare(right.symbol)),
+        );
+      })
+      .catch(() => setError("Contract settings could not be loaded. Retry after the market feed reconnects."))
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(load, [load]);
+  const visibleProducts = products.filter((product) =>
+    product.symbol.toLowerCase().includes(search.trim().toLowerCase()),
+  );
+  return (
+    <div className="hmt-page">
+      <div className="hmt-page-heading">
+        <div>
+          <h1>Crypto Contract Settings</h1>
+          <p>Delta contract specifications and strategy-level ATR execution defaults.</p>
+        </div>
+        <button className="hmt-secondary-button" onClick={load} type="button">
+          <RefreshCw size={17} /> Refresh
+        </button>
+      </div>
+      <Panel title="ATR and protection settings">
+        <div className="grid gap-4 p-4 md:grid-cols-4">
+          <div><small>ATR multiplier</small><strong className="block">Per strategy</strong></div>
+          <div><small>Stop-loss ATR</small><strong className="block">Per strategy</strong></div>
+          <div><small>Target ATR</small><strong className="block">Per strategy</strong></div>
+          <div><small>Order size</small><strong className="block">Per strategy</strong></div>
+          <p className="md:col-span-3">
+            ATR, stop-loss, target and quantity settings affect order construction, so they are
+            versioned with each strategy rather than mixed with account risk limits.
+          </p>
+          <button className="hmt-primary-button" onClick={() => navigate("/strategies")} type="button">
+            Configure strategies
+          </button>
+        </div>
+      </Panel>
+      <Panel title="Delta futures contract catalogue">
+        <div className="flex flex-wrap items-center gap-3 border-b p-4">
+          <input
+            className="min-w-64 flex-1 rounded border px-3 py-2"
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search crypto contracts"
+            value={search}
+          />
+          <span>{visibleProducts.length} contracts</span>
+        </div>
+        {error ? <p className="p-4 text-red-700" role="alert">{error}</p> : null}
+        <div className="overflow-x-auto">
+          <table>
+            <thead><tr><th>Contract</th><th>Status</th><th>Tick size</th><th>Contract value</th><th>Margin</th><th>Live quote</th></tr></thead>
+            <tbody>
+              {loading ? <tr><td colSpan={6}>Loading contract settings…</td></tr> : null}
+              {!loading && visibleProducts.map((product) => (
+                <tr key={product.productId}>
+                  <td><strong>{product.symbol}</strong><small className="block">Product {product.productId}</small></td>
+                  <td>{product.state} · {product.tradingStatus}{product.onlyReduceOnlyOrdersAllowed ? " · reduce only" : ""}</td>
+                  <td>{product.tickSize}</td>
+                  <td>{product.contractValue} {product.contractUnitCurrency}</td>
+                  <td>{product.initialMargin ?? "—"} / {product.maintenanceMargin ?? "—"}</td>
+                  <td>{product.markPrice ?? "—"}{product.quoteFresh ? " · fresh" : " · stale"}</td>
+                </tr>
+              ))}
+              {!loading && !error && visibleProducts.length === 0 ? <tr><td colSpan={6}>No contracts match this search.</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 function TradingViewLogsPage() {
   const [rows, setRows] = useState<TradingViewReportRow[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -4808,7 +4893,7 @@ function Shell({
               />
               <Route
                 path="/contract-settings"
-                element={<RiskPage csrf={csrf} user={user} />}
+                element={<ContractSettingsPage />}
               />
               <Route path="/performance" element={<PerformancePage />} />
               <Route
