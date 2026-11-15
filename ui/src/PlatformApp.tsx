@@ -1018,7 +1018,7 @@ function _MarketPage({ csrf }: { readonly csrf: string }) {
     const refresh = () => {
       if (document.visibilityState === "visible") load();
     };
-    const timer = window.setInterval(refresh, 5_000);
+    const timer = window.setInterval(refresh, 30_000);
     document.addEventListener("visibilitychange", refresh);
     return () => {
       window.clearInterval(timer);
@@ -1852,7 +1852,7 @@ function AccountStatePage({
     (selected: string) => {
       if (!selected) return;
       setError(null);
-      void request<AccountState>(`/api/v1/accounts/${selected}/state`)
+      void request<AccountState>(`/api/v1/accounts/${selected}/state?view=${mode}`)
         .then(setState)
         .catch(() => {
           setState(null);
@@ -1882,7 +1882,7 @@ function AccountStatePage({
     const refresh = () => {
       if (document.visibilityState === "visible") load(accountId);
     };
-    const timer = window.setInterval(refresh, 15_000);
+    const timer = window.setInterval(refresh, 30_000);
     document.addEventListener("visibilitychange", refresh);
     return () => {
       window.clearInterval(timer);
@@ -2346,7 +2346,7 @@ function GttPage({
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible" && accountIds.length > 0) void load(accountIds);
-    }, 5_000);
+    }, 30_000);
     return () => window.clearInterval(timer);
   }, [accountIds, load]);
   async function create(event: FormEvent) {
@@ -4476,7 +4476,7 @@ function DashboardPage({
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") load();
-    }, 15_000);
+    }, 30_000);
     const refreshVisible = () => {
       if (document.visibilityState === "visible") load();
     };

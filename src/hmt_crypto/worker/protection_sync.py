@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from uuid import UUID, uuid4
 
 from sqlalchemy import desc, select
+from sqlalchemy.orm import load_only
 
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
@@ -52,7 +53,12 @@ async def sync_one_protection_group(
             )
         )
         reconciliation = await session.scalar(
-            select(PrivateReconciliationSnapshot)
+            select(PrivateReconciliationSnapshot).options(
+                load_only(
+                    PrivateReconciliationSnapshot.id,
+                    PrivateReconciliationSnapshot.fills_payload,
+                )
+            )
             .where(
                 PrivateReconciliationSnapshot.account_id == account_id,
                 PrivateReconciliationSnapshot.outcome == "ready",

@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import desc, select
+from sqlalchemy.orm import load_only
 
 from hmt_crypto.api.delta_reconciliation import (
     PrivateReconciliationEvidence,
@@ -60,6 +61,7 @@ from hmt_crypto.worker.live_order_actions import (
     execute_one_live_order_action,
 )
 from hmt_crypto.worker.live_recovery import LiveRecoveryResult, recover_one_live_submission
+from hmt_crypto.worker.operational_retention import prune_operational_history
 from hmt_crypto.worker.private_stream import run_private_stream
 from hmt_crypto.worker.protection_sync import sync_one_protection_group
 from hmt_crypto.worker.scope import normalize_worker_uuid
@@ -74,9 +76,12 @@ class PrivateWorkerSettings(BaseSettings):
     owner_id: UUID = Field(default_factory=uuid4, alias="HMT_PRIVATE_WORKER_ID")
     aws_region: str = Field(min_length=3, max_length=64, alias="HMT_AWS_REGION")
     secret_prefix: str = Field(default="hmt-crypto/delta", alias="HMT_DELTA_SECRET_PREFIX")
-    interval_seconds: int = Field(default=15, ge=5, le=300, alias="HMT_PRIVATE_INTERVAL_SECONDS")
-    lease_seconds: int = Field(default=45, ge=15, le=900, alias="HMT_PRIVATE_LEASE_SECONDS")
+    interval_seconds: int = Field(default=30, ge=5, le=300, alias="HMT_PRIVATE_INTERVAL_SECONDS")
+    lease_seconds: int = Field(default=90, ge=15, le=900, alias="HMT_PRIVATE_LEASE_SECONDS")
     read_only: bool = Field(default=True, alias="HMT_PRIVATE_READ_ONLY")
+    operational_retention_days: int = Field(
+        default=7, ge=1, le=90, alias="HMT_OPERATIONAL_RETENTION_DAYS"
+    )
 
     @model_validator(mode="after")
     def _safe_identity(self) -> Self:
@@ -134,7 +139,17 @@ async def _auto_activate_healthy_account(
         if control.credential_state != "verified" or lease is None:
             return "worker_or_credential_not_ready"
         snapshot = await session.scalar(
-            select(PrivateReconciliationSnapshot)
+            select(PrivateReconciliationSnapshot).options(
+                load_only(
+                    PrivateReconciliationSnapshot.id,
+                    PrivateReconciliationSnapshot.observed_at,
+                    PrivateReconciliationSnapshot.credential_version,
+                    PrivateReconciliationSnapshot.outcome,
+                    PrivateReconciliationSnapshot.complete,
+                    PrivateReconciliationSnapshot.worker_owner_id,
+                    PrivateReconciliationSnapshot.worker_generation,
+                )
+            )
             .where(
                 PrivateReconciliationSnapshot.account_id == claim.account_id,
                 PrivateReconciliationSnapshot.outcome == "ready",
@@ -497,7 +512,17 @@ async def _publish(
             return False
         outcome = "ready" if evidence.complete and not evidence.foreign_product_ids else "blocked"
         latest = await session.scalar(
-            select(PrivateReconciliationSnapshot)
+            select(PrivateReconciliationSnapshot).options(
+                load_only(
+                    PrivateReconciliationSnapshot.id,
+                    PrivateReconciliationSnapshot.observed_at,
+                    PrivateReconciliationSnapshot.credential_version,
+                    PrivateReconciliationSnapshot.outcome,
+                    PrivateReconciliationSnapshot.content_sha256,
+                    PrivateReconciliationSnapshot.worker_owner_id,
+                    PrivateReconciliationSnapshot.worker_generation,
+                )
+            )
             .where(PrivateReconciliationSnapshot.account_id == claim.account_id)
             .order_by(desc(PrivateReconciliationSnapshot.observed_at))
             .limit(1)
@@ -745,9 +770,27 @@ async def run_private_worker(
     execution = LiveExecutionSettings()
     logger = get_logger("worker.private")
     stream_tasks: dict[UUID, tuple[int, int, asyncio.Task[None]]] = {}
+    next_retention_at = 0.0
     logger.info("private_worker_started", owner_id=str(process.owner_id))
     try:
         while not stop.is_set():
+            if time.monotonic() >= next_retention_at:
+                try:
+                    retention = await prune_operational_history(
+                        database, retention_days=process.operational_retention_days
+                    )
+                    logger.info(
+                        "operational_retention_completed",
+                        lock_acquired=retention.lock_acquired,
+                        stream_evidence=retention.stream_evidence,
+                        reconciliation_snapshots=retention.reconciliation_snapshots,
+                        market_candles=retention.market_candles,
+                    )
+                except Exception as error:
+                    logger.error(
+                        "operational_retention_failed", error_type=type(error).__name__
+                    )
+                next_retention_at = time.monotonic() + 86_400
             try:
                 async with database.transaction() as session:
                     account_ids = tuple(

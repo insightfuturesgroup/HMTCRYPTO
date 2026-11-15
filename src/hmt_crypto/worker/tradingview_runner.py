@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from uuid import UUID, uuid4
 
 from sqlalchemy import desc, select
+from sqlalchemy.orm import load_only
 
 from hmt_crypto.api.live_order_admission import (
     LiveOrderAdmissionError,
@@ -101,7 +102,19 @@ async def admit_one_tradingview_signal(
             select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
         )
         reconciliation = await session.scalar(
-            select(PrivateReconciliationSnapshot)
+            select(PrivateReconciliationSnapshot).options(
+                load_only(
+                    PrivateReconciliationSnapshot.id,
+                    PrivateReconciliationSnapshot.observed_at,
+                    PrivateReconciliationSnapshot.credential_version,
+                    PrivateReconciliationSnapshot.outcome,
+                    PrivateReconciliationSnapshot.worker_owner_id,
+                    PrivateReconciliationSnapshot.worker_generation,
+                    PrivateReconciliationSnapshot.positions_payload,
+                    PrivateReconciliationSnapshot.open_orders_payload,
+                    PrivateReconciliationSnapshot.wallet_transactions_payload,
+                )
+            )
             .where(PrivateReconciliationSnapshot.account_id == account_id)
             .order_by(desc(PrivateReconciliationSnapshot.observed_at))
             .limit(1)

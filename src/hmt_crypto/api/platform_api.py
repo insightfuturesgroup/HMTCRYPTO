@@ -21,6 +21,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from sqlalchemy import and_, desc, func, literal, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from hmt_crypto.api.delta_reconciliation import (
     ReconciliationReadError,
@@ -1964,7 +1965,11 @@ def install_platform_routes(
         }
 
     @app.get("/api/v1/accounts/{account_id}/state")
-    async def account_state(account_id: UUID, request: Request) -> dict[str, object]:
+    async def account_state(
+        account_id: UUID,
+        request: Request,
+        view: Literal["full", "orders", "positions"] = "full",
+    ) -> dict[str, object]:
         actor = await principal(request)
         async with database.transaction() as session:
             await account_permission(session, actor, account_id)
@@ -1978,9 +1983,32 @@ def install_platform_routes(
                     select(PrivateWorkerLease).where(PrivateWorkerLease.account_id == account_id)
                 )
             ).scalar_one_or_none()
+            snapshot_columns = [
+                PrivateReconciliationSnapshot.id,
+                PrivateReconciliationSnapshot.observed_at,
+                PrivateReconciliationSnapshot.credential_version,
+                PrivateReconciliationSnapshot.outcome,
+                PrivateReconciliationSnapshot.worker_owner_id,
+                PrivateReconciliationSnapshot.worker_generation,
+            ]
+            if view in ("full", "orders"):
+                snapshot_columns.extend(
+                    (
+                        PrivateReconciliationSnapshot.open_orders_payload,
+                        PrivateReconciliationSnapshot.fills_payload,
+                    )
+                )
+            if view in ("full", "positions"):
+                snapshot_columns.extend(
+                    (
+                        PrivateReconciliationSnapshot.balances_payload,
+                        PrivateReconciliationSnapshot.positions_payload,
+                        PrivateReconciliationSnapshot.wallet_transactions_payload,
+                    )
+                )
             row = (
                 await session.execute(
-                    select(PrivateReconciliationSnapshot)
+                    select(PrivateReconciliationSnapshot).options(load_only(*snapshot_columns))
                     .where(PrivateReconciliationSnapshot.account_id == account_id)
                     .order_by(desc(PrivateReconciliationSnapshot.observed_at))
                     .limit(1)
@@ -1989,11 +2017,11 @@ def install_platform_routes(
             if (
                 row is None
                 or control is None
-                or row.balances_payload is None
-                or row.positions_payload is None
-                or row.open_orders_payload is None
-                or row.fills_payload is None
-                or row.wallet_transactions_payload is None
+                or (view in ("full", "positions") and row.balances_payload is None)
+                or (view in ("full", "positions") and row.positions_payload is None)
+                or (view in ("full", "orders") and row.open_orders_payload is None)
+                or (view in ("full", "orders") and row.fills_payload is None)
+                or (view in ("full", "positions") and row.wallet_transactions_payload is None)
             ):
                 raise HTTPException(status_code=409, detail="account_state_not_ready")
             reconciled_at = control.reconciled_at
@@ -2016,7 +2044,7 @@ def install_platform_routes(
                 and fence_matches
                 and row.outcome == "ready"
             )
-            return {
+            response: dict[str, object] = {
                 "accountId": str(account_id),
                 "observedAt": _utc(row.observed_at),
                 "reconciledAt": _utc(reconciled_at),
@@ -2027,12 +2055,17 @@ def install_platform_routes(
                 "leaseActive": lease_active,
                 "leaseUntil": None if lease is None else _utc(lease.lease_until),
                 "credentialVersion": row.credential_version,
-                "balances": json.loads(row.balances_payload),
-                "positions": json.loads(row.positions_payload),
-                "openOrders": json.loads(row.open_orders_payload),
-                "fills": json.loads(row.fills_payload),
-                "walletTransactions": json.loads(row.wallet_transactions_payload),
             }
+            if view in ("full", "orders"):
+                response["openOrders"] = json.loads(row.open_orders_payload or "[]")
+                response["fills"] = json.loads(row.fills_payload or "[]")
+            if view in ("full", "positions"):
+                response["balances"] = json.loads(row.balances_payload or "[]")
+                response["positions"] = json.loads(row.positions_payload or "[]")
+                response["walletTransactions"] = json.loads(
+                    row.wallet_transactions_payload or "[]"
+                )
+            return response
 
     @app.get("/api/v1/performance/{account_id}")
     async def account_performance(account_id: UUID, request: Request) -> dict[str, object]:

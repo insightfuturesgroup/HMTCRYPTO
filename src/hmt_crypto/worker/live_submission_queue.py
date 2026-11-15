@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import desc, func, select
+from sqlalchemy.orm import load_only
 
 from hmt_crypto.api.live_order_recovery import RecoveryObservation
 from hmt_crypto.api.live_order_transport import (
@@ -194,7 +195,16 @@ async def claim_next_live_submission(
             select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
         )
         reconciliation = await session.scalar(
-            select(PrivateReconciliationSnapshot)
+            select(PrivateReconciliationSnapshot).options(
+                load_only(
+                    PrivateReconciliationSnapshot.id,
+                    PrivateReconciliationSnapshot.observed_at,
+                    PrivateReconciliationSnapshot.credential_version,
+                    PrivateReconciliationSnapshot.outcome,
+                    PrivateReconciliationSnapshot.worker_owner_id,
+                    PrivateReconciliationSnapshot.worker_generation,
+                )
+            )
             .where(PrivateReconciliationSnapshot.account_id == account_id)
             .order_by(desc(PrivateReconciliationSnapshot.observed_at))
             .limit(1)
