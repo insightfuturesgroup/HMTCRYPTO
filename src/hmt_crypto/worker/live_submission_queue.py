@@ -728,6 +728,10 @@ async def record_uncertain_recovery_lookup(
             return
         submission.status = "ACCEPTED"
         submission.exchange_order_id = observation.exchange_order_id
+        submission.exchange_order_state = observation.order_state
+        submission.exchange_order_size = observation.size
+        submission.exchange_unfilled_size = observation.unfilled_size
+        submission.exchange_cancellation_reason = observation.cancellation_reason
         submission.last_error_code = None
         submission.resolved_at = now
         submission.updated_at = now

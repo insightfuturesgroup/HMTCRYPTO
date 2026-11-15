@@ -901,6 +901,24 @@ class LiveOrderSubmission(Base):
             name="prepared_evidence_bundle",
         ),
         CheckConstraint(
+            "exchange_order_state IS NULL OR exchange_order_state IN "
+            "('open','pending','closed','cancelled')",
+            name="exchange_order_state_allowed",
+        ),
+        CheckConstraint(
+            "exchange_order_size IS NULL OR exchange_order_size >= 0",
+            name="exchange_order_size_nonnegative",
+        ),
+        CheckConstraint(
+            "exchange_unfilled_size IS NULL OR exchange_unfilled_size >= 0",
+            name="exchange_unfilled_size_nonnegative",
+        ),
+        CheckConstraint(
+            "exchange_order_size IS NULL OR exchange_unfilled_size IS NULL OR "
+            "exchange_unfilled_size <= exchange_order_size",
+            name="exchange_unfilled_within_size",
+        ),
+        CheckConstraint(
             "status NOT IN ('PREPARED','SENDING','UNCERTAIN','ACCEPTED','REJECTED') OR "
             "prepared_request_sha256 IS NOT NULL",
             name="prepared_evidence_required",
@@ -940,6 +958,10 @@ class LiveOrderSubmission(Base):
     claim_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
     attempt_number: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     exchange_order_id: Mapped[int | None] = mapped_column(StrictBigInteger())
+    exchange_order_state: Mapped[str | None] = mapped_column(NulFreeString(16))
+    exchange_order_size: Mapped[int | None] = mapped_column(StrictBigInteger())
+    exchange_unfilled_size: Mapped[int | None] = mapped_column(StrictBigInteger())
+    exchange_cancellation_reason: Mapped[str | None] = mapped_column(NulFreeString(256))
     last_error_code: Mapped[str | None] = mapped_column(NulFreeString(64))
     sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

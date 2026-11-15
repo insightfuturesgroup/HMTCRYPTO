@@ -87,17 +87,16 @@ async def execute_one_live_submission(
     ):
         raise ValueError("live execution is not explicitly qualified")
 
-    if await has_live_submission_recovery_debt(database, account_id=account_id):
-        return LiveExecutionResult("RECOVERY_REQUIRED", None)
+    recovery_debt = await has_live_submission_recovery_debt(database, account_id=account_id)
 
     claim = await claim_next_live_submission(
         database,
         account_id=account_id,
         owner_id=owner_id,
-        entries_allowed=entries_allowed,
+        entries_allowed=entries_allowed and not recovery_debt,
     )
     if claim is None:
-        return LiveExecutionResult("IDLE", None)
+        return LiveExecutionResult("RECOVERY_REQUIRED" if recovery_debt else "IDLE", None)
 
     await prepare_claimed_live_submission(database, claim)
     sending = await mark_live_submission_sending(database, claim)

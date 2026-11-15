@@ -246,6 +246,11 @@ interface LocalOrderIntent {
   intentStatus: string;
   submissionStatus: string;
   exchangeOrderId: number | null;
+  exchangeOrderState: string | null;
+  exchangeSize: number | null;
+  exchangeUnfilledSize: number | null;
+  exchangeFilledSize: number | null;
+  exchangeCancellationReason: string | null;
   errorCode: string | null;
   createdAt: string;
   updatedAt: string;
@@ -1967,11 +1972,37 @@ function AccountStatePage({
         { method: "DELETE" },
         csrf,
       );
-      setError("Cancelled order removed from this view. Its audit record was retained.");
+      setError("Resolved order removed from this view. Its audit record was retained.");
       void load(accountId);
     } catch (requestError) {
       const code = requestError instanceof RequestError ? requestError.code : "request_failed";
       setError(`Could not remove cancelled order (${code}).`);
+    }
+  }
+  async function resolveUncertainIntent(intentId: string) {
+    const confirmation = window.prompt(
+      "Confirm that you checked Delta order history and positions. Type NOT EXECUTED to resolve and remove this uncertain order.",
+    );
+    if (confirmation !== "NOT EXECUTED") return;
+    setError(null);
+    try {
+      await request(
+        `/api/v1/accounts/${encodeURIComponent(accountId)}/order-intents/${encodeURIComponent(intentId)}/resolve-uncertain`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            resolution: "not_executed",
+            confirmation,
+            delta_checked: true,
+          }),
+        },
+        csrf,
+      );
+      setError("Uncertain order resolved and removed from this view. Its audit record was retained.");
+      void load(accountId);
+    } catch (requestError) {
+      const code = requestError instanceof RequestError ? requestError.code : "request_failed";
+      setError(`Could not resolve uncertain order (${code}). Refresh Delta state and retry.`);
     }
   }
   async function exitPositionImmediately(row: Record<string, unknown>) {
@@ -2092,6 +2123,12 @@ function AccountStatePage({
                     const acknowledgedOrder = intent.exchangeOrderId == null
                       ? undefined
                       : state?.openOrders.find((order) => Number(order.id ?? order.order_id) === intent.exchangeOrderId);
+                    const deltaOrderLabel = intent.exchangeOrderId == null
+                      ? "Awaiting acknowledgement"
+                      : `#${intent.exchangeOrderId}${intent.exchangeOrderState ? ` · ${intent.exchangeOrderState.toUpperCase()}` : ""}`;
+                    const fillLabel = intent.exchangeFilledSize == null || intent.exchangeSize == null
+                      ? null
+                      : `${intent.exchangeFilledSize}/${intent.exchangeSize} filled`;
                     return <tr key={intent.intentId}>
                     <td><span className="hmt-date-time"><span>{new Date(intent.createdAt).toLocaleDateString()}</span><small>{new Date(intent.createdAt).toLocaleTimeString()}</small></span></td>
                     <td><strong>{intent.symbol}</strong><small>Product {intent.productId}</small></td>
@@ -2099,9 +2136,9 @@ function AccountStatePage({
                     <td>{intent.orderType.toUpperCase()} · {intent.contracts}</td>
                     <td>{displayPrice(intent.price)}</td>
                     <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus.replaceAll("_", " ")}</span></td>
-                    <td>{intent.exchangeOrderId ?? "Awaiting acknowledgement"}</td>
-                    <td>{intent.errorCode ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : intent.submissionStatus === "UNCERTAIN" ? "Check Delta before retrying" : "Waiting for Delta acknowledgement")}</td>
-                    <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : intent.submissionStatus === "BLOCKED" && intent.errorCode === "cancelled_before_dispatch" && canTrade ? <button onClick={() => void hideCancelledIntent(intent.intentId)} type="button">Delete</button> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" || intent.submissionStatus === "UNCERTAIN" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
+                    <td>{deltaOrderLabel}</td>
+                    <td>{fillLabel ?? intent.exchangeCancellationReason ?? intent.errorCode ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : intent.submissionStatus === "UNCERTAIN" ? "Check Delta before retrying" : "Waiting for Delta acknowledgement")}</td>
+                    <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : intent.submissionStatus === "UNCERTAIN" && user.role === "admin" ? <button onClick={() => void resolveUncertainIntent(intent.intentId)} type="button">Resolve / remove</button> : ["BLOCKED", "REJECTED", "ACCEPTED"].includes(intent.submissionStatus) && canTrade ? <button onClick={() => void hideCancelledIntent(intent.intentId)} type="button">Delete</button> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
                   </tr>;
                   })}
                   {orderIntents.length === 0 ? <tr><td colSpan={9}>No locally submitted orders.</td></tr> : null}

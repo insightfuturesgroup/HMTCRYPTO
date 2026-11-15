@@ -140,15 +140,20 @@ async def test_transport_failure_is_persisted_uncertain_without_retry(
 
 
 @pytest.mark.asyncio
-async def test_recovery_debt_blocks_a_new_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_recovery_debt_allows_only_reduce_only_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[bool] = []
+
     async def recovery_debt(*_args, **_kwargs):
         return True
 
-    async def unexpected_claim(*_args, **_kwargs):
-        raise AssertionError("a new submission must not be claimed")
+    async def reduce_only_claim(*_args, **kwargs):
+        captured.append(kwargs["entries_allowed"])
+        return None
 
     monkeypatch.setattr(subject, "has_live_submission_recovery_debt", recovery_debt)
-    monkeypatch.setattr(subject, "claim_next_live_submission", unexpected_claim)
+    monkeypatch.setattr(subject, "claim_next_live_submission", reduce_only_claim)
 
     result = await execute_one_live_submission(
         object(),
@@ -160,6 +165,7 @@ async def test_recovery_debt_blocks_a_new_claim(monkeypatch: pytest.MonkeyPatch)
     )
 
     assert result == subject.LiveExecutionResult("RECOVERY_REQUIRED", None)
+    assert captured == [False]
 
 
 @pytest.mark.asyncio

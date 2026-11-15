@@ -327,6 +327,12 @@ class OrderActionBody(_Body):
     limit_price: str | None = Field(default=None, max_length=64)
 
 
+class ResolveUncertainOrderBody(_Body):
+    resolution: Literal["not_executed"]
+    confirmation: Literal["NOT EXECUTED"]
+    delta_checked: Literal[True]
+
+
 class GeneralSettingsBody(_Body):
     operations_contact_email: str = Field(min_length=3, max_length=320)
     display_timezone: Literal["UTC", "Asia/Kolkata"]
@@ -2008,7 +2014,8 @@ def install_platform_routes(
                 )
             row = (
                 await session.execute(
-                    select(PrivateReconciliationSnapshot).options(load_only(*snapshot_columns))
+                    select(PrivateReconciliationSnapshot)
+                    .options(load_only(*snapshot_columns))
                     .where(PrivateReconciliationSnapshot.account_id == account_id)
                     .order_by(desc(PrivateReconciliationSnapshot.observed_at))
                     .limit(1)
@@ -2062,9 +2069,7 @@ def install_platform_routes(
             if view in ("full", "positions"):
                 response["balances"] = json.loads(row.balances_payload or "[]")
                 response["positions"] = json.loads(row.positions_payload or "[]")
-                response["walletTransactions"] = json.loads(
-                    row.wallet_transactions_payload or "[]"
-                )
+                response["walletTransactions"] = json.loads(row.wallet_transactions_payload or "[]")
             return response
 
     @app.get("/api/v1/performance/{account_id}")
@@ -3548,6 +3553,16 @@ def install_platform_routes(
                         "intentStatus": intent.status,
                         "submissionStatus": submission.status,
                         "exchangeOrderId": submission.exchange_order_id,
+                        "exchangeOrderState": submission.exchange_order_state,
+                        "exchangeSize": submission.exchange_order_size,
+                        "exchangeUnfilledSize": submission.exchange_unfilled_size,
+                        "exchangeFilledSize": (
+                            None
+                            if submission.exchange_order_size is None
+                            or submission.exchange_unfilled_size is None
+                            else submission.exchange_order_size - submission.exchange_unfilled_size
+                        ),
+                        "exchangeCancellationReason": submission.exchange_cancellation_reason,
                         "errorCode": submission.last_error_code,
                         "createdAt": _utc(intent.created_at),
                         "updatedAt": _utc(submission.updated_at),
@@ -3678,6 +3693,152 @@ def install_platform_routes(
                 "errorCode": "cancelled_before_dispatch",
             }
 
+    @app.post("/api/v1/accounts/{account_id}/order-intents/{intent_id}/resolve-uncertain")
+    async def resolve_uncertain_order_intent(
+        account_id: UUID,
+        intent_id: UUID,
+        body: ResolveUncertainOrderBody,
+        request: Request,
+    ) -> dict[str, object]:
+        require_trading_writes_allowed()
+        actor = await principal(request, mutation=True)
+        request_id = _request_id(request)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            permission = await account_permission(session, actor, account_id)
+            if actor.role != "admin" or permission == "view":
+                raise HTTPException(status_code=403, detail="owner_permission_required")
+            intent = await session.scalar(
+                select(LiveOrderIntent)
+                .where(
+                    LiveOrderIntent.id == intent_id,
+                    LiveOrderIntent.account_id == account_id,
+                )
+                .with_for_update()
+            )
+            submission = (
+                None
+                if intent is None
+                else await session.scalar(
+                    select(LiveOrderSubmission)
+                    .where(LiveOrderSubmission.intent_id == intent_id)
+                    .with_for_update()
+                )
+            )
+            snapshot = await session.scalar(
+                select(PrivateReconciliationSnapshot)
+                .where(PrivateReconciliationSnapshot.account_id == account_id)
+                .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+                .limit(1)
+            )
+            if intent is None or submission is None:
+                raise HTTPException(status_code=404, detail="order_intent_not_found")
+            if submission.status != "UNCERTAIN":
+                raise HTTPException(status_code=409, detail="submission_not_uncertain")
+            if (
+                snapshot is None
+                or snapshot.outcome != "ready"
+                or snapshot.observed_at < now - timedelta(seconds=60)
+            ):
+                raise HTTPException(status_code=409, detail="fresh_reconciliation_required")
+            try:
+                open_orders = json.loads(snapshot.open_orders_payload or "[]")
+                fills = json.loads(snapshot.fills_payload or "[]")
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=409, detail="account_state_not_ready") from None
+            if not isinstance(open_orders, list) or not isinstance(fills, list):
+                raise HTTPException(status_code=409, detail="account_state_not_ready")
+            exchange_id = submission.exchange_order_id
+            positive_order = any(
+                isinstance(row, dict)
+                and (
+                    row.get("client_order_id") == submission.client_order_id
+                    or (exchange_id is not None and row.get("id") == exchange_id)
+                )
+                for row in open_orders
+            )
+            positive_fill = any(
+                isinstance(row, dict)
+                and exchange_id is not None
+                and row.get("order_id") == exchange_id
+                for row in fills
+            )
+            if positive_order or positive_fill:
+                raise HTTPException(status_code=409, detail="delta_execution_evidence_present")
+            if (
+                submission.worker_owner_id is None
+                or submission.worker_generation is None
+                or submission.credential_version is None
+            ):
+                raise HTTPException(status_code=409, detail="submission_fence_missing")
+            fence = SubmissionFence(
+                _database_uuid(submission.worker_owner_id),
+                submission.worker_generation,
+                submission.credential_version,
+            )
+            require_transition(
+                current="UNCERTAIN",
+                target="BLOCKED",
+                stored_fence=fence,
+                actor_fence=fence,
+            )
+            sequence = (
+                int(
+                    await session.scalar(
+                        select(func.coalesce(func.max(LiveOrderSubmissionEvent.sequence), 0)).where(
+                            LiveOrderSubmissionEvent.submission_id == submission.id
+                        )
+                    )
+                    or 0
+                )
+                + 1
+            )
+            digest = submission_event_sha256(
+                submission_id=_database_uuid(submission.id),
+                sequence=sequence,
+                from_status="UNCERTAIN",
+                to_status="BLOCKED",
+                fence=fence,
+                occurred_at=now,
+            )
+            submission.status = "BLOCKED"
+            submission.last_error_code = "owner_resolved_not_executed"
+            submission.resolved_at = now
+            submission.updated_at = now
+            intent.hidden_at = now
+            intent.hidden_by_user_id = actor.profile_id
+            session.add(
+                LiveOrderSubmissionEvent(
+                    id=uuid4(),
+                    submission_id=submission.id,
+                    account_id=account_id,
+                    sequence=sequence,
+                    from_status="UNCERTAIN",
+                    to_status="BLOCKED",
+                    worker_owner_id=fence.owner_id,
+                    worker_generation=fence.generation,
+                    credential_version=fence.credential_version,
+                    evidence_sha256=digest,
+                    occurred_at=now,
+                )
+            )
+            await append_audit(
+                session,
+                actor=actor,
+                action="LIVE_ORDER_UNCERTAIN_RESOLVED",
+                target_type="live_order_intent",
+                target_id=str(intent_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={
+                    "accountId": str(account_id),
+                    "resolution": body.resolution,
+                    "deltaChecked": body.delta_checked,
+                    "snapshotId": str(snapshot.id),
+                },
+            )
+        return {"intentId": str(intent_id), "status": "BLOCKED", "hidden": True}
+
     @app.delete("/api/v1/accounts/{account_id}/order-intents/{intent_id}")
     async def hide_cancelled_order_intent(
         account_id: UUID, intent_id: UUID, request: Request
@@ -3706,10 +3867,7 @@ def install_platform_routes(
             )
             if intent is None or submission is None:
                 raise HTTPException(status_code=404, detail="order_intent_not_found")
-            if (
-                submission.status != "BLOCKED"
-                or submission.last_error_code != "cancelled_before_dispatch"
-            ):
+            if submission.status not in {"BLOCKED", "REJECTED", "ACCEPTED"}:
                 raise HTTPException(status_code=409, detail="order_intent_not_hideable")
             intent.hidden_at = now
             intent.hidden_by_user_id = actor.profile_id
