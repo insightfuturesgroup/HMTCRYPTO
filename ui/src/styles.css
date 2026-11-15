@@ -886,3 +886,22 @@
   margin-top: 14px;
   padding: 12px 18px;
 }
+
+.contract-settings-bulk input,
+.contract-settings-bulk select,
+.contract-settings-table input,
+.contract-settings-table select {
+  min-height: 40px;
+  width: 100%;
+  min-width: 92px;
+  border: 1px solid var(--hmt-border-strong);
+  border-radius: 6px;
+  background: #fff;
+  padding: 0 10px;
+}
+
+.contract-settings-table input[type="checkbox"] {
+  min-width: 18px;
+  width: 18px;
+  accent-color: var(--hmt-blue);
+}

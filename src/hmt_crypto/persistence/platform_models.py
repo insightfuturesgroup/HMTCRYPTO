@@ -456,6 +456,55 @@ class TradingViewStrategy(Base):
     __mapper_args__ = {"version_id_col": version}
 
 
+class CryptoContractSetting(Base):
+    """Sparse global/per-account execution settings for one Delta contract."""
+
+    __tablename__ = "crypto_contract_settings"
+    __table_args__ = (
+        CheckConstraint("atr_multiplier > 0", name="atr_multiplier_positive"),
+        CheckConstraint("atr_period > 0", name="atr_period_positive"),
+        CheckConstraint(
+            "atr_timeframe IN ('1m','5m','15m','30m','1h','4h','1d')", name="atr_timeframe_allowed"
+        ),
+        CheckConstraint("stop_loss_multiplier > 0", name="stop_loss_multiplier_positive"),
+        CheckConstraint("target_multiplier > 0", name="target_multiplier_positive"),
+        CheckConstraint("lot_multiplier > 0", name="lot_multiplier_positive"),
+        Index(
+            "uq_crypto_contract_settings_global_product",
+            "product_id",
+            unique=True,
+            postgresql_where=text("account_id IS NULL"),
+        ),
+        Index(
+            "uq_crypto_contract_settings_account_product",
+            "account_id",
+            "product_id",
+            unique=True,
+            postgresql_where=text("account_id IS NOT NULL"),
+        ),
+        Index("ix_crypto_contract_settings_account", "account_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="CASCADE")
+    )
+    product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    atr_multiplier: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    atr_period: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    atr_timeframe: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
+    stop_loss_multiplier: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    target_multiplier: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    lot_multiplier: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    updated_by_user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class TradingViewWebhookKey(Base):
     __tablename__ = "tradingview_webhook_keys"
     __table_args__ = (
@@ -1120,6 +1169,7 @@ __all__ = [
     "LiveOrderSubmissionEvent",
     "AccountLiveControl",
     "CredentialSecretReference",
+    "CryptoContractSetting",
     "MarketQuote",
     "PlatformAuditEvent",
     "PlatformLiveControl",

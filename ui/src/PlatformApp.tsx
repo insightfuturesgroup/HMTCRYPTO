@@ -329,6 +329,19 @@ interface TradingViewReportRow extends TradingViewSignalRow {
   accountName: string;
 }
 
+interface CryptoContractSettingRow {
+  productId: number;
+  symbol: string;
+  atrMultiplier: string;
+  atrPeriod: number;
+  atrTimeframe: "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d";
+  stopLossMultiplier: string;
+  targetMultiplier: string;
+  lotMultiplier: number;
+  enabled: boolean;
+  source: "default" | "global" | "account";
+}
+
 interface LiveOrderActionRow {
   id: string;
   action: "cancel" | "modify";
@@ -3666,83 +3679,142 @@ function RiskPage({
   );
 }
 
-function ContractSettingsPage() {
-  const navigate = useNavigate();
-  const [products, setProducts] = useState<Product[]>([]);
+function ContractSettingsPage({
+  csrf,
+  user,
+}: {
+  readonly csrf: string;
+  readonly user: SessionUser;
+}) {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [scope, setScope] = useState("global");
+  const [rows, setRows] = useState<CryptoContractSettingRow[]>([]);
+  const [dirty, setDirty] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [bulk, setBulk] = useState({ atrMultiplier: "", atrPeriod: "", atrTimeframe: "1h", stopLossMultiplier: "", targetMultiplier: "", lotMultiplier: "" });
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    void networkRequest<{ products: Product[] }>("/api/v1/market/products")
-      .then((result) => {
-        setProducts(
-          result.products
-            .filter((product) => ["perpetual_futures", "futures"].includes(product.contractType))
-            .sort((left, right) => left.symbol.localeCompare(right.symbol)),
-        );
+    const query = scope === "global" ? "" : `?account_id=${encodeURIComponent(scope)}`;
+    void Promise.all([
+      request<{ accounts: Account[] }>("/api/v1/accounts"),
+      request<{ settings: CryptoContractSettingRow[] }>(`/api/v1/contract-settings${query}`),
+    ])
+      .then(([accountResult, settingResult]) => {
+        setAccounts(accountResult.accounts);
+        setRows(settingResult.settings);
+        setDirty(new Set());
       })
-      .catch(() => setError("Contract settings could not be loaded. Retry after the market feed reconnects."))
+      .catch(() => setError("Contract settings could not be loaded."))
       .finally(() => setLoading(false));
-  }, []);
+  }, [scope]);
   useEffect(load, [load]);
-  const visibleProducts = products.filter((product) =>
-    product.symbol.toLowerCase().includes(search.trim().toLowerCase()),
+  const visibleRows = rows.filter((row) =>
+    row.symbol.toLowerCase().includes(search.trim().toLowerCase()),
   );
+  function updateRow(productId: number, change: Partial<CryptoContractSettingRow>) {
+    setRows((current) => current.map((row) => row.productId === productId ? { ...row, ...change } : row));
+    setDirty((current) => new Set(current).add(productId));
+  }
+  function applyBulk() {
+    const ids = new Set(visibleRows.map((row) => row.productId));
+    setRows((current) => current.map((row) => !ids.has(row.productId) ? row : {
+      ...row,
+      ...(bulk.atrMultiplier ? { atrMultiplier: bulk.atrMultiplier } : {}),
+      ...(bulk.atrPeriod ? { atrPeriod: Number(bulk.atrPeriod) } : {}),
+      ...(bulk.atrTimeframe ? { atrTimeframe: bulk.atrTimeframe as CryptoContractSettingRow["atrTimeframe"] } : {}),
+      ...(bulk.stopLossMultiplier ? { stopLossMultiplier: bulk.stopLossMultiplier } : {}),
+      ...(bulk.targetMultiplier ? { targetMultiplier: bulk.targetMultiplier } : {}),
+      ...(bulk.lotMultiplier ? { lotMultiplier: Number(bulk.lotMultiplier) } : {}),
+    }));
+    setDirty((current) => new Set([...current, ...ids]));
+  }
+  function setFilteredEnabled(enabled: boolean) {
+    const ids = new Set(visibleRows.map((row) => row.productId));
+    setRows((current) => current.map((row) => ids.has(row.productId) ? { ...row, enabled } : row));
+    setDirty((current) => new Set([...current, ...ids]));
+  }
+  function exportCsv() {
+    const header = "symbol,atr_multiplier,atr_period,atr_timeframe,sl_multiplier,target_multiplier,lot_multiplier,enabled,source";
+    const lines = visibleRows.map((row) => [row.symbol, row.atrMultiplier, row.atrPeriod, row.atrTimeframe, row.stopLossMultiplier, row.targetMultiplier, row.lotMultiplier, row.enabled, row.source].join(","));
+    const blob = new Blob([[header, ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `crypto-contract-settings-${scope}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+  async function save() {
+    const settings = rows.filter((row) => dirty.has(row.productId)).map((row) => ({
+      product_id: row.productId, symbol: row.symbol, atr_multiplier: row.atrMultiplier,
+      atr_period: row.atrPeriod, atr_timeframe: row.atrTimeframe,
+      stop_loss_multiplier: row.stopLossMultiplier, target_multiplier: row.targetMultiplier,
+      lot_multiplier: row.lotMultiplier, enabled: row.enabled,
+    }));
+    if (settings.length === 0) return;
+    setNotice(null);
+    try {
+      await request("/api/v1/contract-settings", { method: "PUT", body: JSON.stringify({ account_id: scope === "global" ? null : scope, settings }) }, csrf);
+      setNotice(`${settings.length} contract setting(s) saved.`);
+      load();
+    } catch { setNotice("Contract settings could not be saved."); }
+  }
   return (
     <div className="hmt-page">
       <div className="hmt-page-heading">
         <div>
-          <h1>Crypto Contract Settings</h1>
-          <p>Delta contract specifications and strategy-level ATR execution defaults.</p>
+          <h1>Crypto Symbol Trading Settings</h1>
+          <p>Configure ATR, protection, and order-size multipliers globally or per Delta account.</p>
         </div>
-        <button className="hmt-secondary-button" onClick={load} type="button">
-          <RefreshCw size={17} /> Refresh
-        </button>
+        <div className="flex gap-2"><button className="hmt-secondary-button" onClick={exportCsv} type="button"><Download size={17} /> Export</button><button className="hmt-secondary-button" onClick={load} type="button"><RefreshCw size={17} /> Refresh</button><button className="hmt-primary-button" disabled={dirty.size === 0} onClick={() => void save()} type="button">Save</button></div>
       </div>
-      <Panel title="ATR and protection settings">
-        <div className="grid gap-4 p-4 md:grid-cols-4">
-          <div><small>ATR multiplier</small><strong className="block">Per strategy</strong></div>
-          <div><small>Stop-loss ATR</small><strong className="block">Per strategy</strong></div>
-          <div><small>Target ATR</small><strong className="block">Per strategy</strong></div>
-          <div><small>Order size</small><strong className="block">Per strategy</strong></div>
-          <p className="md:col-span-3">
-            ATR, stop-loss, target and quantity settings affect order construction, so they are
-            versioned with each strategy rather than mixed with account risk limits.
-          </p>
-          <button className="hmt-primary-button" onClick={() => navigate("/strategies")} type="button">
-            Configure strategies
-          </button>
-        </div>
-      </Panel>
-      <Panel title="Delta futures contract catalogue">
+      <Panel title="Symbol settings">
         <div className="flex flex-wrap items-center gap-3 border-b p-4">
           <input
             className="min-w-64 flex-1 rounded border px-3 py-2"
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search crypto contracts"
+            placeholder="Search symbols"
             value={search}
           />
-          <span>{visibleProducts.length} contracts</span>
+          <select className="rounded border px-3 py-2" disabled={user.role !== "admin" && scope === "global"} onChange={(event) => setScope(event.target.value)} value={scope}>
+            {user.role === "admin" ? <option value="global">Global Settings (All Accounts)</option> : null}
+            {accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}
+          </select>
+        </div>
+        <div className="contract-settings-bulk grid gap-2 border-b bg-blue-50 p-4 md:grid-cols-8">
+          <input placeholder="ATR" value={bulk.atrMultiplier} onChange={(e) => setBulk({...bulk, atrMultiplier:e.target.value})}/>
+          <input placeholder="ATR period" type="number" value={bulk.atrPeriod} onChange={(e) => setBulk({...bulk, atrPeriod:e.target.value})}/>
+          <select value={bulk.atrTimeframe} onChange={(e) => setBulk({...bulk, atrTimeframe:e.target.value})}>{["1m","5m","15m","30m","1h","4h","1d"].map((v)=><option key={v}>{v}</option>)}</select>
+          <input placeholder="SL" value={bulk.stopLossMultiplier} onChange={(e) => setBulk({...bulk, stopLossMultiplier:e.target.value})}/>
+          <input placeholder="Target" value={bulk.targetMultiplier} onChange={(e) => setBulk({...bulk, targetMultiplier:e.target.value})}/>
+          <input placeholder="Lot" type="number" value={bulk.lotMultiplier} onChange={(e) => setBulk({...bulk, lotMultiplier:e.target.value})}/>
+          <button className="hmt-secondary-button" onClick={applyBulk} type="button">Apply to filtered</button>
+          <div className="flex gap-1"><button className="hmt-secondary-button" onClick={() => setFilteredEnabled(true)} type="button">Enable</button><button className="hmt-secondary-button" onClick={() => setFilteredEnabled(false)} type="button">Disable</button></div>
         </div>
         {error ? <p className="p-4 text-red-700" role="alert">{error}</p> : null}
+        {notice ? <p className="p-4" role="status">{notice}</p> : null}
         <div className="overflow-x-auto">
-          <table>
-            <thead><tr><th>Contract</th><th>Status</th><th>Tick size</th><th>Contract value</th><th>Margin</th><th>Live quote</th></tr></thead>
+          <table className="contract-settings-table">
+            <thead><tr><th>Symbol</th><th>ATR multiplier</th><th>ATR period</th><th>ATR timeframe</th><th>SL multiplier</th><th>Target multiplier</th><th>Lot multiplier</th><th>Enabled</th></tr></thead>
             <tbody>
-              {loading ? <tr><td colSpan={6}>Loading contract settings…</td></tr> : null}
-              {!loading && visibleProducts.map((product) => (
-                <tr key={product.productId}>
-                  <td><strong>{product.symbol}</strong><small className="block">Product {product.productId}</small></td>
-                  <td>{product.state} · {product.tradingStatus}{product.onlyReduceOnlyOrdersAllowed ? " · reduce only" : ""}</td>
-                  <td>{product.tickSize}</td>
-                  <td>{product.contractValue} {product.contractUnitCurrency}</td>
-                  <td>{product.initialMargin ?? "—"} / {product.maintenanceMargin ?? "—"}</td>
-                  <td>{product.markPrice ?? "—"}{product.quoteFresh ? " · fresh" : " · stale"}</td>
+              {loading ? <tr><td colSpan={8}>Loading contract settings…</td></tr> : null}
+              {!loading && visibleRows.map((row) => (
+                <tr key={row.productId}>
+                  <td><strong>{row.symbol}</strong><small className="block">{row.source}</small></td>
+                  <td><input value={row.atrMultiplier} onChange={(e)=>updateRow(row.productId,{atrMultiplier:e.target.value})}/></td>
+                  <td><input min="1" type="number" value={row.atrPeriod} onChange={(e)=>updateRow(row.productId,{atrPeriod:Number(e.target.value)})}/></td>
+                  <td><select value={row.atrTimeframe} onChange={(e)=>updateRow(row.productId,{atrTimeframe:e.target.value as CryptoContractSettingRow["atrTimeframe"]})}>{["1m","5m","15m","30m","1h","4h","1d"].map((v)=><option key={v}>{v}</option>)}</select></td>
+                  <td><input value={row.stopLossMultiplier} onChange={(e)=>updateRow(row.productId,{stopLossMultiplier:e.target.value})}/></td>
+                  <td><input value={row.targetMultiplier} onChange={(e)=>updateRow(row.productId,{targetMultiplier:e.target.value})}/></td>
+                  <td><input min="1" type="number" value={row.lotMultiplier} onChange={(e)=>updateRow(row.productId,{lotMultiplier:Number(e.target.value)})}/></td>
+                  <td><input checked={row.enabled} onChange={(e)=>updateRow(row.productId,{enabled:e.target.checked})} type="checkbox" /></td>
                 </tr>
               ))}
-              {!loading && !error && visibleProducts.length === 0 ? <tr><td colSpan={6}>No contracts match this search.</td></tr> : null}
+              {!loading && !error && visibleRows.length === 0 ? <tr><td colSpan={8}>No contracts match this search.</td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -4986,7 +5058,7 @@ function Shell({
               />
               <Route
                 path="/contract-settings"
-                element={<ContractSettingsPage />}
+                element={<ContractSettingsPage csrf={csrf} user={user} />}
               />
               <Route path="/performance" element={<PerformancePage />} />
               <Route

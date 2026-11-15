@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
-from sqlalchemy import and_, desc, func, literal, select
+from sqlalchemy import and_, desc, func, literal, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
@@ -78,6 +78,7 @@ from hmt_crypto.persistence.models import (
     CatalogueSnapshot,
     CredentialSecretReference,
     CredentialVersion,
+    CryptoContractSetting,
     GttOrder,
     LiveOrderAction,
     LiveOrderIntent,
@@ -383,6 +384,23 @@ class TradingViewSignalBody(_Body):
     side: Literal["buy", "sell"]
     timestamp: int | str
     limit_price: str | None = Field(default=None, max_length=64)
+
+
+class CryptoContractSettingItem(_Body):
+    product_id: int = Field(gt=0, lt=2**63)
+    symbol: str = Field(min_length=1, max_length=128)
+    atr_multiplier: str = Field(min_length=1, max_length=32)
+    atr_period: int = Field(gt=0, le=500)
+    atr_timeframe: Literal["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+    stop_loss_multiplier: str = Field(min_length=1, max_length=32)
+    target_multiplier: str = Field(min_length=1, max_length=32)
+    lot_multiplier: int = Field(gt=0, lt=2**31)
+    enabled: bool
+
+
+class CryptoContractSettingsBody(_Body):
+    account_id: JsonUUID | None = None
+    settings: list[CryptoContractSettingItem] = Field(min_length=1, max_length=500)
 
 
 @dataclass(frozen=True, slots=True)
@@ -4805,6 +4823,178 @@ def install_platform_routes(
                     for row in rows
                 ]
             }
+
+    @app.get("/api/v1/contract-settings")
+    async def list_contract_settings(
+        request: Request, account_id: UUID | None = None
+    ) -> dict[str, object]:
+        actor = await principal(request)
+        async with database.transaction() as session:
+            if account_id is not None:
+                await account_permission(session, actor, account_id)
+            elif actor.role != "admin":
+                raise HTTPException(status_code=403, detail="permission_denied")
+            snapshot = await session.scalar(
+                select(CatalogueSnapshot)
+                .where(
+                    CatalogueSnapshot.region == "india",
+                    CatalogueSnapshot.environment == "prod",
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            products = (
+                []
+                if snapshot is None
+                else list(
+                    (
+                        await session.execute(
+                            select(CatalogueProduct)
+                            .where(CatalogueProduct.snapshot_id == snapshot.id)
+                            .order_by(CatalogueProduct.symbol)
+                        )
+                    ).scalars()
+                )
+            )
+            setting_scope = (
+                or_(
+                    CryptoContractSetting.account_id.is_(None),
+                    CryptoContractSetting.account_id == account_id,
+                )
+                if account_id is not None
+                else CryptoContractSetting.account_id.is_(None)
+            )
+            saved = list(
+                (
+                    await session.execute(select(CryptoContractSetting).where(setting_scope))
+                ).scalars()
+            )
+            global_rows = {row.product_id: row for row in saved if row.account_id is None}
+            account_rows = {row.product_id: row for row in saved if row.account_id is not None}
+            rows: list[dict[str, object]] = []
+            for product in products:
+                row = account_rows.get(product.product_id) or global_rows.get(product.product_id)
+                rows.append(
+                    {
+                        "productId": product.product_id,
+                        "symbol": product.symbol,
+                        "atrMultiplier": str(row.atr_multiplier if row else Decimal("1.5")),
+                        "atrPeriod": row.atr_period if row else 14,
+                        "atrTimeframe": row.atr_timeframe if row else "1h",
+                        "stopLossMultiplier": str(
+                            row.stop_loss_multiplier if row else Decimal("1.2")
+                        ),
+                        "targetMultiplier": str(row.target_multiplier if row else Decimal("1.25")),
+                        "lotMultiplier": row.lot_multiplier if row else 1,
+                        "enabled": row.enabled if row else True,
+                        "source": "account"
+                        if product.product_id in account_rows
+                        else "global"
+                        if product.product_id in global_rows
+                        else "default",
+                    }
+                )
+            return {"settings": rows}
+
+    @app.put("/api/v1/contract-settings")
+    async def save_contract_settings(
+        body: CryptoContractSettingsBody, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        request_id = _request_id(request)
+        if body.account_id is None and actor.role != "admin":
+            raise HTTPException(status_code=403, detail="permission_denied")
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            if body.account_id is not None:
+                permission = await account_permission(session, actor, body.account_id)
+                if actor.role != "admin" and permission != "manage":
+                    raise HTTPException(status_code=403, detail="permission_denied")
+            product_ids = {item.product_id for item in body.settings}
+            snapshot_id = await session.scalar(
+                select(CatalogueSnapshot.id)
+                .where(
+                    CatalogueSnapshot.region == "india",
+                    CatalogueSnapshot.environment == "prod",
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            if snapshot_id is None:
+                raise HTTPException(status_code=503, detail="catalogue_unavailable")
+            catalogue_product_rows = (
+                await session.execute(
+                    select(CatalogueProduct.product_id, CatalogueProduct.symbol).where(
+                        CatalogueProduct.snapshot_id == snapshot_id,
+                        CatalogueProduct.product_id.in_(product_ids),
+                    )
+                )
+            ).all()
+            catalogue_products: dict[int, str] = {
+                product_id: symbol for product_id, symbol in catalogue_product_rows
+            }
+            if set(catalogue_products) != product_ids:
+                raise HTTPException(status_code=400, detail="unknown_contract_setting")
+            changed = 0
+            for item in body.settings:
+                values = [item.atr_multiplier, item.stop_loss_multiplier, item.target_multiplier]
+                try:
+                    atr, stop, target = (Decimal(value) for value in values)
+                except InvalidOperation:
+                    raise HTTPException(
+                        status_code=400, detail="invalid_contract_setting"
+                    ) from None
+                if any(not value.is_finite() or value <= 0 for value in (atr, stop, target)):
+                    raise HTTPException(status_code=400, detail="invalid_contract_setting")
+                row = await session.scalar(
+                    select(CryptoContractSetting).where(
+                        CryptoContractSetting.account_id.is_(None)
+                        if body.account_id is None
+                        else CryptoContractSetting.account_id == body.account_id,
+                        CryptoContractSetting.product_id == item.product_id,
+                    )
+                )
+                if row is None:
+                    row = CryptoContractSetting(
+                        id=uuid4(),
+                        account_id=body.account_id,
+                        product_id=item.product_id,
+                        symbol=catalogue_products[item.product_id],
+                        atr_multiplier=atr,
+                        atr_period=item.atr_period,
+                        atr_timeframe=item.atr_timeframe,
+                        stop_loss_multiplier=stop,
+                        target_multiplier=target,
+                        lot_multiplier=item.lot_multiplier,
+                        enabled=item.enabled,
+                        updated_by_user_id=actor.profile_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(row)
+                else:
+                    row.symbol = catalogue_products[item.product_id]
+                    row.atr_multiplier = atr
+                    row.atr_period = item.atr_period
+                    row.atr_timeframe = item.atr_timeframe
+                    row.stop_loss_multiplier = stop
+                    row.target_multiplier = target
+                    row.lot_multiplier = item.lot_multiplier
+                    row.enabled = item.enabled
+                    row.updated_by_user_id = actor.profile_id
+                    row.updated_at = now
+                changed += 1
+            await append_audit(
+                session,
+                actor=actor,
+                action="CRYPTO_CONTRACT_SETTINGS_UPDATED",
+                target_type="account" if body.account_id is not None else "platform",
+                target_id=str(body.account_id) if body.account_id is not None else "global",
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={"settingCount": changed},
+            )
+        return {"updated": changed}
 
     @app.get("/api/v1/strategies/signals")
     async def list_strategy_signals(request: Request, account_id: UUID) -> dict[str, object]:
