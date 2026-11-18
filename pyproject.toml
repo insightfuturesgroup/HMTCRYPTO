@@ -20,6 +20,7 @@ dependencies = [
     "prometheus-client>=0.21,<1",
     "pydantic>=2.14.2,<2.15",
     "pydantic-settings>=2.7,<3",
+    "redis>=5.2,<6",
     "structlog>=24.4,<27",
     "typer>=0.15,<1",
     "uvicorn[standard]>=0.34,<1",

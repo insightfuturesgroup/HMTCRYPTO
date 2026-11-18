@@ -42,9 +42,6 @@ class LiveExecutionSettings(BaseSettings):
     production_writes_forbidden: StrictBool = Field(
         default=True, alias="PRODUCTION_WRITES_FORBIDDEN"
     )
-    qualification_sha256: str | None = Field(
-        default=None, alias="HMT_LIVE_ORDER_QUALIFICATION_SHA256"
-    )
 
     @field_validator("enabled", "production_writes_forbidden", mode="before")
     @classmethod
@@ -54,16 +51,9 @@ class LiveExecutionSettings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def _require_explicit_qualification(self) -> Self:
-        digest = self.qualification_sha256
-        if self.enabled and (
-            self.production_writes_forbidden
-            or type(digest) is not str
-            or len(digest) != 64
-            or digest == "0" * 64
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            raise ValueError("live dispatch requires qualification evidence")
+    def _require_production_write_permission(self) -> Self:
+        if self.enabled and self.production_writes_forbidden:
+            raise ValueError("live dispatch requires production write permission")
         return self
 
 
@@ -97,17 +87,16 @@ async def execute_one_live_submission(
     ):
         raise ValueError("live execution is not explicitly qualified")
 
-    if await has_live_submission_recovery_debt(database, account_id=account_id):
-        return LiveExecutionResult("RECOVERY_REQUIRED", None)
+    recovery_debt = await has_live_submission_recovery_debt(database, account_id=account_id)
 
     claim = await claim_next_live_submission(
         database,
         account_id=account_id,
         owner_id=owner_id,
-        entries_allowed=entries_allowed,
+        entries_allowed=entries_allowed and not recovery_debt,
     )
     if claim is None:
-        return LiveExecutionResult("IDLE", None)
+        return LiveExecutionResult("RECOVERY_REQUIRED" if recovery_debt else "IDLE", None)
 
     await prepare_claimed_live_submission(database, claim)
     sending = await mark_live_submission_sending(database, claim)

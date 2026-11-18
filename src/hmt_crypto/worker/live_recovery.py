@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
+from hmt_crypto.api.live_order_recovery import RecoveryObservation
 from hmt_crypto.api.live_order_recovery_http import (
     DeltaIndiaLiveOrderRecoveryAdapter,
     LiveOrderRecoveryUnavailable,
@@ -13,6 +14,7 @@ from hmt_crypto.persistence.db import Database
 from hmt_crypto.worker.live_submission_queue import (
     claim_live_submission_recovery,
     record_uncertain_recovery_lookup,
+    recover_from_reconciliation,
 )
 
 
@@ -45,13 +47,26 @@ async def recover_one_live_submission(
     claim = await claim_live_submission_recovery(database, account_id=account_id, owner_id=owner_id)
     if claim is None:
         return LiveRecoveryResult("IDLE", None)
+
+    async def reconciled_fill() -> RecoveryObservation | None:
+        try:
+            return await recover_from_reconciliation(database, claim)
+        except Exception:
+            return None
+
     try:
         observation = await adapter.lookup(
             client_order_id=claim.client_order_id,
             expected_user_id=external_user_id,
         )
     except LiveOrderRecoveryUnavailable:
-        return LiveRecoveryResult("UNAVAILABLE", claim.submission_id)
+        observation = await reconciled_fill()
+        if observation is None:
+            return LiveRecoveryResult("UNAVAILABLE", claim.submission_id)
+    if observation.result != "FOUND":
+        reconciled = await reconciled_fill()
+        if reconciled is not None:
+            observation = reconciled
     await record_uncertain_recovery_lookup(database, claim, observation)
     return LiveRecoveryResult(observation.result, claim.submission_id)
 

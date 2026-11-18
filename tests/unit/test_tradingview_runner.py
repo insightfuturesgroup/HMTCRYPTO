@@ -4,11 +4,11 @@ from uuid import UUID, uuid4
 import pytest
 
 from hmt_crypto.persistence.db import Database
+from hmt_crypto.worker.scope import normalize_worker_uuid
 from hmt_crypto.worker.tradingview_runner import (
     _payload_rows,
     admit_one_tradingview_signal,
 )
-from hmt_crypto.worker.scope import normalize_worker_uuid
 
 
 class _DriverUUID(UUID):

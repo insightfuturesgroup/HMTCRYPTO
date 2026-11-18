@@ -10,6 +10,7 @@ from uuid import UUID
 
 import httpx
 from sqlalchemy import case, desc, select
+from sqlalchemy.orm import load_only
 
 from hmt_crypto.exchange.delta.signer import DeltaSigner
 from hmt_crypto.persistence.db import Database
@@ -206,7 +207,17 @@ async def execute_one_live_order_action(
         )
         global_control = await session.get(PlatformLiveControl, "global")
         reconciliation = await session.scalar(
-            select(PrivateReconciliationSnapshot)
+            select(PrivateReconciliationSnapshot).options(
+                load_only(
+                    PrivateReconciliationSnapshot.id,
+                    PrivateReconciliationSnapshot.observed_at,
+                    PrivateReconciliationSnapshot.credential_version,
+                    PrivateReconciliationSnapshot.outcome,
+                    PrivateReconciliationSnapshot.worker_owner_id,
+                    PrivateReconciliationSnapshot.worker_generation,
+                    PrivateReconciliationSnapshot.open_orders_payload,
+                )
+            )
             .where(PrivateReconciliationSnapshot.account_id == account_id)
             .order_by(desc(PrivateReconciliationSnapshot.observed_at))
             .limit(1)

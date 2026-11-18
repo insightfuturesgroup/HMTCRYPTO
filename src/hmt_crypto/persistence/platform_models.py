@@ -236,6 +236,7 @@ class MarketCandle(Base):
             name="uq_market_candles_identity",
         ),
         Index("ix_market_candles_product_time", "product_id", "resolution", text("timestamp DESC")),
+        Index("ix_market_candles_timestamp", "timestamp"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -458,6 +459,55 @@ class TradingViewStrategy(Base):
     __mapper_args__ = {"version_id_col": version}
 
 
+class CryptoContractSetting(Base):
+    """Sparse global/per-account execution settings for one Delta contract."""
+
+    __tablename__ = "crypto_contract_settings"
+    __table_args__ = (
+        CheckConstraint("atr_multiplier > 0", name="atr_multiplier_positive"),
+        CheckConstraint("atr_period > 0", name="atr_period_positive"),
+        CheckConstraint(
+            "atr_timeframe IN ('1m','5m','15m','30m','1h','4h','1d')", name="atr_timeframe_allowed"
+        ),
+        CheckConstraint("stop_loss_multiplier > 0", name="stop_loss_multiplier_positive"),
+        CheckConstraint("target_multiplier > 0", name="target_multiplier_positive"),
+        CheckConstraint("lot_multiplier > 0", name="lot_multiplier_positive"),
+        Index(
+            "uq_crypto_contract_settings_global_product",
+            "product_id",
+            unique=True,
+            postgresql_where=text("account_id IS NULL"),
+        ),
+        Index(
+            "uq_crypto_contract_settings_account_product",
+            "account_id",
+            "product_id",
+            unique=True,
+            postgresql_where=text("account_id IS NOT NULL"),
+        ),
+        Index("ix_crypto_contract_settings_account", "account_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="CASCADE")
+    )
+    product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    atr_multiplier: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    atr_period: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    atr_timeframe: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
+    stop_loss_multiplier: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    target_multiplier: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    lot_multiplier: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    updated_by_user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class TradingViewWebhookKey(Base):
     __tablename__ = "tradingview_webhook_keys"
     __table_args__ = (
@@ -538,6 +588,7 @@ class AccountLiveControl(Base):
     reconciliation_state: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
     entries_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     exits_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    emergency_disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     reconciled_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     last_error_code: Mapped[str | None] = mapped_column(NulFreeString(64))
@@ -653,6 +704,10 @@ class AccountRiskPolicy(Base):
         CheckConstraint("version >= 1", name="version_pos"),
         UniqueConstraint("account_id", name="uq_account_risk_policies_account"),
         Index("ix_account_risk_policies_updated_by", "updated_by_user_id"),
+        CheckConstraint(
+            "product_scope_mode IN ('SELECTED','ALL_SUPPORTED')",
+            name="product_scope_mode_allowed",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -678,7 +733,11 @@ class AccountRiskPolicy(Base):
         Numeric(38, 18), nullable=False, default=Decimal("2000")
     )
     allowed_product_ids: Mapped[str] = mapped_column(Text, nullable=False)
+    product_scope_mode: Mapped[str] = mapped_column(
+        NulFreeString(24), nullable=False, default="SELECTED"
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    auto_activation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_by_user_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
     )
@@ -701,6 +760,7 @@ class PrivateStreamEvidence(Base):
             "state IN ('connected','snapshot','live','gap','disconnected')", name="state_allowed"
         ),
         Index("ix_private_stream_account_observed", "account_id", "observed_at"),
+        Index("ix_private_stream_evidence_observed_at", "observed_at"),
         Index(
             "ix_private_stream_account_channel_observed",
             "account_id",
@@ -764,6 +824,7 @@ class PlatformLiveControl(Base):
 
     control_key: Mapped[str] = mapped_column(NulFreeString(16), primary_key=True)
     entries_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    emergency_disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     reason: Mapped[str] = mapped_column(NulFreeString(256), nullable=False)
     updated_by_user_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT")
@@ -845,6 +906,10 @@ class LiveOrderIntent(Base):
     idempotency_key: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
     intent_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
+    hidden_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    hidden_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT")
+    )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
@@ -890,6 +955,24 @@ class LiveOrderSubmission(Base):
             name="prepared_evidence_bundle",
         ),
         CheckConstraint(
+            "exchange_order_state IS NULL OR exchange_order_state IN "
+            "('open','pending','closed','cancelled')",
+            name="exchange_order_state_allowed",
+        ),
+        CheckConstraint(
+            "exchange_order_size IS NULL OR exchange_order_size >= 0",
+            name="exchange_order_size_nonnegative",
+        ),
+        CheckConstraint(
+            "exchange_unfilled_size IS NULL OR exchange_unfilled_size >= 0",
+            name="exchange_unfilled_size_nonnegative",
+        ),
+        CheckConstraint(
+            "exchange_order_size IS NULL OR exchange_unfilled_size IS NULL OR "
+            "exchange_unfilled_size <= exchange_order_size",
+            name="exchange_unfilled_within_size",
+        ),
+        CheckConstraint(
             "status NOT IN ('PREPARED','SENDING','UNCERTAIN','ACCEPTED','REJECTED') OR "
             "prepared_request_sha256 IS NOT NULL",
             name="prepared_evidence_required",
@@ -929,6 +1012,10 @@ class LiveOrderSubmission(Base):
     claim_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
     attempt_number: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     exchange_order_id: Mapped[int | None] = mapped_column(StrictBigInteger())
+    exchange_order_state: Mapped[str | None] = mapped_column(NulFreeString(16))
+    exchange_order_size: Mapped[int | None] = mapped_column(StrictBigInteger())
+    exchange_unfilled_size: Mapped[int | None] = mapped_column(StrictBigInteger())
+    exchange_cancellation_reason: Mapped[str | None] = mapped_column(NulFreeString(256))
     last_error_code: Mapped[str | None] = mapped_column(NulFreeString(64))
     sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
@@ -1085,6 +1172,7 @@ __all__ = [
     "LiveOrderSubmissionEvent",
     "AccountLiveControl",
     "CredentialSecretReference",
+    "CryptoContractSetting",
     "MarketQuote",
     "PlatformAuditEvent",
     "PlatformLiveControl",

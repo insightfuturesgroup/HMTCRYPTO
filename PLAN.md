@@ -52,6 +52,13 @@
 
 ### Owner-approved activation override and retained safety
 
+- **Implemented locally on 2026-11-15 (not deployed):** per-account Risk ON/OFF,
+  dynamic `ALL_SUPPORTED` linear USD futures/perpetual scope, owner consent for
+  automatic healthy activation, and durable account/global emergency-disable
+  latches. Risk OFF bypasses configurable notional, exposure, daily-loss,
+  open-order, and in-flight-signal caps only; product validity, sizing correctness,
+  balance/reduce-only checks, credentials, reconciliation, fencing, qualification,
+  and emergency controls remain mandatory.
 - Qualification has no mandatory elapsed-time wait by default and no commit/build/config-hash binding. This owner decision overrides conflicting historical qualification-duration and commit-binding text below.
 - New entries still require dispatch enabled, current account/venue/credential binding evidence, an enabled risk policy, fresh quotes/reconciliation/private streams, no unresolved operation, and open entry gates.
 - Protective reduce-only exits use separate readiness and must not be blocked by entry qualification.

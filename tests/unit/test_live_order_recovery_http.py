@@ -60,6 +60,10 @@ async def test_lookup_signs_exact_fixed_path_and_validates_identity(
 
     assert observation.result == "FOUND"
     assert observation.exchange_order_id == 7001
+    assert observation.order_state == "open"
+    assert observation.size == 2
+    assert observation.unfilled_size == 1
+    assert observation.cancellation_reason is None
 
 
 @pytest.mark.asyncio

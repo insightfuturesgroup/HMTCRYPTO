@@ -1,6 +1,25 @@
 name: hmt-crypto-ec2
 
 services:
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    user: redis
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    read_only: true
+    tmpfs:
+      - /data:size=64m,mode=0777,noexec,nosuid,nodev
+      - /tmp:size=8m,mode=0777,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [application]
+
   migrate:
     build:
       context: .
@@ -34,9 +53,12 @@ services:
       HMT_API_BIND_HOST: 0.0.0.0
       HMT_API_BIND_PORT: "8000"
       HMT_PRIVATE_READ_ONLY: "true"
+      HMT_REDIS_URL: redis://redis:6379/0
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -67,11 +89,14 @@ services:
       - deploy/ec2/worker.env
     environment:
       HMT_WORKER_KIND: market
+      HMT_REDIS_URL: redis://redis:6379/0
     volumes:
       - /etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     read_only: true
     tmpfs:
       - /tmp:size=16m,noexec,nosuid,nodev
@@ -91,11 +116,16 @@ services:
     environment:
       HMT_WORKER_KIND: private
       HMT_PRIVATE_READ_ONLY: "true"
+      HMT_REDIS_URL: redis://redis:6379/0
+      HMT_PRIVATE_INTERVAL_SECONDS: "30"
+      HMT_PRIVATE_LEASE_SECONDS: "90"
     volumes:
       - /etc/hmt/supabase-prod-ca.crt:/run/secrets/supabase-prod-ca.crt:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     read_only: true
     tmpfs:
       - /tmp:size=16m,noexec,nosuid,nodev

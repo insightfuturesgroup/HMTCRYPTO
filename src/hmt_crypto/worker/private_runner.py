@@ -8,12 +8,13 @@ import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Self
+from typing import Any, Self
 from uuid import UUID, uuid4
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import desc, select
+from sqlalchemy.orm import load_only
 
 from hmt_crypto.api.delta_reconciliation import (
     PrivateReconciliationEvidence,
@@ -25,6 +26,7 @@ from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlRuntimeSettings
 from hmt_crypto.config import DeltaEnvironment, DeltaRegion, ExecutionMode
 from hmt_crypto.exchange.delta.signer import DeltaSigner
+from hmt_crypto.fast_path import ACCOUNT_CHANNEL, ORDER_CHANNEL, publish_json, wait_for_message
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_MIN_MINUTES,
     LIVE_RECONCILIATION_EVIDENCE_INTERVAL_SECONDS,
@@ -39,6 +41,7 @@ from hmt_crypto.persistence.models import (
     CatalogueSnapshot,
     CredentialSecretReference,
     LiveOrderAction,
+    LiveOrderIntent,
     LiveOrderSubmission,
     LiveQualificationEvidence,
     MarketQuote,
@@ -47,6 +50,7 @@ from hmt_crypto.persistence.models import (
     PrivateReconciliationSnapshot,
     PrivateStreamEvidence,
     PrivateWorkerLease,
+    TradingViewSignal,
 )
 from hmt_crypto.worker.gtt_runner import evaluate_one_gtt
 from hmt_crypto.worker.live_execution import (
@@ -60,6 +64,7 @@ from hmt_crypto.worker.live_order_actions import (
     execute_one_live_order_action,
 )
 from hmt_crypto.worker.live_recovery import LiveRecoveryResult, recover_one_live_submission
+from hmt_crypto.worker.operational_retention import prune_operational_history
 from hmt_crypto.worker.private_stream import run_private_stream
 from hmt_crypto.worker.protection_sync import sync_one_protection_group
 from hmt_crypto.worker.scope import normalize_worker_uuid
@@ -74,9 +79,12 @@ class PrivateWorkerSettings(BaseSettings):
     owner_id: UUID = Field(default_factory=uuid4, alias="HMT_PRIVATE_WORKER_ID")
     aws_region: str = Field(min_length=3, max_length=64, alias="HMT_AWS_REGION")
     secret_prefix: str = Field(default="hmt-crypto/delta", alias="HMT_DELTA_SECRET_PREFIX")
-    interval_seconds: int = Field(default=15, ge=5, le=300, alias="HMT_PRIVATE_INTERVAL_SECONDS")
-    lease_seconds: int = Field(default=45, ge=15, le=900, alias="HMT_PRIVATE_LEASE_SECONDS")
+    interval_seconds: int = Field(default=30, ge=5, le=300, alias="HMT_PRIVATE_INTERVAL_SECONDS")
+    lease_seconds: int = Field(default=90, ge=15, le=900, alias="HMT_PRIVATE_LEASE_SECONDS")
     read_only: bool = Field(default=True, alias="HMT_PRIVATE_READ_ONLY")
+    operational_retention_days: int = Field(
+        default=7, ge=1, le=90, alias="HMT_OPERATIONAL_RETENTION_DAYS"
+    )
 
     @model_validator(mode="after")
     def _safe_identity(self) -> Self:
@@ -135,6 +143,17 @@ async def _auto_activate_healthy_account(
             return "worker_or_credential_not_ready"
         snapshot = await session.scalar(
             select(PrivateReconciliationSnapshot)
+            .options(
+                load_only(
+                    PrivateReconciliationSnapshot.id,
+                    PrivateReconciliationSnapshot.observed_at,
+                    PrivateReconciliationSnapshot.credential_version,
+                    PrivateReconciliationSnapshot.outcome,
+                    PrivateReconciliationSnapshot.complete,
+                    PrivateReconciliationSnapshot.worker_owner_id,
+                    PrivateReconciliationSnapshot.worker_generation,
+                )
+            )
             .where(
                 PrivateReconciliationSnapshot.account_id == claim.account_id,
                 PrivateReconciliationSnapshot.outcome == "ready",
@@ -171,12 +190,53 @@ async def _auto_activate_healthy_account(
         risk = await session.scalar(
             select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == claim.account_id)
         )
-        if risk is None or not risk.enabled:
-            return "risk_policy_disabled"
-        try:
-            product_ids = {int(value) for value in json.loads(risk.allowed_product_ids)}
-        except (TypeError, ValueError):
-            return "risk_product_scope_invalid"
+        if risk is None:
+            return "risk_policy_missing"
+        if not risk.auto_activation_enabled:
+            return "automatic_activation_disabled"
+        if control.emergency_disabled or global_control.emergency_disabled:
+            return "emergency_disabled"
+        if risk.product_scope_mode == "ALL_SUPPORTED":
+            catalogue = await session.scalar(
+                select(CatalogueSnapshot)
+                .where(
+                    CatalogueSnapshot.region == account.region,
+                    CatalogueSnapshot.environment == account.environment,
+                    CatalogueSnapshot.fresh_until > now,
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            if catalogue is None:
+                return "catalogue_not_ready"
+            rows = list(
+                await session.scalars(
+                    select(CatalogueProduct).where(CatalogueProduct.snapshot_id == catalogue.id)
+                )
+            )
+            product_ids = {
+                row.product_id
+                for row in rows
+                if row.to_product().contract_type.value in ("perpetual_futures", "futures")
+                and row.to_product().notional_type.value == "vanilla"
+                and not row.to_product().is_quanto
+                and row.to_product().quoting_asset.symbol == "USD"
+                and row.to_product().contract_unit_currency
+                == row.to_product().underlying_asset.symbol
+                and row.to_product().state.value == "live"
+                and row.to_product().trading_status.value == "operational"
+                and not row.to_product().only_reduce_only_orders_allowed
+            }
+            rendered_scope = json.dumps(sorted(product_ids))
+            if risk.allowed_product_ids != rendered_scope:
+                risk.allowed_product_ids = rendered_scope
+                risk.version += 1
+                risk.updated_at = now
+        else:
+            try:
+                product_ids = {int(value) for value in json.loads(risk.allowed_product_ids)}
+            except (TypeError, ValueError):
+                return "risk_product_scope_invalid"
         if not product_ids:
             return "risk_product_scope_empty"
         quotes = list(
@@ -193,9 +253,11 @@ async def _auto_activate_healthy_account(
             return "quote_stale"
         uncertain_submission = await session.scalar(
             select(LiveOrderSubmission.id)
+            .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
             .where(
                 LiveOrderSubmission.account_id == claim.account_id,
                 LiveOrderSubmission.status == "UNCERTAIN",
+                LiveOrderIntent.hidden_at.is_(None),
             )
             .limit(1)
         )
@@ -288,9 +350,7 @@ async def _auto_activate_healthy_account(
                     created_at=now,
                 )
             )
-        emergency_lock = (not global_control.entries_enabled) and any(
-            marker in global_control.reason.lower() for marker in ("emergency", "kill")
-        )
+        emergency_lock = control.emergency_disabled or global_control.emergency_disabled
         changed = not control.exits_enabled
         control.exits_enabled = True
         if not emergency_lock:
@@ -459,6 +519,17 @@ async def _publish(
         outcome = "ready" if evidence.complete and not evidence.foreign_product_ids else "blocked"
         latest = await session.scalar(
             select(PrivateReconciliationSnapshot)
+            .options(
+                load_only(
+                    PrivateReconciliationSnapshot.id,
+                    PrivateReconciliationSnapshot.observed_at,
+                    PrivateReconciliationSnapshot.credential_version,
+                    PrivateReconciliationSnapshot.outcome,
+                    PrivateReconciliationSnapshot.content_sha256,
+                    PrivateReconciliationSnapshot.worker_owner_id,
+                    PrivateReconciliationSnapshot.worker_generation,
+                )
+            )
             .where(PrivateReconciliationSnapshot.account_id == claim.account_id)
             .order_by(desc(PrivateReconciliationSnapshot.observed_at))
             .limit(1)
@@ -581,9 +652,6 @@ async def _dispatch_qualification_is_current(
     claim: _Claim,
     execution: LiveExecutionSettings,
 ) -> bool:
-    digest = execution.qualification_sha256
-    if digest is None:
-        return False
     now = datetime.now(UTC)
     async with database.transaction() as session:
         account = await session.get(Account, claim.account_id)
@@ -692,6 +760,153 @@ async def _recover_live_submission(
         await adapter.aclose()
 
 
+async def _publish_private_stream_update(
+    account_id: UUID, update: dict[str, object]
+) -> None:
+    """Wake recovery and push a compact venue-confirmed account delta."""
+    payload = {
+        "accountId": str(account_id),
+        "reason": "private_stream_update",
+        "observedAt": datetime.now(UTC).isoformat(),
+        **update,
+    }
+    await publish_json(ACCOUNT_CHANNEL, payload)
+    if update.get("kind") in {"order", "fill"}:
+        await publish_json(ORDER_CHANNEL, {"accountId": str(account_id)})
+
+
+async def _run_immediate_execution_loop(
+    database: Database,
+    process: PrivateWorkerSettings,
+    execution: LiveExecutionSettings,
+    secrets: AwsDeltaSecretStore,
+    logger: Any,
+    *,
+    stop: asyncio.Event,
+) -> None:
+    """Dispatch durable order commands independently of reconciliation latency."""
+    while not stop.is_set():
+        try:
+            async with database.transaction() as session:
+                pending_accounts = (
+                    select(LiveOrderSubmission.account_id)
+                    .where(
+                        LiveOrderSubmission.status == "PENDING",
+                        LiveOrderSubmission.intent_id.in_(
+                            select(LiveOrderIntent.id).where(LiveOrderIntent.hidden_at.is_(None))
+                        ),
+                    )
+                    .union(
+                        select(LiveOrderSubmission.account_id)
+                        .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
+                        .where(
+                            LiveOrderSubmission.status == "UNCERTAIN",
+                            LiveOrderIntent.hidden_at.is_(None),
+                            LiveOrderSubmission.updated_at
+                            >= datetime.now(UTC) - timedelta(seconds=4),
+                        ),
+                        select(LiveOrderAction.account_id).where(
+                            LiveOrderAction.status == "PENDING"
+                        ),
+                        select(TradingViewSignal.account_id).where(
+                            TradingViewSignal.status == "received"
+                        ),
+                    )
+                )
+                candidate_accounts = set(await session.scalars(pending_accounts))
+            for account_id in candidate_accounts:
+                claim = await _claim(database, process, account_id)
+                if claim is None:
+                    continue
+                tradingview = await admit_one_tradingview_signal(
+                    database,
+                    account_id=claim.account_id,
+                    owner_id=process.owner_id,
+                )
+                if tradingview.kind not in {"IDLE", "DEFERRED"}:
+                    logger.info(
+                        "immediate_tradingview_signal",
+                        account_id=str(account_id),
+                        outcome=tradingview.kind,
+                        signal_id=(
+                            None if tradingview.signal_id is None else str(tradingview.signal_id)
+                        ),
+                    )
+                api_key, api_secret = await secrets.read(claim.secret_arn)
+                try:
+                    action = await _execute_qualified_live_action(
+                        database,
+                        process,
+                        claim,
+                        execution,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                    )
+                    if action.kind not in {"IDLE", "DISABLED"}:
+                        logger.info(
+                            "immediate_live_order_action",
+                            account_id=str(account_id),
+                            outcome=action.kind,
+                        )
+                    result = await _execute_qualified_live_submission(
+                        database,
+                        process,
+                        claim,
+                        execution,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                    )
+                    if result.kind not in {"IDLE", "DISABLED"}:
+                        logger.info(
+                            "immediate_live_submission",
+                            account_id=str(account_id),
+                            outcome=result.kind,
+                        )
+                    recovery = LiveRecoveryResult("IDLE", None)
+                    if result.kind in {"UNCERTAIN", "IDLE", "DISABLED"}:
+                        recovery = await _recover_live_submission(
+                            database,
+                            process,
+                            claim,
+                            api_key=api_key,
+                            api_secret=api_secret,
+                        )
+                        if recovery.kind != "IDLE":
+                            logger.info(
+                                "immediate_live_recovery",
+                                account_id=str(account_id),
+                                outcome=recovery.kind,
+                                submission_id=(
+                                    None
+                                    if recovery.submission_id is None
+                                    else str(recovery.submission_id)
+                                ),
+                            )
+                    if (
+                        action.kind not in {"IDLE", "DISABLED"}
+                        or result.kind not in {"IDLE", "DISABLED"}
+                        or recovery.kind != "IDLE"
+                        or tradingview.kind not in {"IDLE", "DEFERRED"}
+                    ):
+                        await publish_json(
+                            ACCOUNT_CHANNEL,
+                            {"accountId": str(account_id), "reason": "order_state_changed"},
+                        )
+                finally:
+                    api_key = ""
+                    api_secret = ""
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error("immediate_execution_cycle_failed", error_type=type(error).__name__)
+        try:
+            await wait_for_message(ORDER_CHANNEL, 1.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await asyncio.sleep(1.0)
+
+
 async def run_private_worker(
     runtime: ControlRuntimeSettings,
     process: PrivateWorkerSettings,
@@ -709,9 +924,32 @@ async def run_private_worker(
     execution = LiveExecutionSettings()
     logger = get_logger("worker.private")
     stream_tasks: dict[UUID, tuple[int, int, asyncio.Task[None]]] = {}
+    execution_task: asyncio.Task[None] | None = None
+    next_retention_at = 0.0
     logger.info("private_worker_started", owner_id=str(process.owner_id))
     try:
+        if not process.read_only and execution.enabled:
+            execution_task = asyncio.create_task(
+                _run_immediate_execution_loop(
+                    database, process, execution, secrets, logger, stop=stop
+                )
+            )
         while not stop.is_set():
+            if time.monotonic() >= next_retention_at:
+                try:
+                    retention = await prune_operational_history(
+                        database, retention_days=process.operational_retention_days
+                    )
+                    logger.info(
+                        "operational_retention_completed",
+                        lock_acquired=retention.lock_acquired,
+                        stream_evidence=retention.stream_evidence,
+                        reconciliation_snapshots=retention.reconciliation_snapshots,
+                        market_candles=retention.market_candles,
+                    )
+                except Exception as error:
+                    logger.error("operational_retention_failed", error_type=type(error).__name__)
+                next_retention_at = time.monotonic() + 86_400
             try:
                 async with database.transaction() as session:
                     account_ids = tuple(
@@ -728,9 +966,11 @@ async def run_private_worker(
                     claim = await _claim(database, process, account_id)
                     if claim is None:
                         continue
+                    stage = "secret_read"
                     try:
                         api_key, api_secret = await secrets.read(claim.secret_arn)
                         try:
+                            stage = "private_reconciliation"
                             evidence = await read_private_reconciliation(
                                 api_key=api_key,
                                 api_secret=api_secret,
@@ -738,6 +978,20 @@ async def run_private_worker(
                                 allowed_product_ids=claim.product_ids,
                             )
                             if await _publish(database, process, claim, evidence):
+                                try:
+                                    await publish_json(
+                                        ACCOUNT_CHANNEL,
+                                        {
+                                            "accountId": str(claim.account_id),
+                                            "observedAt": datetime.now(UTC).isoformat(),
+                                        },
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "account_update_publish_failed",
+                                        account_id=str(account_id),
+                                    )
+                                stage = "private_stream"
                                 stream = stream_tasks.get(account_id)
                                 identity = (claim.credential_version, claim.generation)
                                 if stream is None or stream[:2] != identity or stream[2].done():
@@ -753,19 +1007,38 @@ async def run_private_worker(
                                             api_key=api_key,
                                             api_secret=api_secret,
                                             stop=stop,
+                                            publish_update=(
+                                                lambda update, account_id=claim.account_id: (
+                                                    _publish_private_stream_update(
+                                                        account_id, update
+                                                    )
+                                                )
+                                            ),
                                         )
                                     )
                                     stream_tasks[account_id] = (*identity, task)
-                                protection_created = await sync_one_protection_group(
-                                    database,
-                                    account_id=claim.account_id,
-                                    owner_id=process.owner_id,
-                                )
+                                stage = "protection_sync"
+                                try:
+                                    protection_created = await sync_one_protection_group(
+                                        database,
+                                        account_id=claim.account_id,
+                                        owner_id=process.owner_id,
+                                    )
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception as error:
+                                    protection_created = False
+                                    logger.error(
+                                        "protection_sync_failed",
+                                        account_id=str(account_id),
+                                        error_type=type(error).__name__,
+                                    )
                                 if protection_created:
                                     logger.info(
                                         "protection_group_armed",
                                         account_id=str(account_id),
                                     )
+                                stage = "reconciliation_published"
                                 logger.info(
                                     "private_reconciliation_published",
                                     account_id=str(account_id),
@@ -785,6 +1058,7 @@ async def run_private_worker(
                                     )
                                 if process.read_only:
                                     continue
+                                stage = "gtt"
                                 gtt_result = await evaluate_one_gtt(
                                     database,
                                     account_id=claim.account_id,
@@ -806,6 +1080,7 @@ async def run_private_worker(
                                             else str(gtt_result.submission_id)
                                         ),
                                     )
+                                stage = "tradingview"
                                 tradingview_result = await admit_one_tradingview_signal(
                                     database,
                                     account_id=claim.account_id,
@@ -828,6 +1103,7 @@ async def run_private_worker(
                                         ),
                                         reason=tradingview_result.reason,
                                     )
+                                stage = "live_order_action"
                                 action_result = await _execute_qualified_live_action(
                                     database,
                                     process,
@@ -847,6 +1123,7 @@ async def run_private_worker(
                                             else str(action_result.action_id)
                                         ),
                                     )
+                                stage = "live_order_recovery"
                                 recovery = await _recover_live_submission(
                                     database,
                                     process,
@@ -865,6 +1142,7 @@ async def run_private_worker(
                                             else str(recovery.submission_id)
                                         ),
                                     )
+                                stage = "live_submission"
                                 result = await _execute_qualified_live_submission(
                                     database,
                                     process,
@@ -889,18 +1167,42 @@ async def run_private_worker(
                             api_secret = ""
                     except asyncio.CancelledError:
                         raise
-                    except Exception:
+                    except Exception as error:
                         await _degrade(database, process, claim)
-                        logger.error("private_account_cycle_failed", account_id=str(account_id))
+                        logger.error(
+                            "private_account_cycle_failed",
+                            account_id=str(account_id),
+                            stage=stage,
+                            error_type=type(error).__name__,
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.error("private_supervision_cycle_failed")
             try:
-                await asyncio.wait_for(stop.wait(), timeout=process.interval_seconds)
-            except TimeoutError:
-                pass
+                wake = asyncio.create_task(
+                    wait_for_message(ORDER_CHANNEL, float(process.interval_seconds))
+                )
+                stopped = asyncio.create_task(stop.wait())
+                done, pending = await asyncio.wait(
+                    {wake, stopped}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    await task
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=process.interval_seconds)
+                except TimeoutError:
+                    pass
     finally:
+        if execution_task is not None:
+            execution_task.cancel()
+            await asyncio.gather(execution_task, return_exceptions=True)
         for _, _, task in stream_tasks.values():
             task.cancel()
         await asyncio.gather(

@@ -128,7 +128,9 @@ async def qualify_live_account(
             if control.credential_state != "verified" or control.reconciliation_state != "ready":
                 raise ValueError("account is not currently reconciled and verified")
             risk_scope = canonical_risk_policy_scope(
-                enabled=risk.enabled,
+                # Owner override changes enforcement, not the approved baseline
+                # values captured by qualification evidence.
+                enabled=True,
                 limit_currency=risk.limit_currency,
                 usd_inr_rate=risk.usd_inr_rate,
                 max_order_notional=risk.max_order_notional,
@@ -152,7 +154,11 @@ async def qualify_live_account(
                 not allowed_ids
                 or {row.product_id for row in allowed_products} != allowed_ids
                 or any(
-                    product.contract_type.value != "perpetual_futures"
+                    product.contract_type.value not in ("perpetual_futures", "futures")
+                    or product.notional_type.value != "vanilla"
+                    or product.is_quanto
+                    or product.quoting_asset.symbol != "USD"
+                    or product.contract_unit_currency != product.underlying_asset.symbol
                     or product.state.value != "live"
                     or product.trading_status.value != "operational"
                     or product.only_reduce_only_orders_allowed

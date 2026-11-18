@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Navigate,
@@ -121,6 +121,8 @@ interface RiskPolicyView {
   maxPositionNotional: string;
   allowedProductIds: number[];
   enabled: boolean;
+  productScopeMode?: "SELECTED" | "ALL_SUPPORTED";
+  autoActivationEnabled?: boolean;
   qualified?: boolean;
   qualificationReason?: string;
   qualificationWindowHours?: number;
@@ -210,6 +212,7 @@ interface HealthAccount {
   workerLeaseActive: boolean;
   riskConfigured: boolean;
   riskEnabled: boolean;
+  riskMode: "MISSING" | "ENFORCED" | "OWNER_OVERRIDE";
   entriesEnabled: boolean;
   exitsEnabled: boolean;
   lastErrorCode: string | null;
@@ -244,6 +247,11 @@ interface LocalOrderIntent {
   intentStatus: string;
   submissionStatus: string;
   exchangeOrderId: number | null;
+  exchangeOrderState: string | null;
+  exchangeSize: number | null;
+  exchangeUnfilledSize: number | null;
+  exchangeFilledSize: number | null;
+  exchangeCancellationReason: string | null;
   errorCode: string | null;
   createdAt: string;
   updatedAt: string;
@@ -322,6 +330,19 @@ interface TradingViewReportRow extends TradingViewSignalRow {
   accountName: string;
 }
 
+interface CryptoContractSettingRow {
+  productId: number;
+  symbol: string;
+  atrMultiplier: string;
+  atrPeriod: number;
+  atrTimeframe: "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d";
+  stopLossMultiplier: string;
+  targetMultiplier: string;
+  lotMultiplier: number;
+  enabled: boolean;
+  source: "default" | "global" | "account";
+}
+
 interface LiveOrderActionRow {
   id: string;
   action: "cancel" | "modify";
@@ -345,7 +366,9 @@ interface PerformanceSummary {
   commission: string;
   liquidationFees: string;
   settlement: string;
+  unrealizedPnl: string;
   totals: Record<string, string>;
+  fills: Record<string, unknown>[];
 }
 
 interface NotificationRow {
@@ -786,6 +809,7 @@ const desktopNavigation = [
   {
     label: "Settings",
     items: [
+      { label: "Crypto Contract Settings", path: "/contract-settings" },
       { label: "Risk Management", path: "/risk" },
       { label: "General Settings", path: "/settings" },
     ],
@@ -804,14 +828,14 @@ function Panel({
   title,
   children,
 }: {
-  readonly title: string;
+  readonly title?: string;
   readonly children: React.ReactNode;
 }) {
   return (
     <section className="data-panel">
-      <div className="data-panel__header">
+      {title ? <div className="data-panel__header">
         <h2>{title}</h2>
-      </div>
+      </div> : null}
       {children}
     </section>
   );
@@ -889,8 +913,19 @@ function CryptoMarketRail({
     });
     const receive = (event: MessageEvent<string>) => {
       try {
-        const value = JSON.parse(event.data) as { products: Product[] };
-        setProducts(value.products);
+        const value = JSON.parse(event.data) as {
+          products?: Product[];
+          quotes?: Array<Partial<Product> & { productId: number }>;
+        };
+        if (value.products) {
+          setProducts(value.products);
+        } else if (value.quotes) {
+          const updates = new Map(value.quotes.map((quote) => [quote.productId, quote]));
+          setProducts((current) => current.map((product) => {
+            const quote = updates.get(product.productId);
+            return quote ? { ...product, ...quote } : product;
+          }));
+        }
       } catch {
         /* A malformed frame is ignored; the stream reconnects automatically. */
       }
@@ -1090,7 +1125,7 @@ function _MarketPage({ csrf }: { readonly csrf: string }) {
     const refresh = () => {
       if (document.visibilityState === "visible") load();
     };
-    const timer = window.setInterval(refresh, 5_000);
+    const timer = window.setInterval(refresh, 30_000);
     document.addEventListener("visibilitychange", refresh);
     return () => {
       window.clearInterval(timer);
@@ -1819,7 +1854,7 @@ function OrderTicketDialog({
       : 0;
   const estimatedMargin =
     estimatedNotional * Number(selectedProduct?.initialMargin ?? "0");
-  const productApproved = selectedProduct !== undefined && selectedPolicies.length > 0 && selectedPolicies.every((policy) => Boolean(policy?.enabled && policy.allowedProductIds.includes(selectedProduct.productId)));
+  const productApproved = selectedProduct !== undefined && selectedPolicies.length > 0 && selectedPolicies.every((policy) => Boolean(policy?.allowedProductIds.includes(selectedProduct.productId)));
   const qualificationFailures = selectedPolicies.filter((policy) => !policy?.qualified);
   const qualificationReady = selectedPolicies.length > 0 && qualificationFailures.length === 0;
   const canTrade =
@@ -1908,6 +1943,9 @@ function AccountStatePage({
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState("");
   const [state, setState] = useState<AccountState | null>(null);
+  const [positionStates, setPositionStates] = useState<Array<{ account: Account; state: AccountState }>>([]);
+  const [positionSearch, setPositionSearch] = useState("");
+  const accountsRef = useRef<Account[]>([]);
   const [orderIntents, setOrderIntents] = useState<LocalOrderIntent[]>([]);
   const [actions, setActions] = useState<LiveOrderActionRow[]>([]);
   const [modifyOrder, setModifyOrder] = useState<Record<
@@ -1920,45 +1958,151 @@ function AccountStatePage({
   const [cancellingIntentId, setCancellingIntentId] = useState<string | null>(null);
   const [showOrderTicket, setShowOrderTicket] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const accountStreamOpen = useRef(false);
+  const streamRefreshTimer = useRef<number | null>(null);
+  const loadAllPositions = useCallback((source: Account[]) => {
+    if (mode !== "positions" || source.length === 0) return;
+    void Promise.allSettled(source.map(async (account) => ({
+      account,
+      state: await request<AccountState>(`/api/v1/accounts/${account.id}/state?view=positions`),
+    }))).then((results) => {
+      const loaded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      if (loaded.length > 0) {
+        setPositionStates(loaded);
+        setError(loaded.length === source.length ? null : "Some accounts are reconnecting. Available positions are shown.");
+      } else {
+        setError("Live position refresh is reconnecting. Last known positions are still shown.");
+      }
+    });
+  }, [mode]);
   const load = useCallback(
     (selected: string) => {
       if (!selected) return;
+      if (mode === "positions" && selected === "all") {
+        loadAllPositions(accountsRef.current);
+        return;
+      }
       setError(null);
-      void request<AccountState>(`/api/v1/accounts/${selected}/state`)
-        .then(setState)
+      void request<AccountState>(`/api/v1/accounts/${selected}/state?view=${mode}`)
+        .then((value) => {
+          setState(value);
+          setError(null);
+        })
         .catch(() => {
-          setState(null);
-          setError("Reconciled account state is unavailable or stale.");
+          setError("Live refresh is reconnecting. Last known account data is still shown.");
         });
       if (mode === "orders") {
         void request<{ actions: LiveOrderActionRow[] }>(
           `/api/v1/trading/actions?account_id=${encodeURIComponent(selected)}`,
-        ).then((value) => setActions(value.actions)).catch(() => setActions([]));
+        ).then((value) => setActions(value.actions)).catch(() => undefined);
         void request<{ intents: LocalOrderIntent[] }>(
           `/api/v1/accounts/${encodeURIComponent(selected)}/order-intents`,
-        ).then((value) => setOrderIntents(value.intents)).catch(() => setOrderIntents([]));
+        ).then((value) => setOrderIntents(value.intents)).catch(() => undefined);
       }
     },
-    [mode],
+    [loadAllPositions, mode],
   );
   useEffect(() => {
-    void request<{ accounts: Account[] }>("/api/v1/accounts").then((value) => {
-      setAccounts(value.accounts);
-      const first = value.accounts[0]?.id ?? "";
-      setAccountId(first);
-      load(first);
-    });
-  }, [load]);
+    void request<{ accounts: Account[] }>("/api/v1/accounts")
+      .then((value) => {
+        setAccounts(value.accounts);
+        accountsRef.current = value.accounts;
+        const first = mode === "positions" ? "all" : value.accounts[0]?.id ?? "";
+        setAccountId(first);
+        if (mode === "positions") loadAllPositions(value.accounts); else load(first);
+      })
+      .catch(() => setError("Accounts could not be loaded. Retrying automatically."));
+  }, [load, loadAllPositions, mode]);
   useEffect(() => {
     if (!accountId) return;
     const refresh = () => {
       if (document.visibilityState === "visible") load(accountId);
     };
-    const timer = window.setInterval(refresh, 15_000);
+    const timer = window.setInterval(() => {
+      if (!accountStreamOpen.current) refresh();
+    }, 15_000);
     document.addEventListener("visibilitychange", refresh);
     return () => {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [accountId, load]);
+  useEffect(() => {
+    if (!accountId) return;
+    const stream = new EventSource("/api/v1/accounts/stream", { withCredentials: true });
+    const ready = () => {
+      accountStreamOpen.current = true;
+    };
+    const disconnected = () => {
+      accountStreamOpen.current = false;
+    };
+    const refresh = (event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as {
+          accountId?: string;
+          kind?: string;
+          action?: string;
+          position?: Record<string, unknown>;
+        };
+        if (payload.kind === "position" && payload.accountId && payload.position) {
+          const productId = Number(payload.position.product_id);
+          const mergePosition = (current: AccountState): AccountState => {
+            const remaining = current.positions.filter(
+              (row) => Number(row.product_id ?? row.productId) !== productId,
+            );
+            const size = Number(payload.position?.size ?? 0);
+            return {
+              ...current,
+              positions:
+                payload.action === "delete" || size === 0
+                  ? remaining
+                  : [...remaining, payload.position as Record<string, unknown>],
+            };
+          };
+          setState((current) =>
+            current && current.accountId === payload.accountId
+              ? mergePosition(current)
+              : current,
+          );
+          setPositionStates((current) =>
+            current.map((item) =>
+              item.account.id === payload.accountId
+                ? { ...item, state: mergePosition(item.state) }
+                : item,
+            ),
+          );
+          if (streamRefreshTimer.current !== null) {
+            window.clearTimeout(streamRefreshTimer.current);
+          }
+          streamRefreshTimer.current = window.setTimeout(() => load(accountId), 1_500);
+          return;
+        }
+        if (payload.kind === "order" || payload.kind === "fill") {
+          if (streamRefreshTimer.current !== null) {
+            window.clearTimeout(streamRefreshTimer.current);
+          }
+          streamRefreshTimer.current = window.setTimeout(() => load(accountId), 250);
+          return;
+        }
+        if (streamRefreshTimer.current !== null) {
+          window.clearTimeout(streamRefreshTimer.current);
+          streamRefreshTimer.current = null;
+        }
+        if (accountId === "all" || payload.accountId === accountId) load(accountId);
+      } catch {
+        /* Ignore malformed notifications; EventSource reconnects automatically. */
+      }
+    };
+    stream.addEventListener("ready", ready);
+    stream.addEventListener("account", refresh as EventListener);
+    stream.addEventListener("error", disconnected);
+    return () => {
+      accountStreamOpen.current = false;
+      if (streamRefreshTimer.current !== null) {
+        window.clearTimeout(streamRefreshTimer.current);
+        streamRefreshTimer.current = null;
+      }
+      stream.close();
     };
   }, [accountId, load]);
   const selected = accounts.find((account) => account.id === accountId);
@@ -2031,7 +2175,49 @@ function AccountStatePage({
       setCancellingIntentId(null);
     }
   }
+  async function hideCancelledIntent(intentId: string) {
+    setError(null);
+    try {
+      await request(
+        `/api/v1/accounts/${encodeURIComponent(accountId)}/order-intents/${encodeURIComponent(intentId)}`,
+        { method: "DELETE" },
+        csrf,
+      );
+      setError("Resolved order removed from this view. Its audit record was retained.");
+      void load(accountId);
+    } catch (requestError) {
+      const code = requestError instanceof RequestError ? requestError.code : "request_failed";
+      setError(`Could not remove cancelled order (${code}).`);
+    }
+  }
+  async function resolveUncertainIntent(intentId: string) {
+    const confirmed = window.confirm(
+      "Delete this uncertain row only after checking Delta order history and positions and confirming it was not executed. Continue?",
+    );
+    if (!confirmed) return;
+    setError(null);
+    try {
+      await request(
+        `/api/v1/accounts/${encodeURIComponent(accountId)}/order-intents/${encodeURIComponent(intentId)}/resolve-uncertain`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            resolution: "not_executed",
+            confirmation: "NOT EXECUTED",
+            delta_checked: true,
+          }),
+        },
+        csrf,
+      );
+      setError("Uncertain order resolved and removed from this view. Its audit record was retained.");
+      void load(accountId);
+    } catch (requestError) {
+      const code = requestError instanceof RequestError ? requestError.code : "request_failed";
+      setError(`Could not resolve uncertain order (${code}). Refresh Delta state and retry.`);
+    }
+  }
   async function exitPositionImmediately(row: Record<string, unknown>) {
+    const targetAccountId = String(row._accountId ?? accountId);
     const productId = Number(row.product_id ?? row.productId);
     const signedSize = Number(row.size ?? row.contracts);
     const contracts = Math.abs(signedSize);
@@ -2049,7 +2235,7 @@ function AccountStatePage({
         {
           method: "POST",
           body: JSON.stringify({
-            account_id: accountId,
+            account_id: targetAccountId,
             product_id: productId,
             side,
             contracts,
@@ -2080,6 +2266,19 @@ function AccountStatePage({
       setExitingPosition(false);
     }
   }
+  const positionRows: Array<Record<string, unknown> & {
+    _accountId: string;
+    _accountName: string;
+    _fresh: boolean;
+  }> = (accountId === "all"
+    ? positionStates.flatMap(({ account, state: accountState }) => accountState.positions.map((row) => ({ ...row, _accountId: account.id, _accountName: account.profileName, _fresh: accountState.fresh })))
+    : (state?.positions ?? []).map((row) => ({ ...row, _accountId: accountId, _accountName: selected?.profileName ?? "—", _fresh: state?.fresh ?? false })))
+    .filter((row) => String(
+      ("product_symbol" in row ? row.product_symbol : undefined)
+      ?? ("product_id" in row ? row.product_id : undefined)
+      ?? "",
+    ).toLowerCase().includes(positionSearch.trim().toLowerCase()));
+  const totalPositionPnl = positionRows.reduce((total, row) => total + Number(row.unrealized_pnl ?? 0), 0);
   return (
     <>
       <Panel
@@ -2098,6 +2297,7 @@ function AccountStatePage({
             }}
             value={accountId}
           >
+            {mode === "positions" ? <option value="all">All Accounts</option> : null}
             {accounts.map((account) => (
               <option key={account.id} value={account.id}>
                 {account.profileName}
@@ -2112,7 +2312,9 @@ function AccountStatePage({
             <RefreshCw size={16} /> Refresh
           </button>
           <span className="self-center text-sm">
-            {state
+            {accountId === "all" && mode === "positions"
+              ? `${positionStates.length}/${accounts.length} accounts refreshed`
+              : state
               ? `${state.fresh ? "Fresh" : "Stale"} · ${state.ageSeconds}s · reconciliation ${state.reconciliationState} · lease ${state.leaseActive ? "active" : "inactive"} · credential v${state.credentialVersion}`
               : "No state"}
           </span>
@@ -2149,16 +2351,22 @@ function AccountStatePage({
                     const acknowledgedOrder = intent.exchangeOrderId == null
                       ? undefined
                       : state?.openOrders.find((order) => Number(order.id ?? order.order_id) === intent.exchangeOrderId);
+                    const deltaOrderLabel = intent.exchangeOrderId == null
+                      ? "Awaiting acknowledgement"
+                      : `#${intent.exchangeOrderId}${intent.exchangeOrderState ? ` · ${intent.exchangeOrderState.toUpperCase()}` : ""}`;
+                    const fillLabel = intent.exchangeFilledSize == null || intent.exchangeSize == null
+                      ? null
+                      : `${intent.exchangeFilledSize}/${intent.exchangeSize} filled`;
                     return <tr key={intent.intentId}>
                     <td><span className="hmt-date-time"><span>{new Date(intent.createdAt).toLocaleDateString()}</span><small>{new Date(intent.createdAt).toLocaleTimeString()}</small></span></td>
                     <td><strong>{intent.symbol}</strong><small>Product {intent.productId}</small></td>
                     <td><span className={`hmt-side-badge ${intent.side.toLowerCase()}`}>{intent.side.toUpperCase()}</span></td>
                     <td>{intent.orderType.toUpperCase()} · {intent.contracts}</td>
                     <td>{displayPrice(intent.price)}</td>
-                    <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus.replaceAll("_", " ")}</span></td>
-                    <td>{intent.exchangeOrderId ?? "Awaiting acknowledgement"}</td>
-                    <td>{intent.errorCode ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : intent.submissionStatus === "UNCERTAIN" ? "Check Delta before retrying" : "Waiting for Delta acknowledgement")}</td>
-                    <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" || intent.submissionStatus === "UNCERTAIN" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
+                    <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus === "UNCERTAIN" ? "CONFIRMING" : intent.submissionStatus.replaceAll("_", " ")}</span></td>
+                    <td>{deltaOrderLabel}</td>
+                    <td>{fillLabel ?? intent.exchangeCancellationReason ?? (intent.submissionStatus === "UNCERTAIN" ? "Confirming with Delta; do not retry" : intent.errorCode) ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : "Waiting for Delta acknowledgement")}</td>
+                    <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : intent.submissionStatus === "UNCERTAIN" && user.role === "admin" ? <button onClick={() => void resolveUncertainIntent(intent.intentId)} type="button">Delete uncertain</button> : ["BLOCKED", "REJECTED", "ACCEPTED"].includes(intent.submissionStatus) && canTrade ? <button onClick={() => void hideCancelledIntent(intent.intentId)} type="button">Delete</button> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
                   </tr>;
                   })}
                   {orderIntents.length === 0 ? <tr><td colSpan={9}>No locally submitted orders.</td></tr> : null}
@@ -2185,23 +2393,27 @@ function AccountStatePage({
             </section>
           </>
         ) : (
-          <section className="hmt-data-section">
-            <header><div><h3>Open positions</h3><p>Reconciled perpetual positions · {state?.fresh ? "Fresh" : "Stale or unavailable"}</p></div></header>
+          <section className="hmt-data-section hmt-positions-workspace">
+            <header><div><h3>Open positions ({positionRows.length})</h3><p>Delta India perpetual positions · live private reconciliation</p></div><strong className={totalPositionPnl < 0 ? "hmt-negative" : "hmt-positive"}>Unrealized P&amp;L&nbsp; {totalPositionPnl >= 0 ? "+" : ""}{totalPositionPnl.toFixed(8)}</strong></header>
+            <div className="hmt-position-filters"><label className="gtt-search"><Search size={18} /><input aria-label="Search positions" onChange={(event) => setPositionSearch(event.target.value)} placeholder="Search instrument" value={positionSearch} /></label><select aria-label="Position account" onChange={(event) => { setAccountId(event.target.value); load(event.target.value); }} value={accountId}><option value="all">All Accounts</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select><button className="hmt-secondary-button" onClick={() => load(accountId)} type="button"><RefreshCw size={16} /> Refresh</button></div>
             <div className="overflow-x-auto"><table className="hmt-trading-table">
-              <thead><tr><th>Contract</th><th>Side</th><th>Contracts</th><th>Entry</th><th>Mark</th><th>Liquidation</th><th>Margin</th><th>Unrealized P&amp;L</th><th>Action</th></tr></thead>
+              <thead><tr><th>Contract</th><th>Account</th><th>Side</th><th>Contracts</th><th>Entry</th><th>Mark</th><th>Liquidation</th><th>Margin</th><th>Unrealized P&amp;L</th><th>Action</th></tr></thead>
               <tbody>
-                {(state?.positions ?? []).map((row, index) => {
+                {positionRows.map((row, index) => {
                   const size = Number(row.size ?? row.contracts ?? 0);
                   const pnl = Number(row.unrealized_pnl ?? 0);
+                  const rowAccount = accounts.find((account) => account.id === row._accountId);
+                  const canExitRow = !readOnlyMode && user.role !== "viewer" && rowAccount?.permission !== "view";
                   return <tr key={`${String(row.product_id ?? index)}-${index}`}>
                     <td><strong>{String(row.product_symbol ?? `Product ${row.product_id ?? "—"}`)}</strong><small>{String(row.margin_mode ?? "Perpetual")}</small></td>
+                    <td><strong>{String(row._accountName)}</strong><small>{row._fresh ? "Live" : "Reconnecting"}</small></td>
                     <td><span className={`hmt-side-badge ${size < 0 ? "sell" : "buy"}`}>{size < 0 ? "SHORT" : "LONG"}</span></td>
                     <td>{Math.abs(size)}</td><td>{String(row.entry_price ?? "—")}</td><td>{String(row.mark_price ?? "—")}</td><td>{String(row.liquidation_price ?? "—")}</td><td>{String(row.margin ?? "—")}</td>
                     <td className={pnl < 0 ? "hmt-negative" : "hmt-positive"}>{String(row.unrealized_pnl ?? "—")}</td>
-                    <td>{canTrade ? <button className="hmt-exit-button" disabled={exitingPosition} onClick={() => void exitPositionImmediately(row)} type="button">{exitingPosition ? "Sending…" : "Exit now"}</button> : "—"}</td>
+                    <td>{canExitRow ? <button className="hmt-exit-button" disabled={exitingPosition} onClick={() => void exitPositionImmediately(row)} type="button">{exitingPosition ? "Sending…" : "Exit now"}</button> : "—"}</td>
                   </tr>;
                 })}
-                {(state?.positions ?? []).length === 0 ? <tr><td colSpan={9}>No open positions.</td></tr> : null}
+                {positionRows.length === 0 ? <tr><td className="hmt-position-empty" colSpan={10}><strong>No open positions</strong><span>Active Delta positions will appear here automatically.</span></td></tr> : null}
               </tbody>
             </table></div>
           </section>
@@ -2403,7 +2615,7 @@ function GttPage({
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible" && accountIds.length > 0) void load(accountIds);
-    }, 5_000);
+    }, 30_000);
     return () => window.clearInterval(timer);
   }, [accountIds, load]);
   async function create(event: FormEvent) {
@@ -2556,11 +2768,11 @@ function GttPage({
       </div>
 
       {showCreate ? <div aria-modal="true" className="hmt-modal-backdrop hmt-order-backdrop" role="dialog"><form className="hmt-order-dialog gtt-create-modal" onSubmit={(event) => void create(event)}>
-        <header className="hmt-order-dialog__header"><div><h2>New HMT GTT</h2><p>Delta Exchange India · one protected exit per selected account</p></div><button aria-label="Close" onClick={() => setShowCreate(false)} type="button"><X size={20} /></button></header>
+        <header className="hmt-order-dialog__header gtt-create-header"><div><small>NEW HMT GTT</small><h2>Select instrument <span>{products.find((item) => item.productId === Number(productId))?.symbol ?? "—"}</span></h2><p className={side === "buy" ? "is-buy" : "is-sell"}>{side === "buy" ? "BUY exit for short position" : "SELL exit for long position"}</p></div><button aria-label="Close" onClick={() => setShowCreate(false)} type="button"><X size={24} /></button></header>
         <div className="gtt-create-body">
           <section className="hmt-order-accounts"><div className="hmt-order-accounts__heading"><strong>Select Accounts ({createAccountIds.length} selected)</strong><div><button className="hmt-text-button" onClick={() => setCreateAccountIds(createableAccounts.map((account) => account.id))} type="button">Select all ready accounts</button><button className="hmt-text-button" onClick={() => setCreateAccountIds([])} type="button">Clear</button></div></div><div className="hmt-order-accounts__grid">{accounts.map((account) => { const eligible = createableAccounts.some((item) => item.id === account.id); return <label className={`hmt-order-account ${createAccountIds.includes(account.id) ? "is-selected" : ""} ${eligible ? "" : "is-disabled"}`} key={account.id} title={eligible ? "" : "Needs manage or trade access, verified credentials, a ready reconciliation and active exits"}><input checked={createAccountIds.includes(account.id)} disabled={!eligible} onChange={(event) => toggleCreateAccount(account.id, event.target.checked)} type="checkbox" /><span><strong>{account.profileName}</strong><small>{eligible ? "Delta India · ready" : "Not ready or no exit permission"}</small></span></label>; })}</div></section>
-          <section className="gtt-form-section"><h3>Instrument</h3><p>Search and select an active perpetual contract.</p><label className="hmt-order-search"><span>Contract</span><div className="hmt-order-search__control"><Search size={17} /><input aria-label="Search perpetual contracts" onChange={(event) => setProductSearch(event.target.value)} placeholder="Search perpetual contracts" value={productSearch} /><select aria-label="Contract" onChange={(event) => setProductId(event.target.value)} value={productId}>{searchedProducts.map((product) => <option key={product.productId} value={product.productId}>{product.symbol}</option>)}</select></div></label>{eligibleProducts.length === 0 ? <p className="gtt-inline-warning">No active perpetual contracts are available.</p> : null}</section>
-          <section className="gtt-form-section"><h3>1. Setup</h3><div className="gtt-create-grid"><label>Exit side<select aria-label="Exit side" onChange={(event) => setSide(event.target.value as "buy" | "sell")} value={side}><option value="sell">Sell to close long</option><option value="buy">Buy to close short</option></select></label><label>Trigger type<select aria-label="Protection type" onChange={(event) => setKind(event.target.value as GttRow["triggerKind"])} value={kind}><option value="stop_loss">Stop loss</option><option value="target">Target</option><option value="trailing_stop">Trailing stop</option></select></label></div></section>
+          <section className="gtt-form-section"><h3>Instrument</h3><p>Search and select the Delta perpetual contract for this trigger.</p><div className="gtt-instrument-fields"><label><span>Search symbol</span><div className="gtt-symbol-search"><Search size={18} /><input aria-label="Search perpetual contracts" onChange={(event) => setProductSearch(event.target.value)} placeholder="Search symbol (e.g. BTCUSD)" value={productSearch} /></div></label><label><span>Contract</span><select aria-label="Contract" onChange={(event) => setProductId(event.target.value)} value={productId}>{searchedProducts.map((product) => <option key={product.productId} value={product.productId}>{product.symbol}</option>)}</select></label></div>{eligibleProducts.length === 0 ? <p className="gtt-inline-warning">No active perpetual contracts are available.</p> : null}</section>
+          <section className="gtt-form-section"><h3>1. Setup</h3><div className="gtt-create-grid"><fieldset><legend>Transaction type</legend><div className="gtt-segmented"><button className={side === "buy" ? "is-active" : ""} onClick={() => setSide("buy")} type="button">BUY exit</button><button className={side === "sell" ? "is-active" : ""} onClick={() => setSide("sell")} type="button">SELL exit</button></div></fieldset><fieldset><legend>Protection type</legend><div className="gtt-segmented gtt-segmented--three"><button className={kind === "stop_loss" ? "is-active" : ""} onClick={() => setKind("stop_loss")} type="button">Stop loss</button><button className={kind === "target" ? "is-active" : ""} onClick={() => setKind("target")} type="button">Target</button><button className={kind === "trailing_stop" ? "is-active" : ""} onClick={() => setKind("trailing_stop")} type="button">Trailing</button></div></fieldset></div></section>
           <section className="gtt-form-section gtt-form-section--order"><h3>2. Order</h3><div className="gtt-create-grid"><label>{kind === "trailing_stop" ? "Trail offset" : "Trigger price"}<input aria-label={kind === "trailing_stop" ? "Trail offset" : "Trigger price"} min="0" onChange={(event) => kind === "trailing_stop" ? setTrail(event.target.value) : setTrigger(event.target.value)} placeholder={kind === "trailing_stop" ? "Trail offset" : "0.00"} required type="number" value={kind === "trailing_stop" ? trail : trigger} /></label><label>Contracts<input aria-label="Contracts" min="1" onChange={(event) => setContracts(event.target.value)} required step="1" type="number" value={contracts} /></label><label>Optional limit price<input aria-label="Limit price" min="0" onChange={(event) => setLimit(event.target.value)} placeholder="Market trigger" type="number" value={limit} /></label></div><p className="gtt-modal-note">This creates a reduce-only exit for each selected account. Crypto GTTs are submitted individually; the result is reported per account.</p></section>
           {notice ? <p className="gtt-page__notice" role="status">{notice}</p> : null}
         </div>
@@ -2633,6 +2845,20 @@ function TradingViewPage({
       load(firstAccount);
     });
   }, [load]);
+  useEffect(() => {
+    if (!accountId) return;
+    const stream = new EventSource("/api/v1/accounts/stream", { withCredentials: true });
+    const refresh = (event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as { accountId?: string };
+        if (payload.accountId === accountId) load(accountId);
+      } catch {
+        /* Ignore malformed notifications; EventSource reconnects automatically. */
+      }
+    };
+    stream.addEventListener("account", refresh as EventListener);
+    return () => stream.close();
+  }, [accountId, load]);
   function resetEditor() {
     setEditingId(null);
     setShowCreate(false);
@@ -2834,20 +3060,17 @@ function TradingViewPage({
               order type.
             </li>
             <li>
-              Copy the one-time URL and JSON message into the TradingView alert.
+              Copy the stable URL and generated JSON message into the TradingView alert.
             </li>
           </ol>
           <div className="tv-endpoint">
-            <strong>Webhook endpoint format</strong>
-            <code>
-              {window.location.origin}
-              /api/v1/webhooks/tradingview/&lt;secret&gt;
-            </code>
+            <strong>Webhook URL</strong>
+            <code>{window.location.origin}/api/v1/webhooks/tradingview</code>
             <button
               aria-label="Copy webhook endpoint format"
               onClick={() =>
                 void navigator.clipboard.writeText(
-                  `${window.location.origin}/api/v1/webhooks/tradingview/<secret>`,
+                  `${window.location.origin}/api/v1/webhooks/tradingview`,
                 )
               }
               type="button"
@@ -2856,8 +3079,8 @@ function TradingViewPage({
             </button>
           </div>
           <p className="tv-guide__note">
-            <strong>Security:</strong> the full secret URL is displayed only
-            when generated or rotated. HMT Crypto stores only its hash.
+            <strong>Security:</strong> the webhook key and JSON template are displayed only
+            when generated or rotated. HMT Crypto stores only the key hash.
           </p>
         </div>
       </section> : (
@@ -3018,15 +3241,29 @@ function TradingViewPage({
       {shownOnceUrl ? (
         <section className="tv-secret">
           <div>
-            <strong>Copy this URL now — it will not be shown again</strong>
-            <code>{shownOnceUrl}</code>
+            <strong>Copy this TradingView JSON now — the key will not be shown again</strong>
+            <code>{JSON.stringify({
+              webhook_key: shownOnceUrl.split("/").at(-1),
+              signal_id: "{{strategy.order.id}}-{{timenow}}",
+              symbol: products.find((row) => row.productId === Number(productId))?.symbol ?? "BTCUSD",
+              side: "{{strategy.order.action}}",
+              timestamp: "{{timenow}}",
+              limit_price: null,
+            })}</code>
           </div>
           <button
-            onClick={() => void navigator.clipboard.writeText(shownOnceUrl)}
+            onClick={() => void navigator.clipboard.writeText(JSON.stringify({
+              webhook_key: shownOnceUrl.split("/").at(-1),
+              signal_id: "{{strategy.order.id}}-{{timenow}}",
+              symbol: products.find((row) => row.productId === Number(productId))?.symbol ?? "BTCUSD",
+              side: "{{strategy.order.action}}",
+              timestamp: "{{timenow}}",
+              limit_price: null,
+            }))}
             type="button"
           >
             <Copy size={17} />
-            Copy URL
+            Copy JSON
           </button>
         </section>
       ) : null}
@@ -3206,6 +3443,9 @@ function RiskPage({
   const [policyLoaded, setPolicyLoaded] = useState(false);
   const [riskLoadError, setRiskLoadError] = useState<string | null>(null);
   const [productIds, setProductIds] = useState<number[]>([]);
+  const [riskEnabled, setRiskEnabled] = useState(true);
+  const [allSupported, setAllSupported] = useState(true);
+  const [autoActivation, setAutoActivation] = useState(false);
   const [productSearch, setProductSearch] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [qualification, setQualification] = useState<{
@@ -3220,7 +3460,7 @@ function RiskPage({
     ]).then(([accountResult, marketResult]) => {
       const eligible = marketResult.products
         .filter((product) =>
-          product.contractType === "perpetual_futures" &&
+          ["perpetual_futures", "futures"].includes(product.contractType) &&
           product.state === "live" &&
           product.tradingStatus === "operational" &&
           !product.onlyReduceOnlyOrdersAllowed
@@ -3249,6 +3489,9 @@ function RiskPage({
         maxInflightSignals: number;
         usdInrRate: string;
         allowedProductIds: number[];
+        enabled: boolean;
+        productScopeMode: "SELECTED" | "ALL_SUPPORTED";
+        autoActivationEnabled: boolean;
       };
     }>(`/api/v1/risk/${accountId}`).then((result) => {
       if (!active) return;
@@ -3265,6 +3508,9 @@ function RiskPage({
       setMaxSignals(String(result.policy.maxInflightSignals));
       setUsdInrRate(result.policy.usdInrRate);
       setProductIds(result.policy.allowedProductIds);
+      setRiskEnabled(result.policy.enabled);
+      setAllSupported(result.policy.productScopeMode === "ALL_SUPPORTED");
+      setAutoActivation(result.policy.autoActivationEnabled);
     }).catch(() => {
       if (active) setRiskLoadError("Could not load the saved policy. Refresh before changing the product scope.");
     }).finally(() => {
@@ -3290,7 +3536,9 @@ function RiskPage({
             max_inflight_signals: Number(maxSignals),
             usd_inr_rate: usdInrRate,
             allowed_product_ids: productIds,
-            enabled: true,
+            product_scope_mode: allSupported ? "ALL_SUPPORTED" : "SELECTED",
+            enabled: riskEnabled,
+            auto_activation_enabled: autoActivation,
           }),
         },
         csrf,
@@ -3348,6 +3596,14 @@ function RiskPage({
             </option>
           ))}
         </select>
+        <label className="flex items-center gap-3 rounded border p-3">
+          <input checked={riskEnabled} onChange={(e) => setRiskEnabled(e.target.checked)} type="checkbox" />
+          <span><strong>Risk {riskEnabled ? "ON" : "OFF"}</strong><br /><small>OFF bypasses owner-configurable limits; exchange validation, reduce-only checks, credentials, health gates, and emergency stop remain enforced.</small></span>
+        </label>
+        <label className="flex items-center gap-3 rounded border p-3">
+          <input checked={autoActivation} onChange={(e) => setAutoActivation(e.target.checked)} type="checkbox" />
+          <span><strong>Automatic healthy activation</strong><br /><small>Reopens healthy gates after recovery unless an emergency stop is latched.</small></span>
+        </label>
         <label>
           Maximum order notional (INR)
           <input
@@ -3409,7 +3665,11 @@ function RiskPage({
           />
         </label>
         <fieldset className="rounded border p-3 md:col-span-2">
-          <legend className="px-1 font-medium">Approved active Delta perpetuals</legend>
+          <legend className="px-1 font-medium">Approved active Delta futures</legend>
+          <label className="mb-3 flex items-center gap-2">
+            <input checked={allSupported} onChange={(e) => setAllSupported(e.target.checked)} type="checkbox" />
+            Automatically include all currently supported linear USD futures and perpetuals
+          </label>
           <p className="mb-3 text-sm text-slate-600">
             Only live, operational contracts that allow new positions can be selected. Contracts that are upcoming, expired, disrupted, or reduce-only are excluded. Changing this allowlist resets the account gates and requires requalification before trading. Select all is an explicit scope expansion and may require a fresh qualification window.
           </p>
@@ -3449,7 +3709,7 @@ function RiskPage({
             <label className="mr-6 inline-flex items-center gap-2" key={product.productId}>
               <input
                 checked={productIds.includes(product.productId)}
-                disabled={!policyLoaded || Boolean(riskLoadError)}
+                disabled={allSupported || !policyLoaded || Boolean(riskLoadError)}
                 onChange={(event) =>
                   setProductIds((current) =>
                     event.target.checked
@@ -3475,7 +3735,7 @@ function RiskPage({
               !policyLoaded ||
               Boolean(riskLoadError) ||
               catalogueProducts.length === 0 ||
-              productIds.length === 0
+              (!allSupported && productIds.length === 0)
             }
             type="submit"
           >
@@ -3491,6 +3751,150 @@ function RiskPage({
         ) : null}
       </form>
     </Panel>
+  );
+}
+
+function ContractSettingsPage({
+  csrf,
+  user,
+}: {
+  readonly csrf: string;
+  readonly user: SessionUser;
+}) {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [scope, setScope] = useState("global");
+  const [rows, setRows] = useState<CryptoContractSettingRow[]>([]);
+  const [dirty, setDirty] = useState<Set<number>>(new Set());
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [bulk, setBulk] = useState({ atrMultiplier: "", atrPeriod: "", atrTimeframe: "1h", stopLossMultiplier: "", targetMultiplier: "", lotMultiplier: "" });
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    const query = scope === "global" ? "" : `?account_id=${encodeURIComponent(scope)}`;
+    void Promise.all([
+      request<{ accounts: Account[] }>("/api/v1/accounts"),
+      request<{ settings: CryptoContractSettingRow[] }>(`/api/v1/contract-settings${query}`),
+    ])
+      .then(([accountResult, settingResult]) => {
+        setAccounts(accountResult.accounts);
+        setRows(settingResult.settings);
+        setDirty(new Set());
+      })
+      .catch(() => setError("Contract settings could not be loaded."))
+      .finally(() => setLoading(false));
+  }, [scope]);
+  useEffect(load, [load]);
+  const visibleRows = rows.filter((row) =>
+    row.symbol.toLowerCase().includes(search.trim().toLowerCase()),
+  );
+  function updateRow(productId: number, change: Partial<CryptoContractSettingRow>) {
+    setRows((current) => current.map((row) => row.productId === productId ? { ...row, ...change } : row));
+    setDirty((current) => new Set(current).add(productId));
+  }
+  function applyBulk() {
+    const ids = new Set(visibleRows.map((row) => row.productId));
+    setRows((current) => current.map((row) => !ids.has(row.productId) ? row : {
+      ...row,
+      ...(bulk.atrMultiplier ? { atrMultiplier: bulk.atrMultiplier } : {}),
+      ...(bulk.atrPeriod ? { atrPeriod: Number(bulk.atrPeriod) } : {}),
+      ...(bulk.atrTimeframe ? { atrTimeframe: bulk.atrTimeframe as CryptoContractSettingRow["atrTimeframe"] } : {}),
+      ...(bulk.stopLossMultiplier ? { stopLossMultiplier: bulk.stopLossMultiplier } : {}),
+      ...(bulk.targetMultiplier ? { targetMultiplier: bulk.targetMultiplier } : {}),
+      ...(bulk.lotMultiplier ? { lotMultiplier: Number(bulk.lotMultiplier) } : {}),
+    }));
+    setDirty((current) => new Set([...current, ...ids]));
+  }
+  function setFilteredEnabled(enabled: boolean) {
+    const ids = new Set(visibleRows.map((row) => row.productId));
+    setRows((current) => current.map((row) => ids.has(row.productId) ? { ...row, enabled } : row));
+    setDirty((current) => new Set([...current, ...ids]));
+  }
+  function exportCsv() {
+    const header = "symbol,atr_multiplier,atr_period,atr_timeframe,sl_multiplier,target_multiplier,lot_multiplier,enabled,source";
+    const lines = visibleRows.map((row) => [row.symbol, row.atrMultiplier, row.atrPeriod, row.atrTimeframe, row.stopLossMultiplier, row.targetMultiplier, row.lotMultiplier, row.enabled, row.source].join(","));
+    const blob = new Blob([[header, ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `crypto-contract-settings-${scope}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+  async function save() {
+    const settings = rows.filter((row) => dirty.has(row.productId)).map((row) => ({
+      product_id: row.productId, symbol: row.symbol, atr_multiplier: row.atrMultiplier,
+      atr_period: row.atrPeriod, atr_timeframe: row.atrTimeframe,
+      stop_loss_multiplier: row.stopLossMultiplier, target_multiplier: row.targetMultiplier,
+      lot_multiplier: row.lotMultiplier, enabled: row.enabled,
+    }));
+    if (settings.length === 0) return;
+    setNotice(null);
+    try {
+      await request("/api/v1/contract-settings", { method: "PUT", body: JSON.stringify({ account_id: scope === "global" ? null : scope, settings }) }, csrf);
+      setNotice(`${settings.length} contract setting(s) saved.`);
+      load();
+    } catch { setNotice("Contract settings could not be saved."); }
+  }
+  return (
+    <div className="hmt-page">
+      <div className="hmt-page-heading">
+        <div>
+          <h1>Crypto Symbol Trading Settings</h1>
+          <p>Configure ATR, protection, and order-size multipliers globally or per Delta account.</p>
+        </div>
+        <div className="flex gap-2"><button className="hmt-secondary-button" onClick={exportCsv} type="button"><Download size={17} /> Export</button><button className="hmt-secondary-button" onClick={load} type="button"><RefreshCw size={17} /> Refresh</button><button className="hmt-primary-button" disabled={dirty.size === 0} onClick={() => void save()} type="button">Save</button></div>
+      </div>
+      <Panel title="Symbol settings">
+        <div className="flex flex-wrap items-center gap-3 border-b p-4">
+          <input
+            className="min-w-64 flex-1 rounded border px-3 py-2"
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search symbols"
+            value={search}
+          />
+          <select className="rounded border px-3 py-2" disabled={user.role !== "admin" && scope === "global"} onChange={(event) => setScope(event.target.value)} value={scope}>
+            {user.role === "admin" ? <option value="global">Global Settings (All Accounts)</option> : null}
+            {accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}
+          </select>
+        </div>
+        <div className="contract-settings-bulk grid gap-2 border-b bg-blue-50 p-4 md:grid-cols-8">
+          <input placeholder="ATR" value={bulk.atrMultiplier} onChange={(e) => setBulk({...bulk, atrMultiplier:e.target.value})}/>
+          <input placeholder="ATR period" type="number" value={bulk.atrPeriod} onChange={(e) => setBulk({...bulk, atrPeriod:e.target.value})}/>
+          <select value={bulk.atrTimeframe} onChange={(e) => setBulk({...bulk, atrTimeframe:e.target.value})}>{["1m","5m","15m","30m","1h","4h","1d"].map((v)=><option key={v}>{v}</option>)}</select>
+          <input placeholder="SL" value={bulk.stopLossMultiplier} onChange={(e) => setBulk({...bulk, stopLossMultiplier:e.target.value})}/>
+          <input placeholder="Target" value={bulk.targetMultiplier} onChange={(e) => setBulk({...bulk, targetMultiplier:e.target.value})}/>
+          <input placeholder="Lot" type="number" value={bulk.lotMultiplier} onChange={(e) => setBulk({...bulk, lotMultiplier:e.target.value})}/>
+          <button className="hmt-secondary-button" onClick={applyBulk} type="button">Apply to filtered</button>
+          <div className="flex gap-1"><button className="hmt-secondary-button" onClick={() => setFilteredEnabled(true)} type="button">Enable</button><button className="hmt-secondary-button" onClick={() => setFilteredEnabled(false)} type="button">Disable</button></div>
+        </div>
+        {error ? <p className="p-4 text-red-700" role="alert">{error}</p> : null}
+        {notice ? <p className="p-4" role="status">{notice}</p> : null}
+        <div className="overflow-x-auto">
+          <table className="contract-settings-table">
+            <thead><tr><th>Symbol</th><th>ATR multiplier</th><th>ATR period</th><th>ATR timeframe</th><th>SL multiplier</th><th>Target multiplier</th><th>Lot multiplier</th><th>Enabled</th></tr></thead>
+            <tbody>
+              {loading ? <tr><td colSpan={8}>Loading contract settings…</td></tr> : null}
+              {!loading && visibleRows.map((row) => (
+                <tr key={row.productId}>
+                  <td><strong>{row.symbol}</strong><small className="block">{row.source}</small></td>
+                  <td><input value={row.atrMultiplier} onChange={(e)=>updateRow(row.productId,{atrMultiplier:e.target.value})}/></td>
+                  <td><input min="1" type="number" value={row.atrPeriod} onChange={(e)=>updateRow(row.productId,{atrPeriod:Number(e.target.value)})}/></td>
+                  <td><select value={row.atrTimeframe} onChange={(e)=>updateRow(row.productId,{atrTimeframe:e.target.value as CryptoContractSettingRow["atrTimeframe"]})}>{["1m","5m","15m","30m","1h","4h","1d"].map((v)=><option key={v}>{v}</option>)}</select></td>
+                  <td><input value={row.stopLossMultiplier} onChange={(e)=>updateRow(row.productId,{stopLossMultiplier:e.target.value})}/></td>
+                  <td><input value={row.targetMultiplier} onChange={(e)=>updateRow(row.productId,{targetMultiplier:e.target.value})}/></td>
+                  <td><input min="1" type="number" value={row.lotMultiplier} onChange={(e)=>updateRow(row.productId,{lotMultiplier:Number(e.target.value)})}/></td>
+                  <td><input checked={row.enabled} onChange={(e)=>updateRow(row.productId,{enabled:e.target.checked})} type="checkbox" /></td>
+                </tr>
+              ))}
+              {!loading && !error && visibleRows.length === 0 ? <tr><td colSpan={8}>No contracts match this search.</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+    </div>
   );
 }
 
@@ -3661,112 +4065,54 @@ function TradingViewLogsPage() {
 
 function PerformancePage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [accountId, setAccountId] = useState("");
-  const [summary, setSummary] = useState<PerformanceSummary | null>(null);
+  const [accountId, setAccountId] = useState("all");
+  const [summaries, setSummaries] = useState<Array<PerformanceSummary & { accountName: string }>>([]);
+  const [symbol, setSymbol] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const load = useCallback((selected: string) => {
-    if (!selected) return;
-    setError(null);
-    void request<PerformanceSummary>(`/api/v1/performance/${selected}`)
-      .then(setSummary)
-      .catch(() => {
-        setSummary(null);
-        setError("Fresh reconciled performance data is unavailable.");
-      });
+  const load = useCallback((source: Account[], selected: string) => {
+    const targets = selected === "all" ? source : source.filter((account) => account.id === selected);
+    if (targets.length === 0) return;
+    void Promise.allSettled(targets.map(async (account) => ({
+      ...await request<PerformanceSummary>(`/api/v1/performance/${account.id}`),
+      accountName: account.profileName,
+    }))).then((results) => {
+      const loaded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      if (loaded.length > 0) setSummaries(loaded);
+      setError(loaded.length === targets.length ? null : "Some accounts are reconnecting. Available report data is shown.");
+    });
   }, []);
   useEffect(() => {
     void request<{ accounts: Account[] }>("/api/v1/accounts").then((value) => {
-      const first = value.accounts[0]?.id ?? "";
       setAccounts(value.accounts);
-      setAccountId(first);
-      load(first);
+      load(value.accounts, "all");
     });
   }, [load]);
-  return (
-    <Panel title="Performance, funding and fees">
-      <div className="flex gap-3 p-4">
-        <select
-          className="rounded border px-3 py-2"
-          onChange={(event) => {
-            setAccountId(event.target.value);
-            load(event.target.value);
-          }}
-          value={accountId}
-        >
-          {accounts.map((account) => (
-            <option key={account.id} value={account.id}>
-              {account.profileName}
-            </option>
-          ))}
-        </select>
-        <button
-          className="rounded border px-3 py-2"
-          onClick={() => load(accountId)}
-          type="button"
-        >
-          Refresh
-        </button>
-      </div>
-      {error ? (
-        <p className="px-4 pb-4" role="alert">
-          {error}
-        </p>
-      ) : null}
-      {summary ? (
-        <>
-          <div className="grid gap-4 p-4 md:grid-cols-5">
-            <div>
-              <small>Wallet net</small>
-              <strong className="block">{summary.netWalletChange}</strong>
-            </div>
-            <div>
-              <small>Funding</small>
-              <strong className="block">{summary.funding}</strong>
-            </div>
-            <div>
-              <small>Commission</small>
-              <strong className="block">{summary.commission}</strong>
-            </div>
-            <div>
-              <small>Liquidation fees</small>
-              <strong className="block">{summary.liquidationFees}</strong>
-            </div>
-            <div>
-              <small>Fills</small>
-              <strong className="block">{summary.fillCount}</strong>
-            </div>
-          </div>
-          <div className="overflow-x-auto">
-            <table>
-              <thead>
-                <tr>
-                  <th>Wallet transaction type</th>
-                  <th>Exact total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(summary.totals).map(([kind, amount]) => (
-                  <tr key={kind}>
-                    <td>{kind}</td>
-                    <td>{amount}</td>
-                  </tr>
-                ))}
-                {Object.keys(summary.totals).length === 0 ? (
-                  <tr>
-                    <td colSpan={2}>
-                      No wallet transactions in the reconciled window.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </>
-      ) : (
-        <p className="p-4">No performance snapshot.</p>
-      )}
-    </Panel>
-  );
+  const allFills: Array<Record<string, unknown> & { accountName: string }> = summaries.flatMap((summary) => summary.fills.map((fill) => ({ ...fill, accountName: summary.accountName })));
+  const fills = allFills.filter((row) => {
+    const created = String(row.created_at ?? "").slice(0, 10);
+    return String(row.product_symbol ?? row.product_id ?? "").toLowerCase().includes(symbol.trim().toLowerCase()) && (!dateFrom || created >= dateFrom) && (!dateTo || created <= dateTo);
+  });
+  const totals = summaries.reduce((value, summary) => ({
+    net: value.net + Number(summary.netWalletChange), funding: value.funding + Number(summary.funding),
+    commission: value.commission + Number(summary.commission), unrealized: value.unrealized + Number(summary.unrealizedPnl),
+    fills: value.fills + summary.fillCount,
+  }), { net: 0, funding: 0, commission: 0, unrealized: 0, fills: 0 });
+  const exportCsv = () => {
+    const rows = fills.map((row) => [row.created_at, row.accountName, row.product_symbol ?? row.product_id, row.side, row.size, row.price, row.commission, row.role, row.order_id].map((value) => JSON.stringify(String(value ?? ""))).join(","));
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([["time,account,contract,side,contracts,price,commission,role,order_id", ...rows].join("\n")], { type: "text/csv" }));
+    link.download = "hmt-crypto-performance.csv";
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+  return <div className="hmt-page performance-page">
+    <div className="hmt-page-heading"><div><h1>Performance Reports</h1><p>Account-level Delta fills, fees, funding and reconciled P&amp;L.</p></div><button className="hmt-secondary-button" onClick={() => load(accounts, accountId)} type="button"><RefreshCw size={17} /> Refresh</button></div>
+    <Panel><div className="performance-filters"><label>Symbol<input onChange={(event) => setSymbol(event.target.value)} placeholder="e.g. BTCUSD" value={symbol} /></label><label>From<input onChange={(event) => setDateFrom(event.target.value)} type="date" value={dateFrom} /></label><label>To<input onChange={(event) => setDateTo(event.target.value)} type="date" value={dateTo} /></label><label>Accounts<select onChange={(event) => { setAccountId(event.target.value); load(accounts, event.target.value); }} value={accountId}><option value="all">All Accounts</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.profileName}</option>)}</select></label><button className="hmt-primary-button" onClick={() => load(accounts, accountId)} type="button">Run report</button></div>{error ? <p className="gtt-page__notice">{error}</p> : null}</Panel>
+    <section className="performance-summary">{[["Net wallet change", totals.net], ["Funding", totals.funding], ["Commission", totals.commission], ["Unrealized P&L", totals.unrealized]].map(([label, value]) => <div key={String(label)}><small>{label}</small><strong className={Number(value) < 0 ? "hmt-negative" : "hmt-positive"}>{Number(value) >= 0 ? "+" : ""}{Number(value).toFixed(8)}</strong></div>)}<div><small>Fills</small><strong>{totals.fills}</strong></div><div><small>Accounts</small><strong>{summaries.length}</strong></div></section>
+    <Panel><div className="performance-table-heading"><div><h3>Account fills</h3><p>{fills.length} report rows</p></div><button className="hmt-secondary-button" onClick={exportCsv} type="button"><Download size={17} /> Export CSV</button></div><div className="overflow-x-auto"><table className="hmt-trading-table"><thead><tr><th>Time</th><th>Account</th><th>Contract</th><th>Direction</th><th>Contracts</th><th>Fill price</th><th>Commission</th><th>Role</th><th>Order ID</th></tr></thead><tbody>{fills.map((row, index) => <tr key={`${String(row.order_id ?? index)}-${index}`}><td>{String(row.created_at ?? "—")}</td><td><strong>{String(row.accountName)}</strong></td><td><strong>{String(row.product_symbol ?? row.product_id ?? "—")}</strong></td><td><span className={`hmt-side-badge ${String(row.side ?? "").toLowerCase()}`}>{String(row.side ?? "—").toUpperCase()}</span></td><td>{String(row.size ?? "—")}</td><td>{String(row.price ?? "—")}</td><td>{String(row.commission ?? "—")}</td><td>{String(row.role ?? "—")}</td><td>{String(row.order_id ?? "—")}</td></tr>)}{fills.length === 0 ? <tr><td colSpan={9}>No fills match these report filters.</td></tr> : null}</tbody></table></div></Panel>
+  </div>;
 }
 
 function NotificationsPage() {
@@ -4378,6 +4724,7 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
     globalReason: string | null;
     accounts: HealthAccount[];
   } | null>(null);
+  const [controlError, setControlError] = useState<string | null>(null);
   const load = useCallback(() => {
     void request<{ events: AuditRow[] }>("/api/v1/admin/audit").then((v) =>
       setEvents(v.events),
@@ -4406,25 +4753,33 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
     load();
   }
   async function accountGate(accountId: string, enabled: boolean) {
-    await request(
-      `/api/v1/admin/accounts/${accountId}/live-control`,
-      {
-        method: "PUT",
-        body: JSON.stringify({
-          entries_enabled: enabled,
-          exits_enabled: enabled,
-          reason: enabled
-            ? "administrator account activation approval"
-            : "administrator emergency account disable",
-        }),
-      },
-      csrf,
-    );
-    load();
+    setControlError(null);
+    try {
+      await request(
+        `/api/v1/admin/accounts/${accountId}/live-control`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            entries_enabled: enabled,
+            exits_enabled: enabled,
+            reason: enabled
+              ? "administrator account activation approval"
+              : "administrator emergency account disable",
+          }),
+        },
+        csrf,
+      );
+      load();
+    } catch (error) {
+      const code = error instanceof RequestError ? error.code : "request_failed";
+      setControlError(`Account control rejected: ${code.replaceAll("_", " ")}.`);
+      load();
+    }
   }
   return (
     <>
       <Panel title="Live platform health">
+        {controlError ? <p className="m-4 text-red-700" role="alert">{controlError}</p> : null}
         <div className="flex items-center gap-3 p-4">
           <strong>
             Global entries:{" "}
@@ -4468,10 +4823,10 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
                     {a.reconciliationAgeSeconds ?? "—"}s
                   </td>
                   <td>
-                    {a.riskEnabled
-                      ? "Enabled"
-                      : a.riskConfigured
-                        ? "Disabled"
+                    {a.riskMode === "ENFORCED"
+                      ? "Enforced"
+                      : a.riskMode === "OWNER_OVERRIDE"
+                        ? "Owner override"
                         : "Missing"}
                   </td>
                   <td>
@@ -4493,7 +4848,7 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
                         disabled={
                           !a.workerLeaseActive ||
                           a.reconciliationState !== "ready" ||
-                          !a.riskEnabled
+                          !a.riskConfigured
                         }
                         onClick={() => void accountGate(a.accountId, true)}
                         type="button"
@@ -4556,9 +4911,14 @@ function DashboardPage({
   }, []);
   useEffect(load, [load]);
   useEffect(() => {
+    const stream = new EventSource("/api/v1/accounts/stream", { withCredentials: true });
+    stream.addEventListener("message", load as EventListener);
+    return () => stream.close();
+  }, [load]);
+  useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") load();
-    }, 15_000);
+    }, 30_000);
     const refreshVisible = () => {
       if (document.visibilityState === "visible") load();
     };
@@ -4827,6 +5187,10 @@ function Shell({
               <Route
                 path="/risk"
                 element={<RiskPage csrf={csrf} user={user} />}
+              />
+              <Route
+                path="/contract-settings"
+                element={<ContractSettingsPage csrf={csrf} user={user} />}
               />
               <Route path="/performance" element={<PerformancePage />} />
               <Route

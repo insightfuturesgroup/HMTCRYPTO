@@ -18,10 +18,11 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
-from sqlalchemy import and_, desc, func, literal, select
+from sqlalchemy import and_, desc, func, literal, or_, select
 from sqlalchemy import delete as sql_delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from hmt_crypto.api.delta_reconciliation import (
     ReconciliationReadError,
@@ -55,6 +56,13 @@ from hmt_crypto.api.platform_auth import (
 )
 from hmt_crypto.api.secret_store import AwsDeltaSecretStore
 from hmt_crypto.api.settings import ControlApiSettings
+from hmt_crypto.fast_path import (
+    ACCOUNT_CHANNEL,
+    MARKET_CHANNEL,
+    ORDER_CHANNEL,
+    publish_json,
+    subscribe_json,
+)
 from hmt_crypto.live_qualification_policy import (
     LIVE_QUALIFICATION_WINDOW_HOURS,
 )
@@ -71,6 +79,7 @@ from hmt_crypto.persistence.models import (
     CatalogueSnapshot,
     CredentialSecretReference,
     CredentialVersion,
+    CryptoContractSetting,
     GttOrder,
     LiveOrderAction,
     LiveOrderIntent,
@@ -93,6 +102,8 @@ from hmt_crypto.persistence.models import (
     WatchlistGroup,
     WatchlistItem,
 )
+
+_MAX_SESSION_TOUCH_INTERVAL_SECONDS = 300
 
 _ACCESS_COOKIE = "__Host-hmt_auth_access"
 _REFRESH_COOKIE = "__Host-hmt_auth_refresh"
@@ -287,8 +298,10 @@ class RiskPolicyBody(_Body):
     max_open_orders: int = Field(ge=1, le=10_000)
     max_inflight_signals: int = Field(default=5, ge=1, le=100)
     usd_inr_rate: str = Field(default="100", min_length=1, max_length=64)
-    allowed_product_ids: list[int] = Field(min_length=1, max_length=500)
+    allowed_product_ids: list[int] = Field(default_factory=list, max_length=500)
+    product_scope_mode: Literal["SELECTED", "ALL_SUPPORTED"] = "SELECTED"
     enabled: bool
+    auto_activation_enabled: bool = False
 
 
 class LiveGateBody(_Body):
@@ -329,6 +342,12 @@ class OrderActionBody(_Body):
     limit_price: str | None = Field(default=None, max_length=64)
 
 
+class ResolveUncertainOrderBody(_Body):
+    resolution: Literal["not_executed"]
+    confirmation: Literal["NOT EXECUTED"]
+    delta_checked: Literal[True]
+
+
 class GeneralSettingsBody(_Body):
     operations_contact_email: str = Field(min_length=3, max_length=320)
     display_timezone: Literal["UTC", "Asia/Kolkata"]
@@ -364,10 +383,29 @@ class TradingViewStrategyStateBody(_Body):
 
 
 class TradingViewSignalBody(_Body):
+    webhook_key: str | None = Field(default=None, min_length=32, max_length=128)
     signal_id: str = Field(min_length=1, max_length=128)
+    symbol: str | None = Field(default=None, min_length=1, max_length=128)
     side: Literal["buy", "sell"]
     timestamp: int | str
     limit_price: str | None = Field(default=None, max_length=64)
+
+
+class CryptoContractSettingItem(_Body):
+    product_id: int = Field(gt=0, lt=2**63)
+    symbol: str = Field(min_length=1, max_length=128)
+    atr_multiplier: str = Field(min_length=1, max_length=32)
+    atr_period: int = Field(gt=0, le=500)
+    atr_timeframe: Literal["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+    stop_loss_multiplier: str = Field(min_length=1, max_length=32)
+    target_multiplier: str = Field(min_length=1, max_length=32)
+    lot_multiplier: int = Field(gt=0, lt=2**31)
+    enabled: bool
+
+
+class CryptoContractSettingsBody(_Body):
+    account_id: JsonUUID | None = None
+    settings: list[CryptoContractSettingItem] = Field(min_length=1, max_length=500)
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,8 +561,17 @@ def install_platform_routes(
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
             if row.password_change_required and not password_change_route:
                 raise HTTPException(status_code=403, detail="password_change_required")
-            platform_session.last_seen_at = now
-            platform_session.expires_at = now + timedelta(seconds=settings.session_absolute_seconds)
+            touch_interval = timedelta(
+                seconds=min(
+                    _MAX_SESSION_TOUCH_INTERVAL_SECONDS,
+                    max(30, settings.session_idle_seconds // 2),
+                )
+            )
+            if platform_session.last_seen_at <= now - touch_interval:
+                platform_session.last_seen_at = now
+                platform_session.expires_at = now + timedelta(
+                    seconds=settings.session_absolute_seconds
+                )
             return Principal(
                 row.id,
                 row.auth_user_id,
@@ -675,8 +722,8 @@ def install_platform_routes(
         risk = await session.scalar(  # type: ignore[attr-defined]
             select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
         )
-        if risk is None or not risk.enabled:
-            return "risk_policy_disabled"
+        if risk is None:
+            return "risk_policy_missing"
         try:
             product_ids = tuple(int(value) for value in json.loads(risk.allowed_product_ids))
         except (TypeError, ValueError):
@@ -1027,8 +1074,17 @@ def install_platform_routes(
                 or platform_session.revoked_at is not None
             ):
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
-            platform_session.last_seen_at = now
-            platform_session.expires_at = now + timedelta(seconds=settings.session_absolute_seconds)
+            touch_interval = timedelta(
+                seconds=min(
+                    _MAX_SESSION_TOUCH_INTERVAL_SECONDS,
+                    max(30, settings.session_idle_seconds // 2),
+                )
+            )
+            if platform_session.last_seen_at <= now - touch_interval:
+                platform_session.last_seen_at = now
+                platform_session.expires_at = now + timedelta(
+                    seconds=settings.session_absolute_seconds
+                )
             actor = Principal(
                 row.id,
                 row.auth_user_id,
@@ -2209,7 +2265,11 @@ def install_platform_routes(
         }
 
     @app.get("/api/v1/accounts/{account_id}/state")
-    async def account_state(account_id: UUID, request: Request) -> dict[str, object]:
+    async def account_state(
+        account_id: UUID,
+        request: Request,
+        view: Literal["full", "orders", "positions"] = "full",
+    ) -> dict[str, object]:
         actor = await principal(request)
         async with database.transaction() as session:
             await account_permission(session, actor, account_id)
@@ -2223,9 +2283,33 @@ def install_platform_routes(
                     select(PrivateWorkerLease).where(PrivateWorkerLease.account_id == account_id)
                 )
             ).scalar_one_or_none()
+            snapshot_columns = [
+                PrivateReconciliationSnapshot.id,
+                PrivateReconciliationSnapshot.observed_at,
+                PrivateReconciliationSnapshot.credential_version,
+                PrivateReconciliationSnapshot.outcome,
+                PrivateReconciliationSnapshot.worker_owner_id,
+                PrivateReconciliationSnapshot.worker_generation,
+            ]
+            if view in ("full", "orders"):
+                snapshot_columns.extend(
+                    (
+                        PrivateReconciliationSnapshot.open_orders_payload,
+                        PrivateReconciliationSnapshot.fills_payload,
+                    )
+                )
+            if view in ("full", "positions"):
+                snapshot_columns.extend(
+                    (
+                        PrivateReconciliationSnapshot.balances_payload,
+                        PrivateReconciliationSnapshot.positions_payload,
+                        PrivateReconciliationSnapshot.wallet_transactions_payload,
+                    )
+                )
             row = (
                 await session.execute(
                     select(PrivateReconciliationSnapshot)
+                    .options(load_only(*snapshot_columns))
                     .where(PrivateReconciliationSnapshot.account_id == account_id)
                     .order_by(desc(PrivateReconciliationSnapshot.observed_at))
                     .limit(1)
@@ -2234,11 +2318,11 @@ def install_platform_routes(
             if (
                 row is None
                 or control is None
-                or row.balances_payload is None
-                or row.positions_payload is None
-                or row.open_orders_payload is None
-                or row.fills_payload is None
-                or row.wallet_transactions_payload is None
+                or (view in ("full", "positions") and row.balances_payload is None)
+                or (view in ("full", "positions") and row.positions_payload is None)
+                or (view in ("full", "orders") and row.open_orders_payload is None)
+                or (view in ("full", "orders") and row.fills_payload is None)
+                or (view in ("full", "positions") and row.wallet_transactions_payload is None)
             ):
                 raise HTTPException(status_code=409, detail="account_state_not_ready")
             reconciled_at = control.reconciled_at
@@ -2261,7 +2345,7 @@ def install_platform_routes(
                 and fence_matches
                 and row.outcome == "ready"
             )
-            return {
+            response: dict[str, object] = {
                 "accountId": str(account_id),
                 "observedAt": _utc(row.observed_at),
                 "reconciledAt": _utc(reconciled_at),
@@ -2272,19 +2356,27 @@ def install_platform_routes(
                 "leaseActive": lease_active,
                 "leaseUntil": None if lease is None else _utc(lease.lease_until),
                 "credentialVersion": row.credential_version,
-                "balances": json.loads(row.balances_payload),
-                "positions": json.loads(row.positions_payload),
-                "openOrders": json.loads(row.open_orders_payload),
-                "fills": json.loads(row.fills_payload),
-                "walletTransactions": json.loads(row.wallet_transactions_payload),
             }
+            if view in ("full", "orders"):
+                response["openOrders"] = json.loads(row.open_orders_payload or "[]")
+                response["fills"] = json.loads(row.fills_payload or "[]")
+            if view in ("full", "positions"):
+                response["balances"] = json.loads(row.balances_payload or "[]")
+                response["positions"] = json.loads(row.positions_payload or "[]")
+                response["walletTransactions"] = json.loads(row.wallet_transactions_payload or "[]")
+            return response
 
     @app.get("/api/v1/performance/{account_id}")
     async def account_performance(account_id: UUID, request: Request) -> dict[str, object]:
         state = await account_state(account_id, request)
         wallet = state["walletTransactions"]
         fills = state["fills"]
-        if not isinstance(wallet, list) or not isinstance(fills, list):
+        positions = state["positions"]
+        if (
+            not isinstance(wallet, list)
+            or not isinstance(fills, list)
+            or not isinstance(positions, list)
+        ):
             raise HTTPException(status_code=409, detail="account_state_not_ready")
         totals: dict[str, Decimal] = {}
         for row in wallet:
@@ -2299,6 +2391,10 @@ def install_platform_routes(
             kind = str(row["transaction_type"])
             totals[kind] = totals.get(kind, Decimal(0)) + amount
         net = sum(totals.values(), Decimal(0))
+        unrealized = sum(
+            (_payload_decimal(row, "unrealized_pnl") for row in positions if isinstance(row, dict)),
+            Decimal(0),
+        )
         return {
             "accountId": str(account_id),
             "observedAt": state["observedAt"],
@@ -2309,7 +2405,9 @@ def install_platform_routes(
             "commission": format(totals.get("commission", Decimal(0)), "f"),
             "liquidationFees": format(totals.get("liquidation_fee", Decimal(0)), "f"),
             "settlement": format(totals.get("settlement", Decimal(0)), "f"),
+            "unrealizedPnl": format(unrealized, "f"),
             "totals": {key: format(value, "f") for key, value in sorted(totals.items())},
+            "fills": fills[:500],
         }
 
     @app.get("/api/v1/dashboard/overview")
@@ -2528,9 +2626,9 @@ def install_platform_routes(
                     account_findings.append(
                         ("critical", "worker_lease", "No active private worker lease")
                     )
-                if risk is None or not risk.enabled:
+                if risk is None:
                     account_findings.append(
-                        ("warning", "risk_policy", "Live risk policy is not enabled")
+                        ("warning", "risk_policy", "Live risk policy is not configured")
                     )
                 if control is not None and control.last_error_code is not None:
                     account_findings.append(
@@ -2855,19 +2953,71 @@ def install_platform_routes(
         await principal(request)
 
         async def events() -> AsyncIterator[str]:
-            previous_token = ""
-            idle_ticks = 0
-            while not await request.is_disconnected():
-                token = await market_change_token()
-                if token != previous_token or idle_ticks >= 15:
-                    previous_token = token
-                    idle_ticks = 0
-                    payload = await market_products_payload()
-                    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            initial = await market_products_payload()
+            encoded = json.dumps(initial, separators=(",", ":"))
+            yield f"event: market\ndata: {encoded}\n\n"
+            try:
+                async for payload in subscribe_json(MARKET_CHANNEL):
+                    if await request.is_disconnected():
+                        return
+                    encoded = json.dumps(payload, separators=(",", ":"))
                     yield f"event: market\ndata: {encoded}\n\n"
-                else:
-                    idle_ticks += 1
-                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                previous_token = ""
+                while not await request.is_disconnected():
+                    token = await market_change_token()
+                    if token != previous_token:
+                        previous_token = token
+                        payload = await market_products_payload()
+                        encoded = json.dumps(payload, separators=(",", ":"))
+                        yield f"event: market\ndata: {encoded}\n\n"
+                    await asyncio.sleep(5)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @app.get("/api/v1/accounts/stream")
+    async def account_stream(request: Request) -> StreamingResponse:
+        """Notify assigned users when a private account projection changes."""
+        actor = await principal(request)
+        async with database.transaction() as session:
+            allowed = set(
+                await session.scalars(
+                    select(AccountAssignment.account_id).where(
+                        AccountAssignment.user_id == actor.profile_id
+                    )
+                )
+            )
+
+        async def events() -> AsyncIterator[str]:
+            yield "event: ready\ndata: {}\n\n"
+            try:
+                async for payload in subscribe_json(ACCOUNT_CHANNEL):
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        account_id = UUID(str(payload.get("accountId", "")))
+                    except ValueError:
+                        continue
+                    if actor.role != "admin" and account_id not in allowed:
+                        continue
+                    encoded = json.dumps(payload, separators=(",", ":"))
+                    yield f"event: account\ndata: {encoded}\n\n"
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                while not await request.is_disconnected():
+                    yield "event: heartbeat\ndata: {}\n\n"
+                    await asyncio.sleep(5)
 
         return StreamingResponse(
             events(),
@@ -3298,7 +3448,6 @@ def install_platform_routes(
                 and control.reconciled_at >= now - timedelta(seconds=60)
                 and gate_open
                 and risk is not None
-                and risk.enabled
                 and body.product_id in allowed
                 and lease is not None
                 and lease.lease_until > now
@@ -3344,7 +3493,7 @@ def install_platform_routes(
                 or not isinstance(wallet, list)
             ):
                 raise HTTPException(status_code=409, detail="account_state_not_ready")
-            if len(open_orders) >= risk.max_open_orders and not body.reduce_only:
+            if risk.enabled and len(open_orders) >= risk.max_open_orders and not body.reduce_only:
                 raise HTTPException(status_code=409, detail="open_order_limit_reached")
             product = product_row.to_product()
             market_price = quote.best_ask if body.side == "buy" else quote.best_bid
@@ -3356,7 +3505,9 @@ def install_platform_routes(
                     limit_price=body.limit_price,
                     market_price=market_price,
                     reduce_only=body.reduce_only,
-                    max_order_notional=risk.max_order_notional,
+                    max_order_notional=(
+                        risk.max_order_notional if risk.enabled else Decimal("1e30")
+                    ),
                 )
             except LiveOrderAdmissionError:
                 raise HTTPException(status_code=400, detail="invalid_order_sizing") from None
@@ -3441,7 +3592,7 @@ def install_platform_routes(
                     contracts=abs(other_size),
                     price=Decimal(other_quote.mark_price),
                 )
-            if aggregate_exposure > risk.max_position_notional:
+            if risk.enabled and aggregate_exposure > risk.max_position_notional:
                 raise HTTPException(status_code=409, detail="position_limit_exceeded")
             daily_net = Decimal(0)
             for item in wallet:
@@ -3464,7 +3615,11 @@ def install_platform_routes(
                         raise HTTPException(
                             status_code=409, detail="account_state_not_ready"
                         ) from None
-            if max(Decimal(0), -daily_net) >= risk.max_daily_loss and not body.reduce_only:
+            if (
+                risk.enabled
+                and max(Decimal(0), -daily_net) >= risk.max_daily_loss
+                and not body.reduce_only
+            ):
                 raise HTTPException(status_code=409, detail="daily_loss_limit_reached")
             evidence_values = {
                 "accountId": str(body.account_id),
@@ -3587,7 +3742,6 @@ def install_platform_routes(
                 or preview.expires_at <= now
                 or control is None
                 or risk is None
-                or not risk.enabled
                 or risk.version != preview.risk_policy_version
                 or control.reconciliation_state != "ready"
                 or control.reconciled_at is None
@@ -3666,7 +3820,14 @@ def install_platform_routes(
                 request_id=str(request_id),
                 details={"previewId": str(preview.id)},
             )
-            return {"intentId": str(intent_id), "status": "ADMITTED", "dispatchable": True}
+        try:
+            await publish_json(
+                ORDER_CHANNEL,
+                {"accountId": str(preview.account_id), "intentId": str(intent_id)},
+            )
+        except Exception:
+            _LOGGER.warning("order_wakeup_publish_failed", account_id=str(preview.account_id))
+        return {"intentId": str(intent_id), "status": "ADMITTED", "dispatchable": True}
 
     @app.get("/api/v1/trading/actions")
     async def list_order_actions(request: Request, account_id: UUID) -> dict[str, object]:
@@ -3712,7 +3873,10 @@ def install_platform_routes(
                     select(LiveOrderIntent, LiveOrderPreview, LiveOrderSubmission)
                     .join(LiveOrderPreview, LiveOrderPreview.id == LiveOrderIntent.preview_id)
                     .join(LiveOrderSubmission, LiveOrderSubmission.intent_id == LiveOrderIntent.id)
-                    .where(LiveOrderIntent.account_id == account_id)
+                    .where(
+                        LiveOrderIntent.account_id == account_id,
+                        LiveOrderIntent.hidden_at.is_(None),
+                    )
                     .order_by(desc(LiveOrderIntent.created_at))
                     .limit(100)
                 )
@@ -3753,6 +3917,16 @@ def install_platform_routes(
                         "intentStatus": intent.status,
                         "submissionStatus": submission.status,
                         "exchangeOrderId": submission.exchange_order_id,
+                        "exchangeOrderState": submission.exchange_order_state,
+                        "exchangeSize": submission.exchange_order_size,
+                        "exchangeUnfilledSize": submission.exchange_unfilled_size,
+                        "exchangeFilledSize": (
+                            None
+                            if submission.exchange_order_size is None
+                            or submission.exchange_unfilled_size is None
+                            else submission.exchange_order_size - submission.exchange_unfilled_size
+                        ),
+                        "exchangeCancellationReason": submission.exchange_cancellation_reason,
                         "errorCode": submission.last_error_code,
                         "createdAt": _utc(intent.created_at),
                         "updatedAt": _utc(submission.updated_at),
@@ -3795,18 +3969,22 @@ def install_platform_routes(
             if submission.status != "PENDING":
                 raise HTTPException(status_code=409, detail="submission_already_claimed")
             account = await session.get(Account, account_id)
-            if (
-                lease is None
-                or lease.lease_until <= now
-                or account is None
-                or account.current_credential_version != lease.credential_version
-            ):
-                raise HTTPException(status_code=409, detail="worker_lease_unavailable")
-
-            fence = SubmissionFence(
-                _database_uuid(lease.owner_id),
-                lease.generation,
-                lease.credential_version,
+            if account is None:
+                raise HTTPException(status_code=404, detail="account_not_found")
+            if account.current_credential_version is None:
+                raise HTTPException(status_code=409, detail="credential_not_configured")
+            fence = (
+                SubmissionFence(
+                    _database_uuid(lease.owner_id),
+                    lease.generation,
+                    lease.credential_version,
+                )
+                if lease is not None
+                else SubmissionFence(
+                    _database_uuid(actor.profile_id),
+                    1,
+                    account.current_credential_version,
+                )
             )
             try:
                 # A PENDING row has no persisted fence; the locked current
@@ -3843,7 +4021,7 @@ def install_platform_routes(
             submission.worker_owner_id = fence.owner_id
             submission.worker_generation = fence.generation
             submission.credential_version = fence.credential_version
-            submission.claim_until = lease.lease_until
+            submission.claim_until = lease.lease_until if lease is not None else now
             submission.last_error_code = "cancelled_before_dispatch"
             submission.resolved_at = now
             submission.updated_at = now
@@ -3878,6 +4056,217 @@ def install_platform_routes(
                 "status": "BLOCKED",
                 "errorCode": "cancelled_before_dispatch",
             }
+
+    @app.post("/api/v1/accounts/{account_id}/order-intents/{intent_id}/resolve-uncertain")
+    async def resolve_uncertain_order_intent(
+        account_id: UUID,
+        intent_id: UUID,
+        body: ResolveUncertainOrderBody,
+        request: Request,
+    ) -> dict[str, object]:
+        require_trading_writes_allowed()
+        actor = await principal(request, mutation=True)
+        request_id = _request_id(request)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            permission = await account_permission(session, actor, account_id)
+            if actor.role != "admin" or permission == "view":
+                raise HTTPException(status_code=403, detail="owner_permission_required")
+            intent = await session.scalar(
+                select(LiveOrderIntent)
+                .where(
+                    LiveOrderIntent.id == intent_id,
+                    LiveOrderIntent.account_id == account_id,
+                )
+                .with_for_update()
+            )
+            submission = (
+                None
+                if intent is None
+                else await session.scalar(
+                    select(LiveOrderSubmission)
+                    .where(LiveOrderSubmission.intent_id == intent_id)
+                    .with_for_update()
+                )
+            )
+            snapshot = await session.scalar(
+                select(PrivateReconciliationSnapshot)
+                .where(PrivateReconciliationSnapshot.account_id == account_id)
+                .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+                .limit(1)
+            )
+            if intent is None or submission is None:
+                raise HTTPException(status_code=404, detail="order_intent_not_found")
+            if submission.status != "UNCERTAIN":
+                raise HTTPException(status_code=409, detail="submission_not_uncertain")
+            if (
+                snapshot is None
+                or snapshot.outcome != "ready"
+                or snapshot.observed_at < now - timedelta(seconds=60)
+            ):
+                raise HTTPException(status_code=409, detail="fresh_reconciliation_required")
+            try:
+                open_orders = json.loads(snapshot.open_orders_payload or "[]")
+                fills = json.loads(snapshot.fills_payload or "[]")
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=409, detail="account_state_not_ready") from None
+            if not isinstance(open_orders, list) or not isinstance(fills, list):
+                raise HTTPException(status_code=409, detail="account_state_not_ready")
+            exchange_id = submission.exchange_order_id
+            positive_order = any(
+                isinstance(row, dict)
+                and (
+                    row.get("client_order_id") == submission.client_order_id
+                    or (exchange_id is not None and row.get("id") == exchange_id)
+                )
+                for row in open_orders
+            )
+            positive_fill = any(
+                isinstance(row, dict)
+                and exchange_id is not None
+                and row.get("order_id") == exchange_id
+                for row in fills
+            )
+            if positive_order or positive_fill:
+                raise HTTPException(status_code=409, detail="delta_execution_evidence_present")
+            if (
+                submission.worker_owner_id is None
+                or submission.worker_generation is None
+                or submission.credential_version is None
+            ):
+                # A pre-claim/legacy uncertain row has no worker fence to use
+                # for a state transition. The owner's explicit Delta check may
+                # still hide it; the immutable submission and audit are kept.
+                intent.hidden_at = now
+                intent.hidden_by_user_id = actor.profile_id
+                await append_audit(
+                    session,
+                    actor=actor,
+                    action="LIVE_ORDER_UNCERTAIN_HIDDEN",
+                    target_type="live_order_intent",
+                    target_id=str(intent_id),
+                    outcome="SUCCEEDED",
+                    request_id=request_id,
+                    details={
+                        "accountId": str(account_id),
+                        "resolution": body.resolution,
+                        "deltaChecked": body.delta_checked,
+                        "snapshotId": str(snapshot.id),
+                        "reason": "submission_fence_missing",
+                    },
+                )
+                return {"intentId": str(intent_id), "status": "UNCERTAIN", "hidden": True}
+            fence = SubmissionFence(
+                _database_uuid(submission.worker_owner_id),
+                submission.worker_generation,
+                submission.credential_version,
+            )
+            require_transition(
+                current="UNCERTAIN",
+                target="BLOCKED",
+                stored_fence=fence,
+                actor_fence=fence,
+            )
+            sequence = (
+                int(
+                    await session.scalar(
+                        select(func.coalesce(func.max(LiveOrderSubmissionEvent.sequence), 0)).where(
+                            LiveOrderSubmissionEvent.submission_id == submission.id
+                        )
+                    )
+                    or 0
+                )
+                + 1
+            )
+            digest = submission_event_sha256(
+                submission_id=_database_uuid(submission.id),
+                sequence=sequence,
+                from_status="UNCERTAIN",
+                to_status="BLOCKED",
+                fence=fence,
+                occurred_at=now,
+            )
+            submission.status = "BLOCKED"
+            submission.last_error_code = "owner_resolved_not_executed"
+            submission.resolved_at = now
+            submission.updated_at = now
+            intent.hidden_at = now
+            intent.hidden_by_user_id = actor.profile_id
+            session.add(
+                LiveOrderSubmissionEvent(
+                    id=uuid4(),
+                    submission_id=submission.id,
+                    account_id=account_id,
+                    sequence=sequence,
+                    from_status="UNCERTAIN",
+                    to_status="BLOCKED",
+                    worker_owner_id=fence.owner_id,
+                    worker_generation=fence.generation,
+                    credential_version=fence.credential_version,
+                    evidence_sha256=digest,
+                    occurred_at=now,
+                )
+            )
+            await append_audit(
+                session,
+                actor=actor,
+                action="LIVE_ORDER_UNCERTAIN_RESOLVED",
+                target_type="live_order_intent",
+                target_id=str(intent_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={
+                    "accountId": str(account_id),
+                    "resolution": body.resolution,
+                    "deltaChecked": body.delta_checked,
+                    "snapshotId": str(snapshot.id),
+                },
+            )
+        return {"intentId": str(intent_id), "status": "BLOCKED", "hidden": True}
+
+    @app.delete("/api/v1/accounts/{account_id}/order-intents/{intent_id}")
+    async def hide_cancelled_order_intent(
+        account_id: UUID, intent_id: UUID, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        request_id = _request_id(request)
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            permission = await account_permission(session, actor, account_id)
+            if actor.role == "viewer" or permission == "view":
+                raise HTTPException(status_code=403, detail="trading_permission_required")
+            intent = await session.scalar(
+                select(LiveOrderIntent)
+                .where(
+                    LiveOrderIntent.id == intent_id,
+                    LiveOrderIntent.account_id == account_id,
+                )
+                .with_for_update()
+            )
+            submission = (
+                None
+                if intent is None
+                else await session.scalar(
+                    select(LiveOrderSubmission).where(LiveOrderSubmission.intent_id == intent_id)
+                )
+            )
+            if intent is None or submission is None:
+                raise HTTPException(status_code=404, detail="order_intent_not_found")
+            if submission.status not in {"BLOCKED", "REJECTED", "ACCEPTED"}:
+                raise HTTPException(status_code=409, detail="order_intent_not_hideable")
+            intent.hidden_at = now
+            intent.hidden_by_user_id = actor.profile_id
+            await append_audit(
+                session,
+                actor=actor,
+                action="LIVE_ORDER_HIDDEN",
+                target_type="live_order_intent",
+                target_id=str(intent_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={"accountId": str(account_id)},
+            )
+        return {"intentId": str(intent_id), "hidden": True}
 
     @app.post("/api/v1/trading/actions")
     async def create_order_action(body: OrderActionBody, request: Request) -> dict[str, object]:
@@ -4104,7 +4493,9 @@ def install_platform_routes(
                     "maxPositionLimitInr": str(row.max_position_limit_inr),
                     "maxDailyLossLimitInr": str(row.max_daily_loss_limit_inr),
                     "allowedProductIds": json.loads(row.allowed_product_ids),
+                    "productScopeMode": row.product_scope_mode,
                     "enabled": row.enabled,
+                    "autoActivationEnabled": row.auto_activation_enabled,
                     "updatedAt": _utc(row.updated_at),
                 },
             }
@@ -4120,8 +4511,10 @@ def install_platform_routes(
         ):
             raise HTTPException(status_code=403, detail="fresh_authentication_required")
         product_ids = tuple(sorted(set(body.allowed_product_ids)))
-        if len(product_ids) != len(body.allowed_product_ids) or any(
-            value <= 0 for value in product_ids
+        if (
+            (body.product_scope_mode == "SELECTED" and not product_ids)
+            or len(product_ids) != len(body.allowed_product_ids)
+            or any(value <= 0 for value in product_ids)
         ):
             raise HTTPException(status_code=400, detail="invalid_product_scope")
         inr_limits = (
@@ -4155,6 +4548,29 @@ def install_platform_routes(
             )
             if catalogue is None:
                 raise HTTPException(status_code=409, detail="catalogue_not_ready")
+            if body.product_scope_mode == "ALL_SUPPORTED":
+                catalogue_rows = list(
+                    await session.scalars(
+                        select(CatalogueProduct).where(CatalogueProduct.snapshot_id == catalogue.id)
+                    )
+                )
+                product_ids = tuple(
+                    sorted(
+                        row.product_id
+                        for row in catalogue_rows
+                        if row.to_product().contract_type.value in ("perpetual_futures", "futures")
+                        and row.to_product().notional_type.value == "vanilla"
+                        and not row.to_product().is_quanto
+                        and row.to_product().quoting_asset.symbol == "USD"
+                        and row.to_product().contract_unit_currency
+                        == row.to_product().underlying_asset.symbol
+                        and row.to_product().state.value == "live"
+                        and row.to_product().trading_status.value == "operational"
+                        and not row.to_product().only_reduce_only_orders_allowed
+                    )
+                )
+                if not product_ids:
+                    raise HTTPException(status_code=409, detail="no_supported_futures")
             selected_products = list(
                 await session.scalars(
                     select(CatalogueProduct).where(
@@ -4167,7 +4583,11 @@ def install_platform_routes(
                 raise HTTPException(status_code=400, detail="invalid_product_scope")
             products = [row.to_product() for row in selected_products]
             if any(
-                product.contract_type.value != "perpetual_futures"
+                product.contract_type.value not in ("perpetual_futures", "futures")
+                or product.notional_type.value != "vanilla"
+                or product.is_quanto
+                or product.quoting_asset.symbol != "USD"
+                or product.contract_unit_currency != product.underlying_asset.symbol
                 or product.state.value != "live"
                 or product.trading_status.value != "operational"
                 or product.only_reduce_only_orders_allowed
@@ -4195,7 +4615,9 @@ def install_platform_routes(
                     max_position_limit_inr=inr_limits[1],
                     max_daily_loss_limit_inr=inr_limits[2],
                     allowed_product_ids=json.dumps(product_ids),
+                    product_scope_mode=body.product_scope_mode,
                     enabled=body.enabled,
+                    auto_activation_enabled=body.auto_activation_enabled,
                     updated_by_user_id=actor.profile_id,
                     version=1,
                     created_at=now,
@@ -4216,7 +4638,9 @@ def install_platform_routes(
                     or row.max_position_limit_inr != inr_limits[1]
                     or row.max_daily_loss_limit_inr != inr_limits[2]
                     or current_product_ids != product_ids
+                    or row.product_scope_mode != body.product_scope_mode
                     or row.enabled != body.enabled
+                    or row.auto_activation_enabled != body.auto_activation_enabled
                 )
                 row.max_order_notional, row.max_position_notional, row.max_daily_loss = limits
                 row.max_open_orders = body.max_open_orders
@@ -4229,7 +4653,9 @@ def install_platform_routes(
                     row.max_daily_loss_limit_inr,
                 ) = inr_limits
                 row.allowed_product_ids = json.dumps(product_ids)
+                row.product_scope_mode = body.product_scope_mode
                 row.enabled = body.enabled
+                row.auto_activation_enabled = body.auto_activation_enabled
                 row.updated_by_user_id = actor.profile_id
                 row.updated_at = now
                 if policy_changed:
@@ -4244,6 +4670,9 @@ def install_platform_routes(
                 request_id=request_id,
                 details={
                     "enabled": body.enabled,
+                    "mode": "ENFORCED" if body.enabled else "OWNER_OVERRIDE",
+                    "productScopeMode": body.product_scope_mode,
+                    "autoActivationEnabled": body.auto_activation_enabled,
                     "productCount": len(product_ids),
                     "policyVersion": row.version,
                     "qualificationReset": False,
@@ -4254,6 +4683,9 @@ def install_platform_routes(
             "accountId": str(account_id),
             "configured": True,
             "enabled": body.enabled,
+            "mode": "ENFORCED" if body.enabled else "OWNER_OVERRIDE",
+            "productScopeMode": body.product_scope_mode,
+            "autoActivationEnabled": body.auto_activation_enabled,
             "policyVersion": row.version,
             "qualificationReset": False,
         }
@@ -4276,6 +4708,7 @@ def install_platform_routes(
             if row is None:
                 raise HTTPException(status_code=503, detail="live_control_unavailable")
             row.entries_enabled = body.entries_enabled
+            row.emergency_disabled = not body.entries_enabled
             row.reason = body.reason
             row.updated_by_user_id = actor.profile_id
             row.updated_at = now
@@ -4285,6 +4718,7 @@ def install_platform_routes(
                 ).scalars()
                 for control in controls:
                     control.entries_enabled = False
+                    control.emergency_disabled = True
                     control.updated_at = now
             await append_audit(
                 session,
@@ -4331,6 +4765,7 @@ def install_platform_routes(
                     raise HTTPException(status_code=409, detail=failure)
             control.entries_enabled = body.entries_enabled
             control.exits_enabled = body.exits_enabled
+            control.emergency_disabled = not body.entries_enabled
             control.updated_at = now
             await append_audit(
                 session,
@@ -4447,6 +4882,13 @@ def install_platform_routes(
                         "workerGeneration": None if lease is None else lease.generation,
                         "riskConfigured": risk is not None,
                         "riskEnabled": bool(risk and risk.enabled),
+                        "riskMode": (
+                            "MISSING"
+                            if risk is None
+                            else "ENFORCED"
+                            if risk.enabled
+                            else "OWNER_OVERRIDE"
+                        ),
                         "entriesEnabled": control.entries_enabled,
                         "exitsEnabled": control.exits_enabled,
                         "lastErrorCode": control.last_error_code,
@@ -4628,6 +5070,178 @@ def install_platform_routes(
                     for row in rows
                 ]
             }
+
+    @app.get("/api/v1/contract-settings")
+    async def list_contract_settings(
+        request: Request, account_id: UUID | None = None
+    ) -> dict[str, object]:
+        actor = await principal(request)
+        async with database.transaction() as session:
+            if account_id is not None:
+                await account_permission(session, actor, account_id)
+            elif actor.role != "admin":
+                raise HTTPException(status_code=403, detail="permission_denied")
+            snapshot = await session.scalar(
+                select(CatalogueSnapshot)
+                .where(
+                    CatalogueSnapshot.region == "india",
+                    CatalogueSnapshot.environment == "prod",
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            products = (
+                []
+                if snapshot is None
+                else list(
+                    (
+                        await session.execute(
+                            select(CatalogueProduct)
+                            .where(CatalogueProduct.snapshot_id == snapshot.id)
+                            .order_by(CatalogueProduct.symbol)
+                        )
+                    ).scalars()
+                )
+            )
+            setting_scope = (
+                or_(
+                    CryptoContractSetting.account_id.is_(None),
+                    CryptoContractSetting.account_id == account_id,
+                )
+                if account_id is not None
+                else CryptoContractSetting.account_id.is_(None)
+            )
+            saved = list(
+                (
+                    await session.execute(select(CryptoContractSetting).where(setting_scope))
+                ).scalars()
+            )
+            global_rows = {row.product_id: row for row in saved if row.account_id is None}
+            account_rows = {row.product_id: row for row in saved if row.account_id is not None}
+            rows: list[dict[str, object]] = []
+            for product in products:
+                row = account_rows.get(product.product_id) or global_rows.get(product.product_id)
+                rows.append(
+                    {
+                        "productId": product.product_id,
+                        "symbol": product.symbol,
+                        "atrMultiplier": str(row.atr_multiplier if row else Decimal("1.5")),
+                        "atrPeriod": row.atr_period if row else 14,
+                        "atrTimeframe": row.atr_timeframe if row else "1h",
+                        "stopLossMultiplier": str(
+                            row.stop_loss_multiplier if row else Decimal("1.2")
+                        ),
+                        "targetMultiplier": str(row.target_multiplier if row else Decimal("1.25")),
+                        "lotMultiplier": row.lot_multiplier if row else 1,
+                        "enabled": row.enabled if row else True,
+                        "source": "account"
+                        if product.product_id in account_rows
+                        else "global"
+                        if product.product_id in global_rows
+                        else "default",
+                    }
+                )
+            return {"settings": rows}
+
+    @app.put("/api/v1/contract-settings")
+    async def save_contract_settings(
+        body: CryptoContractSettingsBody, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        request_id = _request_id(request)
+        if body.account_id is None and actor.role != "admin":
+            raise HTTPException(status_code=403, detail="permission_denied")
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            if body.account_id is not None:
+                permission = await account_permission(session, actor, body.account_id)
+                if actor.role != "admin" and permission != "manage":
+                    raise HTTPException(status_code=403, detail="permission_denied")
+            product_ids = {item.product_id for item in body.settings}
+            snapshot_id = await session.scalar(
+                select(CatalogueSnapshot.id)
+                .where(
+                    CatalogueSnapshot.region == "india",
+                    CatalogueSnapshot.environment == "prod",
+                )
+                .order_by(desc(CatalogueSnapshot.validated_at))
+                .limit(1)
+            )
+            if snapshot_id is None:
+                raise HTTPException(status_code=503, detail="catalogue_unavailable")
+            catalogue_product_rows = (
+                await session.execute(
+                    select(CatalogueProduct.product_id, CatalogueProduct.symbol).where(
+                        CatalogueProduct.snapshot_id == snapshot_id,
+                        CatalogueProduct.product_id.in_(product_ids),
+                    )
+                )
+            ).all()
+            catalogue_products: dict[int, str] = {
+                product_id: symbol for product_id, symbol in catalogue_product_rows
+            }
+            if set(catalogue_products) != product_ids:
+                raise HTTPException(status_code=400, detail="unknown_contract_setting")
+            changed = 0
+            for item in body.settings:
+                values = [item.atr_multiplier, item.stop_loss_multiplier, item.target_multiplier]
+                try:
+                    atr, stop, target = (Decimal(value) for value in values)
+                except InvalidOperation:
+                    raise HTTPException(
+                        status_code=400, detail="invalid_contract_setting"
+                    ) from None
+                if any(not value.is_finite() or value <= 0 for value in (atr, stop, target)):
+                    raise HTTPException(status_code=400, detail="invalid_contract_setting")
+                row = await session.scalar(
+                    select(CryptoContractSetting).where(
+                        CryptoContractSetting.account_id.is_(None)
+                        if body.account_id is None
+                        else CryptoContractSetting.account_id == body.account_id,
+                        CryptoContractSetting.product_id == item.product_id,
+                    )
+                )
+                if row is None:
+                    row = CryptoContractSetting(
+                        id=uuid4(),
+                        account_id=body.account_id,
+                        product_id=item.product_id,
+                        symbol=catalogue_products[item.product_id],
+                        atr_multiplier=atr,
+                        atr_period=item.atr_period,
+                        atr_timeframe=item.atr_timeframe,
+                        stop_loss_multiplier=stop,
+                        target_multiplier=target,
+                        lot_multiplier=item.lot_multiplier,
+                        enabled=item.enabled,
+                        updated_by_user_id=actor.profile_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(row)
+                else:
+                    row.symbol = catalogue_products[item.product_id]
+                    row.atr_multiplier = atr
+                    row.atr_period = item.atr_period
+                    row.atr_timeframe = item.atr_timeframe
+                    row.stop_loss_multiplier = stop
+                    row.target_multiplier = target
+                    row.lot_multiplier = item.lot_multiplier
+                    row.enabled = item.enabled
+                    row.updated_by_user_id = actor.profile_id
+                    row.updated_at = now
+                changed += 1
+            await append_audit(
+                session,
+                actor=actor,
+                action="CRYPTO_CONTRACT_SETTINGS_UPDATED",
+                target_type="account" if body.account_id is not None else "platform",
+                target_id=str(body.account_id) if body.account_id is not None else "global",
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={"settingCount": changed},
+            )
+        return {"updated": changed}
 
     @app.get("/api/v1/strategies/signals")
     async def list_strategy_signals(request: Request, account_id: UUID) -> dict[str, object]:
@@ -4939,6 +5553,7 @@ def install_platform_routes(
                     "limitPrice": body.limit_price,
                     "side": body.side,
                     "signalId": body.signal_id,
+                    "symbol": body.symbol,
                     "timestamp": body.timestamp,
                 },
                 ensure_ascii=True,
@@ -4946,6 +5561,7 @@ def install_platform_routes(
                 sort_keys=True,
             ).encode("ascii")
         ).hexdigest()
+        account_id: UUID | None = None
         async with database.transaction() as session:
             webhook_key = await session.scalar(
                 select(TradingViewWebhookKey).where(
@@ -4960,6 +5576,9 @@ def install_platform_routes(
             )
             if strategy is None or not strategy.enabled:
                 raise HTTPException(status_code=404, detail="webhook_not_found")
+            account_id = strategy.account_id
+            if body.symbol is not None and body.symbol != strategy.symbol:
+                raise HTTPException(status_code=409, detail="strategy_symbol_mismatch")
             if not strategy.protection_required:
                 raise HTTPException(status_code=409, detail="protection_required")
             qualified, reason, _, _ = await qualification_status(
@@ -4978,7 +5597,7 @@ def install_platform_routes(
                     TradingViewSignal.status.in_(("received", "admitted")),
                 )
             )
-            if risk is None or int(inflight or 0) >= risk.max_inflight_signals:
+            if risk is None or (risk.enabled and int(inflight or 0) >= risk.max_inflight_signals):
                 raise HTTPException(status_code=409, detail="signal_concurrency_exceeded")
             if (strategy.order_type == "limit") != (body.limit_price is not None):
                 raise HTTPException(status_code=409, detail="strategy_signal_incompatible")
@@ -5009,7 +5628,26 @@ def install_platform_routes(
                     processed_at=None,
                 )
             )
+        if account_id is not None:
+            try:
+                await publish_json(
+                    ORDER_CHANNEL,
+                    {"accountId": str(account_id), "reason": "tradingview_signal_received"},
+                )
+                await publish_json(
+                    ACCOUNT_CHANNEL,
+                    {"accountId": str(account_id), "reason": "tradingview_signal_received"},
+                )
+            except Exception:
+                _LOGGER.warning("tradingview_wakeup_publish_failed", account_id=str(account_id))
         return JSONResponse(status_code=202, content={"status": "received"})
+
+    @app.post("/api/v1/webhooks/tradingview")
+    async def stable_tradingview_webhook(body: TradingViewSignalBody) -> JSONResponse:
+        """Accept the preferred stable TradingView URL with the key in JSON."""
+        if body.webhook_key is None:
+            raise HTTPException(status_code=404, detail="webhook_not_found")
+        return await tradingview_webhook(body.webhook_key, body)
 
     @app.post("/api/v1/gtt")
     async def create_gtt(body: GttBody, request: Request) -> dict[str, object]:

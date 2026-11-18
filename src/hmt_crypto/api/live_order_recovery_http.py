@@ -73,7 +73,16 @@ class DeltaIndiaLiveOrderRecoveryAdapter:
                 expected_user_id=expected_user_id,
                 expected_client_order_id=client_order_id,
             )
-            return RecoveryObservation("FOUND", order.id)
+            if order.state.known is None:
+                raise ValueError
+            return RecoveryObservation(
+                "FOUND",
+                order.id,
+                order.state.known.value,
+                order.size,
+                order.unfilled_size,
+                order.cancellation_reason,
+            )
         except Exception:
             raise LiveOrderRecoveryUnavailable from None
 

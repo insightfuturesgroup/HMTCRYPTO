@@ -14,7 +14,8 @@ export const queryClient = new QueryClient({
 
 export function queryStaleTime(path: string): number {
   if (path.startsWith("/api/v1/market/products")) return 2_000;
-  if (path.startsWith("/api/v1/accounts/") && path.endsWith("/state")) return 1_000;
+  if (path.startsWith("/api/v1/accounts/") && path.includes("/state")) return 0;
+  if (path.includes("/order-intents") || path.startsWith("/api/v1/trading/actions")) return 0;
   if (path.startsWith("/api/v1/accounts")) return 15_000;
   if (path.startsWith("/api/v1/admin/") || path === "/api/v1/settings") return 30_000;
   return 5_000;

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from hmt_crypto.api.live_order_recovery import RecoveryObservation
 from hmt_crypto.api.live_order_transport import (
@@ -34,6 +37,28 @@ from hmt_crypto.persistence.models import (
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
 )
+from hmt_crypto.worker.scope import normalize_worker_uuid
+
+
+def _database_uuid(value: object) -> UUID:
+    return normalize_worker_uuid(value, message="invalid database Live submission UUID")
+
+
+def _database_fence(owner_id: object, generation: int, credential_version: int) -> SubmissionFence:
+    return SubmissionFence(
+        _database_uuid(owner_id),
+        generation,
+        credential_version,
+    )
+
+
+async def _next_submission_sequence(session: AsyncSession, submission_id: UUID) -> int:
+    current = await session.scalar(
+        select(func.max(LiveOrderSubmissionEvent.sequence)).where(
+            LiveOrderSubmissionEvent.submission_id == submission_id
+        )
+    )
+    return 1 if current is None else int(current) + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,9 +87,11 @@ async def has_live_submission_recovery_debt(database: Database, *, account_id: U
     async with database.transaction() as session:
         submission_id = await session.scalar(
             select(LiveOrderSubmission.id)
+            .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
             .where(
                 LiveOrderSubmission.account_id == account_id,
                 LiveOrderSubmission.status.in_(("SENDING", "UNCERTAIN")),
+                LiveOrderIntent.hidden_at.is_(None),
             )
             .limit(1)
         )
@@ -100,9 +127,11 @@ async def claim_live_submission_recovery(
             return None
         submission = await session.scalar(
             select(LiveOrderSubmission)
+            .join(LiveOrderIntent, LiveOrderIntent.id == LiveOrderSubmission.intent_id)
             .where(
                 LiveOrderSubmission.account_id == account_id,
                 LiveOrderSubmission.status.in_(("SENDING", "UNCERTAIN")),
+                LiveOrderIntent.hidden_at.is_(None),
             )
             .order_by(LiveOrderSubmission.created_at, LiveOrderSubmission.id)
             .limit(1)
@@ -114,14 +143,15 @@ async def claim_live_submission_recovery(
         preview = None if intent is None else await session.get(LiveOrderPreview, intent.preview_id)
         if intent is None or preview is None:
             raise ValueError("live recovery evidence is unavailable")
-        active = SubmissionFence(lease.owner_id, lease.generation, lease.credential_version)
+        active = _database_fence(lease.owner_id, lease.generation, lease.credential_version)
         if submission.status == "SENDING":
             submission.status = "UNCERTAIN"
             submission.last_error_code = "worker_recovery_required"
             submission.updated_at = now
+            sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
             evidence = submission_event_sha256(
-                submission_id=submission.id,
-                sequence=4,
+                submission_id=_database_uuid(submission.id),
+                sequence=sequence,
                 from_status="SENDING",
                 to_status="UNCERTAIN",
                 fence=active,
@@ -132,7 +162,7 @@ async def claim_live_submission_recovery(
                     id=uuid4(),
                     submission_id=submission.id,
                     account_id=submission.account_id,
-                    sequence=4,
+                    sequence=sequence,
                     from_status="SENDING",
                     to_status="UNCERTAIN",
                     worker_owner_id=active.owner_id,
@@ -143,7 +173,7 @@ async def claim_live_submission_recovery(
                 )
             )
         return ClaimedLiveSubmission(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             account_id=submission.account_id,
             intent_id=intent.id,
             preview_id=preview.id,
@@ -151,6 +181,81 @@ async def claim_live_submission_recovery(
             request_sha256=submission.request_sha256,
             fence=active,
             claim_until=lease.lease_until,
+        )
+
+
+def _fill_recovery_observation(
+    fills_payload: str,
+    *,
+    product_id: int,
+    side: str,
+    contracts: int,
+    sent_at: datetime,
+) -> RecoveryObservation | None:
+    """Accept only one uniquely matching fully-filled Delta order."""
+    try:
+        rows = json.loads(fills_payload)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    grouped: dict[int, int] = {}
+    earliest = sent_at - timedelta(seconds=2)
+    for row in rows:
+        if not isinstance(row, dict) or row.get("product_id") != product_id:
+            continue
+        if row.get("side") != side:
+            continue
+        order_id, size, created_at = row.get("order_id"), row.get("size"), row.get("created_at")
+        try:
+            order_id = int(order_id)
+            size = int(size)
+            observed = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if observed.tzinfo is None or observed.astimezone(UTC) < earliest:
+            continue
+        if order_id > 0 and size > 0:
+            grouped[order_id] = grouped.get(order_id, 0) + size
+    matches = [order_id for order_id, filled in grouped.items() if filled == contracts]
+    if len(matches) != 1:
+        return None
+    return RecoveryObservation("FOUND", matches[0], "closed", contracts, 0, None)
+
+
+async def recover_from_reconciliation(
+    database: Database, claim: ClaimedLiveSubmission
+) -> RecoveryObservation | None:
+    """Resolve an uncertain market order from unique recent fill evidence."""
+    async with database.transaction() as session:
+        submission = await session.get(LiveOrderSubmission, claim.submission_id)
+        intent = (
+            None if submission is None else await session.get(LiveOrderIntent, submission.intent_id)
+        )
+        preview = None if intent is None else await session.get(LiveOrderPreview, intent.preview_id)
+        snapshot = await session.scalar(
+            select(PrivateReconciliationSnapshot)
+            .where(PrivateReconciliationSnapshot.account_id == claim.account_id)
+            .order_by(desc(PrivateReconciliationSnapshot.observed_at))
+            .limit(1)
+        )
+        if (
+            submission is None
+            or submission.status != "UNCERTAIN"
+            or submission.sent_at is None
+            or preview is None
+            or preview.order_type != "market"
+            or snapshot is None
+            or snapshot.outcome != "ready"
+            or snapshot.observed_at < submission.sent_at
+        ):
+            return None
+        return _fill_recovery_observation(
+            snapshot.fills_payload,
+            product_id=preview.product_id,
+            side=preview.side,
+            contracts=preview.contracts,
+            sent_at=submission.sent_at,
         )
 
 
@@ -190,6 +295,16 @@ async def claim_next_live_submission(
         )
         reconciliation = await session.scalar(
             select(PrivateReconciliationSnapshot)
+            .options(
+                load_only(
+                    PrivateReconciliationSnapshot.id,
+                    PrivateReconciliationSnapshot.observed_at,
+                    PrivateReconciliationSnapshot.credential_version,
+                    PrivateReconciliationSnapshot.outcome,
+                    PrivateReconciliationSnapshot.worker_owner_id,
+                    PrivateReconciliationSnapshot.worker_generation,
+                )
+            )
             .where(PrivateReconciliationSnapshot.account_id == account_id)
             .order_by(desc(PrivateReconciliationSnapshot.observed_at))
             .limit(1)
@@ -216,6 +331,66 @@ async def claim_next_live_submission(
             or reconciliation.credential_version != lease.credential_version
         ):
             return None
+        expired = await session.scalar(
+            select(LiveOrderSubmission)
+            .where(
+                LiveOrderSubmission.account_id == account_id,
+                LiveOrderSubmission.status.in_(("CLAIMED", "PREPARED")),
+                LiveOrderSubmission.claim_until <= now,
+                LiveOrderSubmission.sent_at.is_(None),
+            )
+            .order_by(LiveOrderSubmission.created_at, LiveOrderSubmission.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        if expired is not None:
+            if (
+                expired.worker_owner_id is None
+                or expired.worker_generation is None
+                or expired.credential_version is None
+            ):
+                raise ValueError("expired pre-dispatch submission has no fence")
+            expired_status = expired.status
+            expired_fence = _database_fence(
+                expired.worker_owner_id,
+                expired.worker_generation,
+                expired.credential_version,
+            )
+            sequence = await _next_submission_sequence(session, _database_uuid(expired.id))
+            evidence = submission_event_sha256(
+                submission_id=_database_uuid(expired.id),
+                sequence=sequence,
+                from_status=expired_status,
+                to_status="PENDING",
+                fence=expired_fence,
+                occurred_at=now,
+            )
+            session.add(
+                LiveOrderSubmissionEvent(
+                    id=uuid4(),
+                    submission_id=expired.id,
+                    account_id=expired.account_id,
+                    sequence=sequence,
+                    from_status=expired_status,
+                    to_status="PENDING",
+                    worker_owner_id=expired_fence.owner_id,
+                    worker_generation=expired_fence.generation,
+                    credential_version=expired_fence.credential_version,
+                    evidence_sha256=evidence,
+                    occurred_at=now,
+                )
+            )
+            expired.status = "PENDING"
+            expired.worker_owner_id = None
+            expired.worker_generation = None
+            expired.credential_version = None
+            expired.claim_until = None
+            expired.attempt_number = 0
+            expired.prepared_request_payload = None
+            expired.prepared_request_sha256 = None
+            expired.last_error_code = "predispatch_claim_expired"
+            expired.updated_at = now
+
         statement = (
             select(LiveOrderSubmission)
             .join(
@@ -254,7 +429,6 @@ async def claim_next_live_submission(
                 not preview.reduce_only
                 and (
                     risk is None
-                    or not risk.enabled
                     or preview.risk_policy_version != risk.version
                     or not control.entries_enabled
                     or global_control is None
@@ -271,9 +445,10 @@ async def claim_next_live_submission(
         submission.credential_version = fence.credential_version
         submission.claim_until = claim_until
         submission.updated_at = now
+        sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
         evidence = submission_event_sha256(
-            submission_id=submission.id,
-            sequence=1,
+            submission_id=_database_uuid(submission.id),
+            sequence=sequence,
             from_status="PENDING",
             to_status="CLAIMED",
             fence=fence,
@@ -284,7 +459,7 @@ async def claim_next_live_submission(
                 id=uuid4(),
                 submission_id=submission.id,
                 account_id=account_id,
-                sequence=1,
+                sequence=sequence,
                 from_status="PENDING",
                 to_status="CLAIMED",
                 worker_owner_id=fence.owner_id,
@@ -295,7 +470,7 @@ async def claim_next_live_submission(
             )
         )
         return ClaimedLiveSubmission(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             account_id=account_id,
             intent_id=intent.id,
             preview_id=preview.id,
@@ -340,12 +515,12 @@ async def prepare_claimed_live_submission(
             or lease.lease_until <= now
         ):
             raise ValueError("live submission claim is stale")
-        stored_fence = SubmissionFence(
+        stored_fence = _database_fence(
             submission.worker_owner_id,
             submission.worker_generation,
             submission.credential_version,
         )
-        active_fence = SubmissionFence(
+        active_fence = _database_fence(
             lease.owner_id,
             lease.generation,
             lease.credential_version,
@@ -374,9 +549,10 @@ async def prepare_claimed_live_submission(
         submission.prepared_request_sha256 = prepared.body_sha256
         submission.attempt_number = 1
         submission.updated_at = now
+        sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
         event_hash = submission_event_sha256(
-            submission_id=submission.id,
-            sequence=2,
+            submission_id=_database_uuid(submission.id),
+            sequence=sequence,
             from_status="CLAIMED",
             to_status="PREPARED",
             fence=stored_fence,
@@ -387,7 +563,7 @@ async def prepare_claimed_live_submission(
                 id=uuid4(),
                 submission_id=submission.id,
                 account_id=submission.account_id,
-                sequence=2,
+                sequence=sequence,
                 from_status="CLAIMED",
                 to_status="PREPARED",
                 worker_owner_id=stored_fence.owner_id,
@@ -432,12 +608,12 @@ async def mark_live_submission_sending(
             or submission.credential_version is None
         ):
             raise ValueError("prepared live submission is stale")
-        stored_fence = SubmissionFence(
+        stored_fence = _database_fence(
             submission.worker_owner_id,
             submission.worker_generation,
             submission.credential_version,
         )
-        active_fence = SubmissionFence(lease.owner_id, lease.generation, lease.credential_version)
+        active_fence = _database_fence(lease.owner_id, lease.generation, lease.credential_version)
         require_transition(
             current="PREPARED",
             target="SENDING",
@@ -465,9 +641,10 @@ async def mark_live_submission_sending(
         submission.status = "SENDING"
         submission.sent_at = now
         submission.updated_at = now
+        sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
         event_hash = submission_event_sha256(
-            submission_id=submission.id,
-            sequence=3,
+            submission_id=_database_uuid(submission.id),
+            sequence=sequence,
             from_status="PREPARED",
             to_status="SENDING",
             fence=stored_fence,
@@ -478,7 +655,7 @@ async def mark_live_submission_sending(
                 id=uuid4(),
                 submission_id=submission.id,
                 account_id=submission.account_id,
-                sequence=3,
+                sequence=sequence,
                 from_status="PREPARED",
                 to_status="SENDING",
                 worker_owner_id=stored_fence.owner_id,
@@ -524,7 +701,7 @@ async def record_live_submission_outcome(
             or submission.credential_version is None
         ):
             raise ValueError("sending live submission is unavailable")
-        fence = SubmissionFence(
+        fence = _database_fence(
             submission.worker_owner_id,
             submission.worker_generation,
             submission.credential_version,
@@ -537,9 +714,10 @@ async def record_live_submission_outcome(
         submission.last_error_code = "response_uncertain" if outcome.kind == "UNCERTAIN" else None
         submission.resolved_at = None if outcome.kind == "UNCERTAIN" else now
         submission.updated_at = now
+        sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
         event_hash = submission_event_sha256(
-            submission_id=submission.id,
-            sequence=4,
+            submission_id=_database_uuid(submission.id),
+            sequence=sequence,
             from_status="SENDING",
             to_status=outcome.kind,
             fence=fence,
@@ -550,7 +728,7 @@ async def record_live_submission_outcome(
                 id=uuid4(),
                 submission_id=submission.id,
                 account_id=submission.account_id,
-                sequence=4,
+                sequence=sequence,
                 from_status="SENDING",
                 to_status=outcome.kind,
                 worker_owner_id=fence.owner_id,
@@ -592,7 +770,7 @@ async def record_uncertain_recovery_lookup(
             or submission.client_order_id != claim.client_order_id
         ):
             raise ValueError("uncertain live submission is unavailable")
-        active = SubmissionFence(lease.owner_id, lease.generation, lease.credential_version)
+        active = _database_fence(lease.owner_id, lease.generation, lease.credential_version)
         if active != claim.fence or lease.lease_until <= now:
             raise ValueError("uncertain recovery fence is stale")
         prior = await session.scalar(
@@ -602,7 +780,7 @@ async def record_uncertain_recovery_lookup(
         )
         attempt = 1 if prior is None else int(prior) + 1
         evidence = recovery_check_sha256(
-            submission_id=submission.id,
+            submission_id=_database_uuid(submission.id),
             attempt=attempt,
             result=observation.result,
             client_order_id=submission.client_order_id,
@@ -630,12 +808,17 @@ async def record_uncertain_recovery_lookup(
             return
         submission.status = "ACCEPTED"
         submission.exchange_order_id = observation.exchange_order_id
+        submission.exchange_order_state = observation.order_state
+        submission.exchange_order_size = observation.size
+        submission.exchange_unfilled_size = observation.unfilled_size
+        submission.exchange_cancellation_reason = observation.cancellation_reason
         submission.last_error_code = None
         submission.resolved_at = now
         submission.updated_at = now
+        sequence = await _next_submission_sequence(session, _database_uuid(submission.id))
         event_hash = submission_event_sha256(
-            submission_id=submission.id,
-            sequence=5,
+            submission_id=_database_uuid(submission.id),
+            sequence=sequence,
             from_status="UNCERTAIN",
             to_status="ACCEPTED",
             fence=active,
@@ -646,7 +829,7 @@ async def record_uncertain_recovery_lookup(
                 id=uuid4(),
                 submission_id=submission.id,
                 account_id=submission.account_id,
-                sequence=5,
+                sequence=sequence,
                 from_status="UNCERTAIN",
                 to_status="ACCEPTED",
                 worker_owner_id=active.owner_id,
@@ -668,4 +851,5 @@ __all__ = [
     "prepare_claimed_live_submission",
     "record_live_submission_outcome",
     "record_uncertain_recovery_lookup",
+    "recover_from_reconciliation",
 ]

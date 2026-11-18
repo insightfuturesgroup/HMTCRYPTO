@@ -18,7 +18,10 @@ _ALLOWED: dict[str, frozenset[str]] = {
     # API serializes that transition with the worker's lease-first claim lock.
     "PENDING": frozenset({"CLAIMED", "BLOCKED"}),
     "CLAIMED": frozenset({"PREPARED", "PENDING", "BLOCKED"}),
-    "PREPARED": frozenset({"SENDING", "BLOCKED"}),
+    # PREPARED is still pre-dispatch: no network bytes may be sent until the
+    # durable SENDING transition. An expired preparation can therefore be
+    # safely returned to PENDING without duplicate-order risk.
+    "PREPARED": frozenset({"SENDING", "PENDING", "BLOCKED"}),
     "SENDING": frozenset({"ACCEPTED", "REJECTED", "UNCERTAIN"}),
     "UNCERTAIN": frozenset({"ACCEPTED", "REJECTED", "BLOCKED"}),
     "ACCEPTED": frozenset(),
