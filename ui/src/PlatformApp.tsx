@@ -4072,6 +4072,7 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
   }
   async function resetPassword(user: UserRow) {
     setNotice(null);
+    setTemporaryPassword(null);
     try {
       const result = await request<{ temporaryPassword: string }>(
         `/api/v1/admin/users/${user.id}/temporary-password`,
@@ -4083,6 +4084,27 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
       load();
     } catch {
       setNotice("Temporary-password request was rejected.");
+    }
+  }
+  async function deleteUser(user: UserRow) {
+    if (!window.confirm(`Delete access for ${user.email}? This cannot be undone.`))
+      return;
+    setNotice(null);
+    setTemporaryPassword(null);
+    try {
+      await request(
+        `/api/v1/admin/users/${user.id}`,
+        { method: "DELETE" },
+        csrf,
+      );
+      setNotice(
+        `${user.email} was deprovisioned. Sessions were revoked and account assignments removed.`,
+      );
+      load();
+    } catch {
+      setNotice(
+        "User deletion was rejected. You cannot delete your own signed-in administrator.",
+      );
     }
   }
   async function assign(event: FormEvent) {
@@ -4242,6 +4264,13 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
                         type="button"
                       >
                         Revoke sessions
+                      </button>
+                      <button
+                        className="text-red-700"
+                        onClick={() => void deleteUser(u)}
+                        type="button"
+                      >
+                        Delete user
                       </button>
                     </div>
                   </td>

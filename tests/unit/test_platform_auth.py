@@ -164,3 +164,30 @@ async def test_admin_password_update_targets_only_requested_auth_user() -> None:
     assert request.url.path == f"/auth/v1/admin/users/{_AUTH_USER_ID}"
     assert request.headers["authorization"] == "Bearer server-secret-key"
     assert request.content == b'{"password":"Replacement-password1!"}'
+
+
+@pytest.mark.asyncio
+async def test_admin_delete_user_uses_secret_boundary() -> None:
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    gateway = SupabaseAuthGateway(
+        base_url="https://project.supabase.co",
+        publishable_key="publishable-key",
+        secret_key="server-secret-key",
+    )
+    await gateway._client.aclose()  # noqa: SLF001
+    gateway._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: SLF001
+    try:
+        await gateway.delete_user(_AUTH_USER_ID)
+    finally:
+        await gateway.aclose()
+
+    assert len(seen) == 1
+    request = seen[0]
+    assert request.method == "DELETE"
+    assert request.url.path == f"/auth/v1/admin/users/{_AUTH_USER_ID}"
+    assert request.headers["authorization"] == "Bearer server-secret-key"

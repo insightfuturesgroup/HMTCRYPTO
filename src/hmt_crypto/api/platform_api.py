@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from sqlalchemy import and_, desc, func, literal, select
+from sqlalchemy import delete as sql_delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1317,6 +1318,66 @@ def install_platform_routes(
                 details={"sessionCount": len(sessions)},
             )
         return {"revoked": len(sessions)}
+
+    @app.delete("/api/v1/admin/users/{user_id}")
+    async def delete_user(user_id: UUID, request: Request) -> dict[str, object]:
+        """Deprovision a user while retaining its disabled audit identity."""
+        actor = await admin(request, mutation=True)
+        request_id = _request_id(request)
+        if user_id == actor.profile_id:
+            raise HTTPException(status_code=409, detail="cannot_delete_current_user")
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            row = await session.get(PlatformUser, user_id, with_for_update=True)
+            if row is None:
+                raise HTTPException(status_code=404, detail="user_not_found")
+            auth_user_id = row.auth_user_id
+            sessions = list(
+                await session.scalars(
+                    select(PlatformSession).where(
+                        PlatformSession.user_id == user_id,
+                        PlatformSession.revoked_at.is_(None),
+                    )
+                )
+            )
+            for platform_session in sessions:
+                platform_session.revoked_at = now
+            assignment_ids = list(
+                await session.scalars(
+                    select(AccountAssignment.id).where(AccountAssignment.user_id == user_id)
+                )
+            )
+            await session.execute(
+                sql_delete(AccountAssignment).where(AccountAssignment.user_id == user_id)
+            )
+            assignment_count = len(assignment_ids)
+            row.status = "disabled"
+            row.password_change_required = False
+            row.updated_at = now
+            await append_audit(
+                session,
+                actor=actor,
+                action="USER_DEPROVISIONED",
+                target_type="user",
+                target_id=str(user_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={
+                    "sessionCount": len(sessions),
+                    "assignmentCount": assignment_count,
+                },
+            )
+        try:
+            await auth.delete_user(auth_user_id)
+        except AuthenticationUnavailable:
+            # The local identity is already disabled, so access remains fail-closed.
+            raise HTTPException(status_code=503, detail="auth_user_deletion_pending") from None
+        return {
+            "deleted": True,
+            "userId": str(user_id),
+            "revoked": len(sessions),
+            "assignmentsRemoved": assignment_count,
+        }
 
     @app.post("/api/v1/admin/users/{user_id}/password-reset")
     async def send_user_password_reset(user_id: UUID, request: Request) -> dict[str, object]:
