@@ -137,9 +137,21 @@ async def sync_one_protection_group(
         strategy = None
         if signal is not None:
             strategy = await session.get(TradingViewStrategy, signal.strategy_id)
-        stop_pct = Decimal("2") if strategy is None else strategy.stop_loss_pct
-        target_pct = Decimal("4") if strategy is None else strategy.target_pct
-        trailing_pct = Decimal("1") if strategy is None else strategy.trailing_offset_pct
+        if (
+            signal is not None
+            and signal.atr_value is not None
+            and signal.atr_multiplier is not None
+            and signal.stop_loss_multiplier is not None
+            and signal.target_multiplier is not None
+        ):
+            base_distance = signal.atr_value * signal.atr_multiplier
+            stop_pct = base_distance * signal.stop_loss_multiplier / average * Decimal("100")
+            target_pct = base_distance * signal.target_multiplier / average * Decimal("100")
+            trailing_pct = base_distance / average * Decimal("100")
+        else:
+            stop_pct = Decimal("2") if strategy is None else strategy.stop_loss_pct
+            target_pct = Decimal("4") if strategy is None else strategy.target_pct
+            trailing_pct = Decimal("1") if strategy is None else strategy.trailing_offset_pct
         multiplier = Decimal("1") if preview.side == "buy" else Decimal("-1")
         stop_price = average * (Decimal("1") - multiplier * stop_pct / Decimal("100"))
         target_price = average * (Decimal("1") + multiplier * target_pct / Decimal("100"))

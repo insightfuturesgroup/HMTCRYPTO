@@ -40,9 +40,7 @@ class PlatformUser(Base):
     full_name: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
     role: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
     status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
-    password_change_required: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
-    )
+    password_change_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
@@ -508,18 +506,112 @@ class CryptoContractSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class TradingViewConfiguration(Base):
+    """A stable webhook identity which can fan out to several Delta accounts."""
+
+    __tablename__ = "tradingview_configurations"
+    __table_args__ = (
+        UniqueConstraint("created_by_user_id", "name", name="uq_tv_configurations_owner_name"),
+        Index("ix_tv_configurations_owner_enabled", "created_by_user_id", "enabled"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class TradingViewConfigurationAccount(Base):
+    __tablename__ = "tradingview_configuration_accounts"
+    __table_args__ = (
+        UniqueConstraint("configuration_id", "account_id", name="uq_tv_configuration_accounts"),
+        Index("ix_tv_configuration_accounts_account", "account_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    configuration_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("hmt_crypto.tradingview_configurations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class TradingViewSymbolMapping(Base):
+    """Explicit TradingView ticker to Delta product mapping, globally or per account."""
+
+    __tablename__ = "tradingview_symbol_mappings"
+    __table_args__ = (
+        Index(
+            "uq_tv_symbol_mappings_global",
+            "tradingview_symbol",
+            unique=True,
+            postgresql_where=text("account_id IS NULL"),
+        ),
+        Index(
+            "uq_tv_symbol_mappings_account",
+            "account_id",
+            "tradingview_symbol",
+            unique=True,
+            postgresql_where=text("account_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_tv_symbol_mappings_global_product",
+            "product_id",
+            unique=True,
+            postgresql_where=text("account_id IS NULL"),
+        ),
+        Index(
+            "uq_tv_symbol_mappings_account_product",
+            "account_id",
+            "product_id",
+            unique=True,
+            postgresql_where=text("account_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="CASCADE")
+    )
+    tradingview_symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
+    delta_symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_by_user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class TradingViewWebhookKey(Base):
     __tablename__ = "tradingview_webhook_keys"
     __table_args__ = (
         UniqueConstraint("key_sha256", name="uq_tv_webhook_keys_digest"),
+        CheckConstraint(
+            "(strategy_id IS NULL) <> (configuration_id IS NULL)", name="exactly_one_target"
+        ),
         Index("ix_tv_webhook_keys_strategy_active", "strategy_id", "revoked_at"),
+        Index("ix_tv_webhook_keys_configuration_active", "configuration_id", "revoked_at"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    strategy_id: Mapped[UUID] = mapped_column(
+    strategy_id: Mapped[UUID | None] = mapped_column(
         Uuid,
         ForeignKey("hmt_crypto.tradingview_strategies.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
+    )
+    configuration_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("hmt_crypto.tradingview_configurations.id", ondelete="CASCADE"),
     )
     key_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
     key_fingerprint: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
@@ -540,19 +632,43 @@ class TradingViewSignal(Base):
         UniqueConstraint("strategy_id", "external_signal_id", name="uq_tv_signals_external"),
         Index("ix_tv_signals_strategy_received", "strategy_id", "received_at"),
         Index("ix_tv_signals_account_status", "account_id", "status"),
+        Index(
+            "uq_tv_signals_configuration_external",
+            "configuration_id",
+            "account_id",
+            "external_signal_id",
+            unique=True,
+            postgresql_where=text("configuration_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    strategy_id: Mapped[UUID] = mapped_column(
+    strategy_id: Mapped[UUID | None] = mapped_column(
         Uuid,
         ForeignKey("hmt_crypto.tradingview_strategies.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
+    )
+    configuration_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("hmt_crypto.tradingview_configurations.id", ondelete="RESTRICT"),
     )
     account_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
     )
     external_signal_id: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
     side: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
+    product_id: Mapped[int | None] = mapped_column(StrictBigInteger())
+    symbol: Mapped[str | None] = mapped_column(NulFreeString(128))
+    contracts: Mapped[int | None] = mapped_column(StrictBigInteger())
+    order_type: Mapped[str | None] = mapped_column(NulFreeString(8))
+    reduce_only: Mapped[bool | None] = mapped_column(Boolean)
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT")
+    )
+    atr_value: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    atr_multiplier: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    stop_loss_multiplier: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    target_multiplier: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
     limit_price: Mapped[str | None] = mapped_column(NulFreeString(64))
     payload_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
     status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
