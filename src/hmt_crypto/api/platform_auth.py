@@ -132,6 +132,38 @@ class SupabaseAuthGateway:
             raise AuthenticationRejected()
         return _identity(response.json())
 
+    async def create_user(self, email: str, password: str) -> AuthenticatedIdentity:
+        """Create an email-confirmed password user through the trusted admin boundary."""
+        response = await self._request(
+            "POST",
+            "/admin/users",
+            privileged=True,
+            json={"email": email, "password": password, "email_confirm": True},
+        )
+        if response.status_code not in {200, 201}:
+            raise AuthenticationRejected()
+        body = response.json()
+        return _identity(body.get("user", body) if isinstance(body, dict) else body)
+
+    async def update_user_password(self, auth_user_id: UUID, password: str) -> None:
+        """Replace a user's password through the trusted admin boundary."""
+        response = await self._request(
+            "PUT",
+            f"/admin/users/{auth_user_id}",
+            privileged=True,
+            json={"password": password},
+        )
+        if response.status_code != 200:
+            raise AuthenticationRejected()
+
+    async def delete_user(self, auth_user_id: UUID) -> None:
+        """Remove a newly created Auth user when local provisioning cannot commit."""
+        response = await self._request(
+            "DELETE", f"/admin/users/{auth_user_id}", privileged=True
+        )
+        if response.status_code not in {200, 204, 404}:
+            raise AuthenticationUnavailable()
+
     async def send_password_reset(self, email: str, *, redirect_to: str) -> None:
         response = await self._request(
             "POST",

@@ -40,6 +40,9 @@ class PlatformUser(Base):
     full_name: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
     role: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
     status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
+    password_change_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

@@ -220,6 +220,10 @@ class PasswordRecoveryBody(_Body):
     new_password: str = Field(min_length=12, max_length=1024)
 
 
+class PasswordChangeBody(_Body):
+    new_password: str = Field(min_length=12, max_length=1024)
+
+
 class InviteBody(_Body):
     email: str = Field(min_length=3, max_length=320)
     full_name: str = Field(min_length=1, max_length=128)
@@ -373,6 +377,7 @@ class Principal:
     full_name: str
     role: str
     last_login_at: datetime | None
+    password_change_required: bool
 
 
 def _utc(value: datetime) -> str:
@@ -417,7 +422,23 @@ def _user_view(row: PlatformUser) -> dict[str, object]:
         "status": row.status,
         "createdAt": _utc(row.created_at),
         "lastLoginAt": None if row.last_login_at is None else _utc(row.last_login_at),
+        "passwordChangeRequired": row.password_change_required,
     }
+
+
+def _temporary_password() -> str:
+    """Return a strong one-time password without retaining a recoverable copy."""
+    groups = (
+        "ABCDEFGHJKLMNPQRSTUVWXYZ",
+        "abcdefghijkmnopqrstuvwxyz",
+        "23456789",
+        "!@#$%*-_=+",
+    )
+    characters = [secrets.choice(group) for group in groups]
+    alphabet = "".join(groups)
+    characters.extend(secrets.choice(alphabet) for _ in range(16))
+    secrets.SystemRandom().shuffle(characters)
+    return "".join(characters)
 
 
 def install_platform_routes(
@@ -459,7 +480,9 @@ def install_platform_routes(
         if settings.private_read_only:
             raise HTTPException(status_code=409, detail="private_read_only")
 
-    async def principal(request: Request, *, mutation: bool = False) -> Principal:
+    async def principal(
+        request: Request, *, mutation: bool = False, password_change_route: bool = False
+    ) -> Principal:
         if mutation:
             require_csrf(request)
         access = request.cookies.get(_ACCESS_COOKIE)
@@ -497,6 +520,8 @@ def install_platform_routes(
                 <= now - timedelta(seconds=settings.session_idle_seconds)
             ):
                 raise HTTPException(status_code=403, detail="account_disabled_or_unassigned")
+            if row.password_change_required and not password_change_route:
+                raise HTTPException(status_code=403, detail="password_change_required")
             platform_session.last_seen_at = now
             platform_session.expires_at = now + timedelta(seconds=settings.session_absolute_seconds)
             return Principal(
@@ -506,6 +531,7 @@ def install_platform_routes(
                 row.full_name,
                 row.role,
                 row.last_login_at,
+                row.password_change_required,
             )
 
     async def admin(request: Request, *, mutation: bool = False) -> Principal:
@@ -767,6 +793,10 @@ def install_platform_routes(
                 )
             ).scalars()
             now = datetime.now(UTC)
+            # A successful out-of-band recovery also proves possession of the
+            # Supabase recovery token and satisfies the forced-change control.
+            row.password_change_required = False
+            row.updated_at = now
             for platform_session in sessions:
                 platform_session.revoked_at = now
             await append_audit(
@@ -778,12 +808,49 @@ def install_platform_routes(
                     row.full_name,
                     row.role,
                     row.last_login_at,
+                    row.password_change_required,
                 ),
                 action="USER_PASSWORD_RECOVERED",
                 target_type="user",
                 target_id=str(row.id),
                 outcome="SUCCEEDED",
                 request_id=str(uuid4()),
+            )
+        return {"updated": True}
+
+    @app.post("/api/v1/auth/change-password")
+    async def change_temporary_password(
+        body: PasswordChangeBody, request: Request
+    ) -> dict[str, object]:
+        """Replace a temporary password and release only this authenticated user."""
+        actor = await principal(request, mutation=True, password_change_route=True)
+        if not actor.password_change_required:
+            raise HTTPException(status_code=409, detail="password_change_not_required")
+        access = request.cookies.get(_ACCESS_COOKIE)
+        if access is None:
+            raise HTTPException(status_code=401, detail="authentication_required")
+        try:
+            identity = await auth.update_password(access, body.new_password)
+        except AuthenticationRejected:
+            raise HTTPException(status_code=401, detail="password_change_rejected") from None
+        except AuthenticationUnavailable:
+            raise HTTPException(status_code=503, detail="authentication_unavailable") from None
+        if identity.auth_user_id != actor.auth_user_id:
+            raise HTTPException(status_code=403, detail="identity_mismatch")
+        async with database.transaction() as session:
+            row = await session.get(PlatformUser, actor.profile_id, with_for_update=True)
+            if row is None or row.status != "active" or not row.password_change_required:
+                raise HTTPException(status_code=409, detail="password_change_not_required")
+            row.password_change_required = False
+            row.updated_at = datetime.now(UTC)
+            await append_audit(
+                session,
+                actor=actor,
+                action="USER_TEMPORARY_PASSWORD_CHANGED",
+                target_type="user",
+                target_id=str(row.id),
+                outcome="SUCCEEDED",
+                request_id=_request_id(request),
             )
         return {"updated": True}
 
@@ -816,7 +883,15 @@ def install_platform_routes(
             row.status = "active"
             row.last_login_at = now
             row.updated_at = now
-            actor = Principal(row.id, row.auth_user_id, row.email, row.full_name, row.role, now)
+            actor = Principal(
+                row.id,
+                row.auth_user_id,
+                row.email,
+                row.full_name,
+                row.role,
+                now,
+                row.password_change_required,
+            )
             active_sessions = list(
                 (
                     await session.execute(
@@ -867,6 +942,7 @@ def install_platform_routes(
                     "email": actor.email,
                     "fullName": actor.full_name,
                     "role": actor.role,
+                    "passwordChangeRequired": actor.password_change_required,
                 },
             }
         )
@@ -883,7 +959,7 @@ def install_platform_routes(
     @app.get("/api/v1/auth/session")
     async def platform_session(request: Request) -> JSONResponse:
         try:
-            actor = await principal(request)
+            actor = await principal(request, password_change_route=True)
         except HTTPException as error:
             if error.status_code not in {401, 403}:
                 raise
@@ -907,6 +983,7 @@ def install_platform_routes(
                     "email": actor.email,
                     "fullName": actor.full_name,
                     "role": actor.role,
+                    "passwordChangeRequired": actor.password_change_required,
                 },
             }
         )
@@ -958,6 +1035,7 @@ def install_platform_routes(
                 row.full_name,
                 row.role,
                 row.last_login_at,
+                row.password_change_required,
             )
         response = JSONResponse(
             {
@@ -969,6 +1047,7 @@ def install_platform_routes(
                     "email": actor.email,
                     "fullName": actor.full_name,
                     "role": actor.role,
+                    "passwordChangeRequired": actor.password_change_required,
                 },
             }
         )
@@ -984,7 +1063,7 @@ def install_platform_routes(
 
     @app.delete("/api/v1/auth/session")
     async def platform_logout(request: Request) -> JSONResponse:
-        actor = await principal(request, mutation=True)
+        actor = await principal(request, mutation=True, password_change_route=True)
         access = request.cookies.get(_ACCESS_COOKIE)
         platform_token = request.cookies.get(_SESSION_COOKIE)
         if access is not None:
@@ -1022,6 +1101,65 @@ def install_platform_routes(
             ).scalars()
             return {"users": [_user_view(row) for row in rows]}
 
+    @app.post("/api/v1/admin/users")
+    async def create_user(body: InviteBody, request: Request) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        request_id = _request_id(request)
+        email = _email(body.email)
+        full_name = body.full_name.strip()
+        temporary_password = _temporary_password()
+        async with database.transaction() as session:
+            existing = await session.scalar(
+                select(PlatformUser.id).where(PlatformUser.email == email)
+            )
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="user_already_exists")
+        try:
+            identity = await auth.create_user(email, temporary_password)
+        except AuthenticationRejected:
+            raise HTTPException(status_code=409, detail="user_creation_rejected") from None
+        except AuthenticationUnavailable:
+            raise HTTPException(status_code=503, detail="authentication_unavailable") from None
+        now = datetime.now(UTC)
+        try:
+            async with database.transaction() as session:
+                row = PlatformUser(
+                    id=uuid4(),
+                    auth_user_id=identity.auth_user_id,
+                    email=email,
+                    full_name=full_name,
+                    role=body.role,
+                    status="active",
+                    password_change_required=True,
+                    created_at=now,
+                    updated_at=now,
+                    last_login_at=None,
+                )
+                session.add(row)
+                await session.flush()
+                await append_audit(
+                    session,
+                    actor=actor,
+                    action="USER_CREATED_WITH_TEMPORARY_PASSWORD",
+                    target_type="user",
+                    target_id=str(row.id),
+                    outcome="SUCCEEDED",
+                    request_id=request_id,
+                    details={"role": body.role},
+                )
+                result = _user_view(row)
+        except (IntegrityError, PersistenceError):
+            try:
+                await auth.delete_user(identity.auth_user_id)
+            except AuthenticationUnavailable:
+                _LOGGER.error(
+                    "orphaned_auth_user_cleanup_failed",
+                    request_id=request_id,
+                    auth_user_id=str(identity.auth_user_id),
+                )
+            raise HTTPException(status_code=409, detail="user_creation_failed") from None
+        return {"user": result, "temporaryPassword": temporary_password}
+
     @app.post("/api/v1/admin/users/invite")
     async def invite_user(body: InviteBody, request: Request) -> dict[str, object]:
         actor = await admin(request, mutation=True)
@@ -1041,6 +1179,7 @@ def install_platform_routes(
                     full_name=body.full_name.strip(),
                     role=body.role,
                     status="invited",
+                    password_change_required=False,
                     created_at=now,
                     updated_at=now,
                     last_login_at=None,
@@ -1061,6 +1200,53 @@ def install_platform_routes(
         except IntegrityError:
             raise HTTPException(status_code=409, detail="user_already_exists") from None
         return result
+
+    @app.post("/api/v1/admin/users/{user_id}/temporary-password")
+    async def issue_temporary_password(user_id: UUID, request: Request) -> dict[str, object]:
+        actor = await admin(request, mutation=True)
+        request_id = _request_id(request)
+        if user_id == actor.profile_id:
+            raise HTTPException(status_code=409, detail="cannot_reset_own_password")
+        async with database.transaction() as session:
+            row = await session.get(PlatformUser, user_id)
+            if row is None or row.status == "disabled":
+                raise HTTPException(status_code=404, detail="user_not_found")
+            auth_user_id = row.auth_user_id
+        temporary_password = _temporary_password()
+        try:
+            await auth.update_user_password(auth_user_id, temporary_password)
+        except AuthenticationRejected:
+            raise HTTPException(status_code=409, detail="password_update_rejected") from None
+        except AuthenticationUnavailable:
+            raise HTTPException(status_code=503, detail="authentication_unavailable") from None
+        now = datetime.now(UTC)
+        async with database.transaction() as session:
+            row = await session.get(PlatformUser, user_id, with_for_update=True)
+            if row is None or row.status == "disabled":
+                raise HTTPException(status_code=404, detail="user_not_found")
+            row.password_change_required = True
+            row.updated_at = now
+            sessions = list(
+                await session.scalars(
+                    select(PlatformSession).where(
+                        PlatformSession.user_id == user_id,
+                        PlatformSession.revoked_at.is_(None),
+                    )
+                )
+            )
+            for platform_session in sessions:
+                platform_session.revoked_at = now
+            await append_audit(
+                session,
+                actor=actor,
+                action="USER_TEMPORARY_PASSWORD_ISSUED",
+                target_type="user",
+                target_id=str(user_id),
+                outcome="SUCCEEDED",
+                request_id=request_id,
+                details={"sessionCount": len(sessions)},
+            )
+        return {"temporaryPassword": temporary_password}
 
     @app.patch("/api/v1/admin/users/{user_id}")
     async def update_user(

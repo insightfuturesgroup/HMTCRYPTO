@@ -64,6 +64,7 @@ interface SessionUser {
   email: string;
   fullName: string;
   role: Role;
+  passwordChangeRequired: boolean;
 }
 
 interface Session {
@@ -606,6 +607,80 @@ function PasswordRecovery({
               {error}
             </p>
           ) : null}
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function TemporaryPasswordChange({
+  csrf,
+  onComplete,
+}: {
+  readonly csrf: string;
+  readonly onComplete: () => void;
+}) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    if (password !== confirmation) {
+      setError("Passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await request(
+        "/api/v1/auth/change-password",
+        { method: "POST", body: JSON.stringify({ new_password: password }) },
+        csrf,
+      );
+      onComplete();
+    } catch {
+      setError("Password change was rejected. Use at least 12 characters.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <main className="hmt-auth-page">
+      <section className="hmt-auth-card">
+        <div className="hmt-auth-brand">
+          <span>HMT</span>
+          <strong>CRYPTO</strong>
+        </div>
+        <h1>Change temporary password</h1>
+        <p>You must choose a private password before accessing the trading portal.</p>
+        <form onSubmit={(event) => void submit(event)}>
+          <label>
+            New password
+            <input
+              autoComplete="new-password"
+              minLength={12}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+              type="password"
+              value={password}
+            />
+          </label>
+          <label>
+            Confirm password
+            <input
+              autoComplete="new-password"
+              minLength={12}
+              onChange={(event) => setConfirmation(event.target.value)}
+              required
+              type="password"
+              value={confirmation}
+            />
+          </label>
+          <button className="hmt-auth-submit" disabled={busy} type="submit">
+            {busy ? "Updating…" : "Change password"}
+          </button>
+          {error ? <p className="hmt-auth-error" role="alert">{error}</p> : null}
         </form>
       </section>
     </main>
@@ -3917,6 +3992,7 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
   const [permission, setPermission] =
     useState<AccountAssignmentRow["permission"]>("trade");
   const [notice, setNotice] = useState<string | null>(null);
+  const [temporaryPassword, setTemporaryPassword] = useState<string | null>(null);
   const load = useCallback(() => {
     void Promise.all([
       request<{ users: UserRow[] }>("/api/v1/admin/users"),
@@ -3935,10 +4011,11 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
     });
   }, []);
   useEffect(load, [load]);
-  async function invite(event: FormEvent) {
+  async function createUser(event: FormEvent) {
     event.preventDefault();
-    await request(
-      "/api/v1/admin/users/invite",
+    setNotice(null);
+    const result = await request<{ user: UserRow; temporaryPassword: string }>(
+      "/api/v1/admin/users",
       {
         method: "POST",
         body: JSON.stringify({ email, full_name: name, role: inviteRole }),
@@ -3947,6 +4024,8 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
     );
     setEmail("");
     setName("");
+    setTemporaryPassword(result.temporaryPassword);
+    setNotice(`User ${result.user.email} created. Copy the password now; it will not be shown again.`);
     load();
   }
   async function updateUser(
@@ -3994,14 +4073,16 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
   async function resetPassword(user: UserRow) {
     setNotice(null);
     try {
-      await request(
-        `/api/v1/admin/users/${user.id}/password-reset`,
+      const result = await request<{ temporaryPassword: string }>(
+        `/api/v1/admin/users/${user.id}/temporary-password`,
         { method: "POST" },
         csrf,
       );
-      setNotice("Password-reset email requested.");
+      setTemporaryPassword(result.temporaryPassword);
+      setNotice(`Temporary password issued for ${user.email}. Existing sessions were revoked.`);
+      load();
     } catch {
-      setNotice("Password-reset request was rejected.");
+      setNotice("Temporary-password request was rejected.");
     }
   }
   async function assign(event: FormEvent) {
@@ -4043,7 +4124,7 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
       <Panel title="User management">
         <form
           className="grid gap-2 p-4 md:grid-cols-4"
-          onSubmit={(e) => void invite(e)}
+          onSubmit={(e) => void createUser(e)}
         >
           <input
             className="rounded border px-3 py-2"
@@ -4070,9 +4151,31 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
             <option value="admin">Admin</option>
           </select>
           <button className="rounded bg-blue-600 px-4 py-2 text-white">
-            Invite user
+            Create user
           </button>
         </form>
+        {temporaryPassword ? (
+          <div className="mx-4 mb-4 rounded border border-amber-300 bg-amber-50 p-4" role="status">
+            <strong className="block">One-time temporary password</strong>
+            <code className="mt-2 block select-all break-all text-lg">{temporaryPassword}</code>
+            <div className="mt-3 flex gap-3">
+              <button
+                className="rounded bg-blue-600 px-3 py-2 text-white"
+                onClick={() => void navigator.clipboard.writeText(temporaryPassword)}
+                type="button"
+              >
+                Copy password
+              </button>
+              <button
+                className="rounded border px-3 py-2"
+                onClick={() => setTemporaryPassword(null)}
+                type="button"
+              >
+                Dismiss permanently
+              </button>
+            </div>
+          </div>
+        ) : null}
         {notice ? (
           <p className="px-4 pb-4" role="status">
             {notice}
@@ -4131,7 +4234,7 @@ function UsersPage({ csrf }: { readonly csrf: string }) {
                         onClick={() => void resetPassword(u)}
                         type="button"
                       >
-                        Reset password
+                        Issue temporary password
                       </button>
                       <button
                         className="text-red-700"
@@ -4864,6 +4967,22 @@ export default function PlatformApp() {
     session.csrfToken === null
   )
     return <Login onLogin={setSession} />;
+  if (session.user.passwordChangeRequired)
+    return (
+      <TemporaryPasswordChange
+        csrf={session.csrfToken}
+        onComplete={() =>
+          setSession((current) =>
+            current?.user
+              ? {
+                  ...current,
+                  user: { ...current.user, passwordChangeRequired: false },
+                }
+              : current,
+          )
+        }
+      />
+    );
   return (
     <Shell
       session={session}
