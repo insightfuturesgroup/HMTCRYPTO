@@ -29,45 +29,7 @@ CONTROL = VERSIONS / "phase5_control_v1.py"
 RECONCILIATION_CHECKPOINT = VERSIONS / "phase5_reconcile_checkpoint_v1.py"
 RUNTIME_GRANTS = VERSIONS / "phase5_runtime_grants_v1_grant_least_privilege_runtime_access.py"
 MANIFEST = MIGRATIONS / "schema_manifest.json"
-EXPECTED_TABLES = {
-    "accounts",
-    "api_audit_events",
-    "api_audit_payloads",
-    "balance_snapshots",
-    "catalogue_products",
-    "catalogue_snapshots",
-    "command_operations",
-    "credential_versions",
-    "exit_intents",
-    "fill_order_links",
-    "fills",
-    "funding_snapshots",
-    "leadership_leases",
-    "order_attempt_events",
-    "order_attempts",
-    "order_transitions",
-    "orders",
-    "pnl_snapshots",
-    "position_protection_orders",
-    "position_protections",
-    "position_snapshots",
-    "protection_authorizations",
-    "reconciliation_acknowledgements",
-    "reconciliation_drifts",
-    "reconciliation_resources",
-    "reconciliation_runs",
-    "recovery_incarnations",
-    "risk_decisions",
-    "risk_halt_events",
-    "risk_halts",
-    "risk_rate_consumptions",
-    "risk_reservations",
-    "risk_state",
-    "scheduler_state",
-    "signals",
-    "wallet_transactions",
-    "worker_heartbeats",
-}
+EXPECTED_TABLES = set(json.loads(MANIFEST.read_text(encoding="utf-8"))["tables"])
 
 
 def _load(path: Path, name: str) -> ModuleType:

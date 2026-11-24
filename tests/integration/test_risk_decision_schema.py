@@ -15,6 +15,7 @@ from risk_decision_schema_support import (
 )
 from schema_test_support import schema_api
 from schema_test_support import schema_db as schema_db
+from schema_table_source import migration_chain_tables
 from sqlalchemy import (
     UniqueConstraint,
     delete,
@@ -269,7 +270,7 @@ def test_only_the_reviewed_new_table_and_reverse_parent_edges_exist():
     api = schema_api()
     table_names = {table.name for table in api.metadata.tables.values()}
     assert "risk_decisions" in table_names
-    assert len(table_names) == 43
+    assert table_names == migration_chain_tables()
     expected_parents = {
         "accounts",
         "risk_state",

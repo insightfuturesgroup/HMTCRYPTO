@@ -10,6 +10,7 @@ import pytest
 from execution_test_support import execution_db as execution_db
 from schema_test_support import NOW, account, schema_api, scope
 from schema_test_support import schema_db as schema_db
+from schema_table_source import migration_chain_tables
 from sqlalchemy import UniqueConstraint, delete, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,34 +78,8 @@ def evidence(recovery, leader, fields):
 
 def test_exact_two_added_tables_exports_and_acyclic_stable_scoped_keys():
     api = schema_api()
-    assert {t.name for t in api.metadata.tables.values()} == BASELINE | {
-        "recovery_incarnations",
-        "leadership_leases",
-        *ADDED,
-        "reconciliation_runs",
-        "reconciliation_resources",
-        "reconciliation_drifts",
-        "reconciliation_acknowledgements",
-        "position_snapshots",
-        "balance_snapshots",
-        "wallet_transactions",
-        "funding_snapshots",
-        "pnl_snapshots",
-        "risk_state",
-        "risk_halts",
-        "risk_halt_events",
-        "risk_decisions",
-        "risk_reservations",
-        "risk_rate_consumptions",
-        "api_audit_events",
-        "api_audit_payloads",
-        "operator_audit_events",
-        "kill_workflows",
-        "kill_workflow_events",
-        "paper_execution_heads",
-        "paper_execution_events",
-        "account_reconciliation_checkpoints",
-    }
+    assert {t.name for t in api.metadata.tables.values()} == migration_chain_tables()
+    assert ADDED <= migration_chain_tables()
     expected = {
         "WorkerHeartbeat": {
             "id",

@@ -7,7 +7,7 @@ name = "hmt-crypto"
 version = "0.1.0"
 description = "Safety-first Delta Exchange research and paper trading core"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "SQLAlchemy[asyncio]>=2.0.44,<2.1",
     "alembic>=1.17.1,<2",
@@ -35,12 +35,13 @@ hmt-crypto-worker = "hmt_crypto.worker.server:main"
 [project.optional-dependencies]
 dev = [
     "build>=1.2,<2",
+    "hatchling>=1.26,<2",
     "hypothesis>=6.120,<7",
     "mypy>=1.14,<2",
     "pytest>=8.3,<10",
     "pytest-asyncio>=1.0,<2",
     "respx>=0.22,<0.23",
-    "ruff>=0.9,<1",
+    "ruff==0.9.10",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -71,7 +72,7 @@ markers = [
 ]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 100
 
 [tool.ruff.lint]
@@ -82,7 +83,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 exclude = ["*.md"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = true
 warn_unreachable = true
 show_error_codes = true

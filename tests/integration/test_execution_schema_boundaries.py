@@ -11,6 +11,7 @@ from execution_test_support import attempt, attempt_event, command, order, trans
 from execution_test_support import execution_db as execution_db
 from schema_test_support import NOW, account, schema_api
 from schema_test_support import schema_db as schema_db
+from schema_table_source import migration_chain_tables
 from sqlalchemy import insert, select, text
 
 from hmt_crypto.persistence.errors import PersistenceError
@@ -193,7 +194,8 @@ async def test_prepared_attempt_without_outcome_round_trips_as_unresolved(execut
 
 
 def test_aggregate_import_performs_no_network_engine_or_production_activation():
-    code = """
+    expected_table_count = len(migration_chain_tables())
+    code = f"""
 import socket
 import httpx
 import sqlalchemy.ext.asyncio
@@ -204,7 +206,7 @@ httpx.Client.send = forbidden
 httpx.AsyncClient.send = forbidden
 sqlalchemy.ext.asyncio.create_async_engine = forbidden
 from hmt_crypto.persistence import models
-assert len(models.metadata.tables) == 43
+assert len(models.metadata.tables) == {expected_table_count}
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

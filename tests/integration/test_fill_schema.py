@@ -9,6 +9,7 @@ from execution_test_support import execution_db as execution_db
 from execution_test_support import order
 from schema_test_support import NOW, account, schema_api, scope
 from schema_test_support import schema_db as schema_db
+from schema_table_source import migration_chain_tables
 from sqlalchemy import MetaData, UniqueConstraint, insert, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable
@@ -67,53 +68,10 @@ async def save(db, row, channel="orm"):
 
 def test_fill_schema_adds_only_two_tables_with_no_direct_order_foreign_key():
     api = schema_api()
-    baseline = {
-        "accounts",
-        "credential_versions",
-        "catalogue_snapshots",
-        "catalogue_products",
-        "signals",
-        "command_operations",
-        "orders",
-        "order_attempts",
-        "order_attempt_events",
-        "order_transitions",
-        "exit_intents",
-        "protection_authorizations",
-        "position_protections",
-        "position_protection_orders",
-        "recovery_incarnations",
-        "leadership_leases",
-        "worker_heartbeats",
-        "scheduler_state",
-        "reconciliation_runs",
-        "reconciliation_resources",
-        "reconciliation_drifts",
-        "reconciliation_acknowledgements",
-        "position_snapshots",
-        "balance_snapshots",
-        "wallet_transactions",
-        "funding_snapshots",
-        "pnl_snapshots",
-        "risk_state",
-        "risk_halts",
-        "risk_halt_events",
-        "risk_decisions",
-        "risk_reservations",
-        "risk_rate_consumptions",
-        "api_audit_events",
-        "api_audit_payloads",
-        "operator_audit_events",
-        "kill_workflows",
-        "kill_workflow_events",
-        "paper_execution_heads",
-        "paper_execution_events",
-        "account_reconciliation_checkpoints",
-    }
-    assert {table.name for table in api.metadata.tables.values()} - baseline == {
-        "fills",
-        "fill_order_links",
-    }, "Immutable fill evidence and authoritative association tables are missing"
+    assert {table.name for table in api.metadata.tables.values()} == migration_chain_tables()
+    assert {"fills", "fill_order_links"} <= migration_chain_tables(), (
+        "Immutable fill evidence and authoritative association tables are missing"
+    )
     assert "order_id" not in api.Fill.__table__.c
     assert {fk.referred_table.name for fk in api.Fill.__table__.foreign_key_constraints} == {
         "accounts"

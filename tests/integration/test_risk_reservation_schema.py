@@ -22,6 +22,7 @@ from risk_reservation_schema_support import (
 )
 from schema_test_support import NOW, schema_api
 from schema_test_support import schema_db as schema_db
+from schema_table_source import migration_chain_tables
 from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
@@ -1062,4 +1063,4 @@ async def test_populated_schema_can_drop_and_recreate_the_single_reservation_tab
             ).all()
         }
     assert "risk_reservations" in names
-    assert len(api.metadata.tables) == 43
+    assert {table.name for table in api.metadata.tables.values()} == migration_chain_tables()

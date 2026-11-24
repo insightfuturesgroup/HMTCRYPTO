@@ -15,6 +15,7 @@ from execution_test_support import command
 from execution_test_support import execution_db as execution_db
 from schema_test_support import HASH, NOW, account, credential, schema_api, scope
 from schema_test_support import schema_db as schema_db
+from schema_table_source import migration_chain_tables
 from sqlalchemy import UniqueConstraint, delete, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -104,35 +105,8 @@ def provenance(cred, cmd, leader, worker):
 def test_exact_run_root_export_columns_complete_scoped_keys_and_postgres_ddl():
     api = schema_api()
     assert hasattr(api, "ReconciliationRun"), "Missing ReconciliationRun export"
-    assert {t.name for t in api.metadata.tables.values()} == BASELINE | {
-        "recovery_incarnations",
-        "leadership_leases",
-        "worker_heartbeats",
-        "scheduler_state",
-        "reconciliation_runs",
-        "reconciliation_resources",
-        "reconciliation_drifts",
-        "reconciliation_acknowledgements",
-        "position_snapshots",
-        "balance_snapshots",
-        "wallet_transactions",
-        "funding_snapshots",
-        "pnl_snapshots",
-        "risk_state",
-        "risk_halts",
-        "risk_halt_events",
-        "risk_decisions",
-        "risk_reservations",
-        "risk_rate_consumptions",
-        "api_audit_events",
-        "api_audit_payloads",
-        "operator_audit_events",
-        "kill_workflows",
-        "kill_workflow_events",
-        "paper_execution_heads",
-        "paper_execution_events",
-        "account_reconciliation_checkpoints",
-    }
+    assert {t.name for t in api.metadata.tables.values()} == migration_chain_tables()
+    assert "reconciliation_runs" in migration_chain_tables()
     table = api.ReconciliationRun.__table__
     assert set(table.c.keys()) == {
         "id",

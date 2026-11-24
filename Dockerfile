@@ -12,6 +12,24 @@ COPY migrations ./migrations
 COPY src ./src
 RUN python -m pip wheel --wheel-dir /wheels .
 
+FROM python:3.13.10-slim-bookworm AS test
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /workspace
+COPY pyproject.toml README.md alembic.ini Dockerfile docker-compose.yml docker-compose.ec2.yml ./
+COPY .github ./.github
+COPY deploy ./deploy
+COPY migrations ./migrations
+COPY src ./src
+COPY tests ./tests
+COPY tools ./tools
+COPY ui/src/test ./ui/src/test
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -e '.[dev]'
+
 FROM python:3.13.10-slim-bookworm AS python-runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
