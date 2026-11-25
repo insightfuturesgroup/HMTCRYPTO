@@ -55,6 +55,20 @@ MONEY = (
     "max_daily_loss_limit_inr",
 )
 COUNTS = ("max_open_orders", "max_inflight_signals")
+STAGES = frozenset(
+    {"preview", "admission", "receipt", "signal_claim", "submission_claim", "save", "gtt_claim"}
+)
+REASONS = (
+    "risk_policy_missing",
+    "risk_policy_disabled",
+    "risk_policy_malformed",
+    "risk_policy_non_positive",
+    "risk_policy_ceiling",
+    "risk_policy_conversion_rate_mismatch",
+    "risk_policy_inconsistent",
+    "risk_policy_changed",
+    "gtt_entry_not_supported",
+)
 
 
 def policy_rejection(
@@ -74,7 +88,16 @@ def policy_rejection(
 
 
 def record_rejection(stage: str, reason: str) -> None:
-    REJECTIONS.labels(stage=stage, reason=reason).inc()
+    metric_stage = stage if stage in STAGES else "other"
+    metric_reason = next(
+        (
+            category
+            for category in REASONS
+            if reason == category or reason.startswith(category + "_")
+        ),
+        "other",
+    )
+    REJECTIONS.labels(stage=metric_stage, reason=metric_reason).inc()
     get_logger("risk.policy").warning("risk_policy_rejected", stage=stage, reason=reason)
 
 
