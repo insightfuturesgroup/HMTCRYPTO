@@ -926,6 +926,9 @@ async def run_private_worker(
     execution_task: asyncio.Task[None] | None = None
     next_retention_at = 0.0
     logger.info("private_worker_started", owner_id=str(process.owner_id))
+    from hmt_crypto.risk_operations import log_risk_configuration
+
+    log_risk_configuration("worker", logger)
     try:
         if not process.read_only and execution.enabled:
             execution_task = asyncio.create_task(

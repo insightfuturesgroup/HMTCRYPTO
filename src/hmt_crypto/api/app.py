@@ -145,9 +145,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        from hmt_crypto.risk_policy import deployment_policy
+        from hmt_crypto.risk_operations import log_risk_configuration
 
-        deployment_policy()
+        log_risk_configuration("api", get_logger("api.risk"))
         stop = asyncio.Event()
         task: asyncio.Future[None] | None = (
             None if background is None else asyncio.ensure_future(background(stop))

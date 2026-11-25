@@ -39,6 +39,7 @@ from hmt_crypto.persistence.models import (
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
 )
+from hmt_crypto.risk_operations import alert_uncertainty
 from hmt_crypto.risk_policy import policy_rejection, record_rejection
 from hmt_crypto.worker.scope import normalize_worker_uuid
 
@@ -232,9 +233,9 @@ def _fill_recovery_observation(
             _missing_recovery_evidence("size")
             return None
         if (
-            not isinstance(order_id, (int, str))
+            not isinstance(order_id, int | str)
             or isinstance(order_id, bool)
-            or not isinstance(size, (int, str))
+            or not isinstance(size, int | str)
             or isinstance(size, bool)
         ):
             return None
@@ -260,6 +261,16 @@ async def recover_from_reconciliation(
     """Resolve an uncertain market order from unique recent fill evidence."""
     async with database.transaction() as session:
         submission = await session.get(LiveOrderSubmission, claim.submission_id)
+        if submission is not None and submission.status == "UNCERTAIN":
+            alert_uncertainty(
+                submission.sent_at,
+                now=datetime.now(UTC),
+                logger=get_logger("worker.live_recovery"),
+                context={
+                    "account_id": str(claim.account_id),
+                    "submission_id": str(claim.submission_id),
+                },
+            )
         intent = (
             None if submission is None else await session.get(LiveOrderIntent, submission.intent_id)
         )

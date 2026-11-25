@@ -106,6 +106,7 @@ from hmt_crypto.persistence.models import (
     WatchlistGroup,
     WatchlistItem,
 )
+from hmt_crypto.risk_operations import risk_health, uncertainty_status
 from hmt_crypto.risk_policy import deployment_policy, policy_rejection, record_rejection
 
 _MAX_SESSION_TOUCH_INTERVAL_SECONDS = 300
@@ -2667,9 +2668,10 @@ def install_platform_routes(
                     account_findings.append(
                         ("critical", "worker_lease", "No active private worker lease")
                     )
-                if risk is None:
+                risk_status = risk_health(risk)
+                if not risk_status["riskValid"]:
                     account_findings.append(
-                        ("warning", "risk_policy", "Live risk policy is not configured")
+                        ("warning", "risk_policy", str(risk_status["entryBlockReason"]))
                     )
                 if control is not None and control.last_error_code is not None:
                     account_findings.append(
@@ -3988,6 +3990,11 @@ def install_platform_routes(
                         "price": str(preview.price),
                         "intentStatus": intent.status,
                         "submissionStatus": submission.status,
+                        **(
+                            uncertainty_status(submission.sent_at, now=datetime.now(UTC))
+                            if submission.status == "UNCERTAIN"
+                            else {}
+                        ),
                         "exchangeOrderId": submission.exchange_order_id,
                         "exchangeOrderState": submission.exchange_order_state,
                         "exchangeSize": submission.exchange_order_size,
@@ -4964,6 +4971,7 @@ def install_platform_routes(
                         "workerLeaseActive": lease is not None and lease.lease_until > now,
                         "workerGeneration": None if lease is None else lease.generation,
                         "riskConfigured": risk is not None,
+                        **risk_health(risk),
                         "riskEnabled": bool(risk and risk.enabled),
                         "riskMode": (
                             "MISSING"

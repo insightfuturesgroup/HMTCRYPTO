@@ -212,6 +212,8 @@ interface HealthAccount {
   workerLeaseActive: boolean;
   riskConfigured: boolean;
   riskEnabled: boolean;
+  riskValid?: boolean;
+  entryBlockReason?: string | null;
   riskMode: "MISSING" | "ENFORCED" | "OWNER_OVERRIDE";
   entriesEnabled: boolean;
   exitsEnabled: boolean;
@@ -246,6 +248,9 @@ interface LocalOrderIntent {
   price: string;
   intentStatus: string;
   submissionStatus: string;
+  uncertainAgeSeconds?: number | null;
+  uncertainSeverity?: string | null;
+  uncertainReason?: string;
   exchangeOrderId: number | null;
   exchangeOrderState: string | null;
   exchangeSize: number | null;
@@ -2376,7 +2381,7 @@ function AccountStatePage({
                     <td>{displayPrice(intent.price)}</td>
                     <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus === "UNCERTAIN" ? "CONFIRMING" : intent.submissionStatus.replaceAll("_", " ")}</span></td>
                     <td>{deltaOrderLabel}</td>
-                    <td>{fillLabel ?? intent.exchangeCancellationReason ?? (intent.submissionStatus === "UNCERTAIN" ? "Confirming with Delta; do not retry" : intent.errorCode) ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : "Waiting for Delta acknowledgement")}</td>
+                    <td>{fillLabel ?? intent.exchangeCancellationReason ?? (intent.submissionStatus === "UNCERTAIN" ? `Confirming with Delta; do not retry · ${intent.uncertainAgeSeconds ?? "unknown"}s · ${intent.uncertainReason?.replaceAll("_", " ") ?? "exchange evidence pending"}${intent.uncertainSeverity ? ` · ${intent.uncertainSeverity}` : ""}` : intent.errorCode) ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : "Waiting for Delta acknowledgement")}</td>
                     <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : intent.submissionStatus === "UNCERTAIN" && user.role === "admin" ? <button onClick={() => void resolveUncertainIntent(intent.intentId)} type="button">Delete uncertain</button> : ["BLOCKED", "REJECTED", "ACCEPTED"].includes(intent.submissionStatus) && canTrade ? <button onClick={() => void hideCancelledIntent(intent.intentId)} type="button">Delete</button> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
                   </tr>;
                   })}
@@ -4924,11 +4929,11 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
                     {a.reconciliationAgeSeconds ?? "—"}s
                   </td>
                   <td>
-                    {a.riskMode === "ENFORCED"
+                    {a.entryBlockReason ?? (a.riskMode === "ENFORCED"
                       ? "Enforced"
                       : a.riskMode === "OWNER_OVERRIDE"
                         ? "Disabled (entries blocked)"
-                        : "Missing"}
+                        : "Missing")}
                   </td>
                   <td>
                     E {a.entriesEnabled ? "ON" : "OFF"} · X{" "}

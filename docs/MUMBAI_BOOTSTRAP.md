@@ -138,6 +138,10 @@ or a child process. Passwords still exist in process memory; run only on a trust
 laptop. No password is written by this script. The existing migration guard still
 validates connection admission and the CA. This recipe needs a real PG17 rehearsal
 before use; it is not evidence that migrations were run.
+`URL.create(...).render_as_string(hide_password=False)` percent-encodes reserved
+password characters; enter the original password, not a pre-encoded version.
+Passwords do not need to be alphanumeric. This document contains real public
+project/domain identifiers, but no real passwords, API keys, tokens or CA contents.
 
 ## 3. Auth, platform admin, and locked account
 
@@ -209,11 +213,8 @@ SQL ACL queries cannot prove that dashboard setting. `command.current` above
 must match `alembic heads` from the reviewed checkout. Verify actual PG major via
 `SHOW server_version;`. No verification query here reads password hashes or secrets.
 
-## Follow-up reserved for Commit 2c
+## Uncertain-order operations
 
-Missing-evidence UNCERTAIN already blocks entries and appears as CONFIRMING with
-"do not retry" in Orders. Add deployment-configured age thresholds, an alert and
-portal age/reason, and a manual-resolution runbook: inspect exchange order history,
-fills and positions using the original client/order identity; never resend an
-ambiguous order; preserve durable evidence and audit when resolving. Hiding a row
-must not clear dispatch debt. These additions are proposed, not implemented here.
+Missing-evidence UNCERTAIN blocks entries and appears as CONFIRMING with
+"do not retry" in Orders. See [UNCERTAIN_ORDER_RESOLUTION.md](UNCERTAIN_ORDER_RESOLUTION.md)
+for the age thresholds and evidence-preserving manual-resolution procedure.
