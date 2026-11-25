@@ -65,6 +65,7 @@ addopts = "--strict-markers --strict-config"
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
+    "safety: must execute in CI and must never skip or be deselected",
     "unit: isolated behavior with no external services",
     "contract: sanitized exchange payload and protocol contracts",
     "integration: external service integration",

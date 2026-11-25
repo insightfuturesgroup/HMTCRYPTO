@@ -28,7 +28,7 @@ jobs:
       - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m ruff format --check .
       - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m ruff check .
       - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m mypy src
-      - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m pytest -q
+      - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m pytest -q -rs -p tools.ci_pytest_policy
 
   ui:
     runs-on: ubuntu-24.04
