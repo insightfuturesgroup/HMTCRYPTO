@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 import pytest
+from schema_table_source import migration_chain_tables
 from schema_test_support import (
     HASH,
     NOW,
@@ -12,13 +13,15 @@ from schema_test_support import (
     signal,
     snapshot,
 )
-from schema_test_support import schema_db as schema_db
-from schema_table_source import migration_chain_tables
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import MetaData, delete, insert, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import AddConstraint, CreateIndex, CreateTable
 
 from hmt_crypto.persistence.errors import PersistenceError
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 pytestmark = pytest.mark.integration
 

@@ -7,12 +7,15 @@ from uuid import UUID
 import pytest
 from risk_rate_consumption_schema_support import committed_consumption_graph
 from risk_reservation_schema_support import apply_test_only_non_authoritative_release
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import select, text
 from sqlalchemy.orm import load_only
 
 from hmt_crypto.persistence.errors import PersistenceValueError
 from hmt_crypto.persistence.risk_reservation_models import RELEASE_FIELDS
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 ALTERNATE_ATTEMPT_PAYLOAD = (
     '{"order_type":"market","product_id":1101,"reduce_only":false,'

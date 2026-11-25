@@ -9,7 +9,7 @@ import traceback
 import asyncpg
 import pytest
 from schema_test_support import account, credential, schema_api
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import insert, select, text
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from sqlalchemy.engine.base import Connection
@@ -18,6 +18,9 @@ from sqlalchemy.exc import DBAPIError
 from hmt_crypto.config import Settings
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.errors import PersistenceError
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 
 def test_credential_storage_accepts_only_safe_hint_without_full_fingerprint_column():

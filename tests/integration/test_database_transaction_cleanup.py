@@ -5,8 +5,11 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import insert, select, text
-from test_database_foundation import database as database
+from test_database_foundation import database as _fixture_database
 from test_database_foundation import probe_table
+
+# Register the original shared fixture object under its pytest name.
+database = _fixture_database
 
 
 @pytest.mark.asyncio

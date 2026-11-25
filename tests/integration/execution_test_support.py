@@ -7,7 +7,10 @@ from uuid import UUID, uuid4
 
 import pytest_asyncio
 from schema_test_support import NOW, account, credential, product, schema_api, scope, snapshot
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 
 def command(owner, **changes):

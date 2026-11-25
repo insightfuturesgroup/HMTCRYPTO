@@ -12,12 +12,15 @@ from execution_test_support import (
     transition,
     venue_attempt,
 )
-from execution_test_support import execution_db as execution_db
+from execution_test_support import execution_db as _fixture_execution_db
 from schema_test_support import NOW, account, credential, schema_api, scope
 from schema_test_support import schema_db as schema_db
 from sqlalchemy import insert, select
 
 from hmt_crypto.persistence.errors import PersistenceError
+
+# Register the original shared fixture object under its pytest name.
+execution_db = _fixture_execution_db
 
 
 async def persist(database, row):

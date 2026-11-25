@@ -16,9 +16,9 @@ from api_audit_service_support import (
     seed_stream_end,
     summary_only,
 )
-from api_audit_service_support import audit_service as audit_service
-from api_audit_service_support import audit_sessions as audit_sessions
-from execution_test_support import schema_db as schema_db
+from api_audit_service_support import audit_service as _fixture_audit_service
+from api_audit_service_support import audit_sessions as _fixture_audit_sessions
+from execution_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import event, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -36,6 +36,11 @@ from hmt_crypto.persistence.api_audit_service_errors import (
     AuditTransactionStateError,
     AuditUnavailable,
 )
+
+# Register the original shared fixture object under its pytest name.
+audit_service = _fixture_audit_service
+audit_sessions = _fixture_audit_sessions
+schema_db = _fixture_schema_db
 
 pytestmark = pytest.mark.integration
 

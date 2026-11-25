@@ -5,7 +5,10 @@ from uuid import UUID
 
 import pytest
 from risk_rate_consumption_schema_support import committed_consumption_graph
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 
 def _database_path(db):

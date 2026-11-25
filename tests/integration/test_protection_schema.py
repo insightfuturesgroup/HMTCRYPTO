@@ -6,16 +6,19 @@ from uuid import uuid4
 
 import pytest
 from execution_test_support import command, order
-from execution_test_support import execution_db as execution_db
+from execution_test_support import execution_db as _fixture_execution_db
+from schema_table_source import migration_chain_tables
 from schema_test_support import NOW, account, product, schema_api, scope, snapshot
 from schema_test_support import schema_db as schema_db
-from schema_table_source import migration_chain_tables
 from sqlalchemy import UniqueConstraint, delete, insert, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import load_only
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from hmt_crypto.persistence.errors import PersistenceError
+
+# Register the original shared fixture object under its pytest name.
+execution_db = _fixture_execution_db
 
 NEW_TABLES = {
     "exit_intents",

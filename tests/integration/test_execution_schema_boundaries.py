@@ -8,13 +8,16 @@ from uuid import uuid4
 
 import pytest
 from execution_test_support import attempt, attempt_event, command, order, transition
-from execution_test_support import execution_db as execution_db
+from execution_test_support import execution_db as _fixture_execution_db
+from schema_table_source import migration_chain_tables
 from schema_test_support import NOW, account, schema_api
 from schema_test_support import schema_db as schema_db
-from schema_table_source import migration_chain_tables
 from sqlalchemy import insert, select, text
 
 from hmt_crypto.persistence.errors import PersistenceError
+
+# Register the original shared fixture object under its pytest name.
+execution_db = _fixture_execution_db
 
 
 @pytest.mark.asyncio

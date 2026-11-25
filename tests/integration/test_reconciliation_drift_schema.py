@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 from schema_test_support import HASH, NOW, account, schema_api, scope
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import UniqueConstraint, delete, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import load_only
@@ -18,6 +18,9 @@ from test_reconciliation_resource_schema import resource as collected_resource
 from test_reconciliation_run_schema import run
 
 from hmt_crypto.persistence.errors import PersistenceError, PersistenceValueError
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 DRIFT_KINDS = (
     "RESOURCE_INCOMPLETE",

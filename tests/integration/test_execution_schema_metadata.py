@@ -1,7 +1,7 @@
 """Execution metadata must stay private, scoped and restricted to this unit."""
 
-from schema_test_support import schema_api
 from schema_table_source import migration_chain_tables
+from schema_test_support import schema_api
 from sqlalchemy import MetaData, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import AddConstraint, CreateIndex, CreateTable

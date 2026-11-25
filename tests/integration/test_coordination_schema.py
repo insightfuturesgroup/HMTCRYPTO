@@ -5,10 +5,10 @@ from itertools import product
 from uuid import uuid4
 
 import pytest
-from execution_test_support import execution_db as execution_db
-from schema_test_support import NOW, account, schema_api, scope
-from schema_test_support import schema_db as schema_db
+from execution_test_support import execution_db as _fixture_execution_db
 from schema_table_source import migration_chain_tables
+from schema_test_support import NOW, account, schema_api, scope
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import MetaData, UniqueConstraint, delete, insert, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,10 @@ from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.schema import AddConstraint, CreateIndex, CreateTable
 
 from hmt_crypto.persistence.errors import PersistenceError
+
+# Register the original shared fixture object under its pytest name.
+execution_db = _fixture_execution_db
+schema_db = _fixture_schema_db
 
 BASELINE = {
     "accounts",

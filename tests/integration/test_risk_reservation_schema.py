@@ -20,9 +20,9 @@ from risk_reservation_schema_support import (
     reservation_graph,
     run_test_only_non_authoritative_atomic_terminalize_and_release,
 )
-from schema_test_support import NOW, schema_api
-from schema_test_support import schema_db as schema_db
 from schema_table_source import migration_chain_tables
+from schema_test_support import NOW, schema_api
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
@@ -39,6 +39,9 @@ from test_coordination_schema import save
 
 from hmt_crypto.persistence.errors import PersistenceError, PersistenceValueError
 from hmt_crypto.persistence.types import ExactDecimal
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 SCOPE = ("account_id", "region", "environment", "mode")
 DECIMALS = (

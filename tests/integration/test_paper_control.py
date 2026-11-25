@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from schema_test_support import account
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import delete
 
 from hmt_crypto.oms.kill_switch import (
@@ -26,6 +26,9 @@ from hmt_crypto.persistence.paper_execution_models import (
 from hmt_crypto.persistence.repository_contracts import AccountScope
 from hmt_crypto.worker.paper_control import PaperJournalKillPort
 from hmt_crypto.worker.paper_repository import JournalEvent, PaperJournalRepository
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 pytestmark = pytest.mark.integration
 NOW = datetime(2026, 11, 6, 8, tzinfo=UTC)

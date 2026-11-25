@@ -7,10 +7,10 @@ from itertools import product
 from uuid import uuid4
 
 import pytest
-from execution_test_support import execution_db as execution_db
-from schema_test_support import NOW, account, schema_api, scope
-from schema_test_support import schema_db as schema_db
+from execution_test_support import execution_db as _fixture_execution_db
 from schema_table_source import migration_chain_tables
+from schema_test_support import NOW, account, schema_api, scope
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import UniqueConstraint, delete, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,10 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from test_coordination_schema import BASELINE, SCOPE, graph, held, incarnation, lease, save
 
 from hmt_crypto.persistence.errors import PersistenceError
+
+# Register the original shared fixture object under its pytest name.
+execution_db = _fixture_execution_db
+schema_db = _fixture_schema_db
 
 ADDED = {"worker_heartbeats", "scheduler_state"}
 WORKER_FENCE = (

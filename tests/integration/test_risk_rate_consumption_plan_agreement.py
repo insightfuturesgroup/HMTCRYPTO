@@ -2,11 +2,14 @@
 
 import pytest
 from risk_rate_consumption_schema_support import committed_consumption_graph
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import select
 from sqlalchemy.orm import load_only
 
 from hmt_crypto.persistence.errors import PersistenceValueError
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 RESULT_PATHS = ("normal", "deferred", "expired", "full_refresh", "partial_refresh")
 OTHER_UUID = "91000000000040008000000000000001"

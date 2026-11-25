@@ -13,9 +13,9 @@ from risk_decision_schema_support import (
     decision_graph,
     reservation_plan,
 )
-from schema_test_support import schema_api
-from schema_test_support import schema_db as schema_db
 from schema_table_source import migration_chain_tables
+from schema_test_support import schema_api
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import (
     UniqueConstraint,
     delete,
@@ -34,6 +34,9 @@ from test_reconciliation_run_schema import run as reconciliation_run
 
 from hmt_crypto.persistence.errors import PersistenceError, PersistenceValueError
 from hmt_crypto.persistence.types import ExactDecimal
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 SCOPE = ("account_id", "region", "environment", "mode")
 PLAN_DECIMALS = (

@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from execution_test_support import attempt_event, venue_attempt
-from execution_test_support import schema_db as schema_db
+from execution_test_support import schema_db as _fixture_schema_db
 from risk_decision_schema_support import decision, decision_graph
 from risk_reservation_schema_support import reservation_from_decision
 from schema_test_support import NOW, schema_api
@@ -32,6 +32,9 @@ from hmt_crypto.persistence.api_audit_contracts import (
 from hmt_crypto.persistence.api_audit_models import ApiAuditEvent
 from hmt_crypto.persistence.errors import PersistenceValueError
 from hmt_crypto.persistence.risk_rate_consumption_evidence import derive_dispatch_event_key
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 pytestmark = pytest.mark.integration
 HASH = "a" * 64

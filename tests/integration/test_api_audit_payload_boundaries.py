@@ -20,7 +20,7 @@ from api_audit_payload_schema_support import (
     retained_account_event,
     retained_public_event,
 )
-from execution_test_support import schema_db as schema_db
+from execution_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import create_engine, delete, event, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
@@ -57,6 +57,9 @@ from hmt_crypto.persistence.api_audit_purge_contract import (
 from hmt_crypto.persistence.db import APP_SCHEMA
 from hmt_crypto.persistence.errors import PersistenceValueError
 from hmt_crypto.persistence.models import metadata
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 pytestmark = pytest.mark.integration
 

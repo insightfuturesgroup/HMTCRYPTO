@@ -7,11 +7,14 @@ from hashlib import sha256
 
 import pytest
 from schema_test_support import NOW, account, credential, product, schema_api, signal, snapshot
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from hmt_crypto.persistence.errors import PersistenceError
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 pytestmark = pytest.mark.integration
 
