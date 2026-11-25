@@ -209,16 +209,17 @@ def parse_compact_fill_uuid(value: object) -> UUID:
     if type(value) is not str or _COMPACT_UUID.fullmatch(value) is None:
         del value
         raise ValueError("invalid compact fill UUID") from None
-    raw = value
     try:
-        result = UUID(hex=raw)
-    except Exception:
-        del raw, value
-        raise ValueError("invalid compact fill UUID") from None
-    if result.hex != raw:
-        del raw, value, result
-        raise ValueError("invalid compact fill UUID") from None
-    return result
+        try:
+            result = UUID(hex=value)
+        except Exception:
+            raise ValueError("invalid compact fill UUID") from None
+        if result.hex != value:
+            del result
+            raise ValueError("invalid compact fill UUID") from None
+        return result
+    finally:
+        del value
 
 
 def parse_numeric_fill_order_ref(value: object) -> NumericFillOrderRef:

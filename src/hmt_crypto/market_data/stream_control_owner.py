@@ -282,10 +282,8 @@ class StreamControlOwner:
                 async with self._lock:
                     self._require_live()
                     self._successful_actor_sends += 1
-        except BaseException:
+        finally:
             del message
-            raise
-        del message
 
     def observe_inbound(self, kind: InboundKind) -> None:
         """Queue one bounded classification at its exact observation instant."""

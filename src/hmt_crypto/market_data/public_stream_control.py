@@ -332,10 +332,8 @@ class _PublicControlSession:
                 _issue_operation(self, _OperationKind.SEND, message),
                 deadline=self.deadline(),
             )
-        except BaseException:
+        finally:
             del message
-            raise
-        del message
         self.control_revision += 1
 
     async def subscriptions_accepted(
