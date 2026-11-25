@@ -21,7 +21,10 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 WORKDIR /workspace
 COPY pyproject.toml README.md alembic.ini Dockerfile docker-compose.yml docker-compose.ec2.yml ./
 COPY .github ./.github
+COPY .gitignore ./.gitignore
 COPY deploy ./deploy
+COPY docs ./docs
+COPY ops ./ops
 COPY migrations ./migrations
 COPY src ./src
 COPY tests ./tests

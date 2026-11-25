@@ -2,6 +2,7 @@
 .venv
 .env
 .env.*
+ops/local.env
 !.env.example
 deploy/api.env
 deploy/worker.env

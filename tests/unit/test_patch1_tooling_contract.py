@@ -38,11 +38,12 @@ def test_verify_workflow_runs_patch_branch_and_offline_test_containers() -> None
     source = workflow_path.read_text(encoding="utf-8")
 
     assert "pull_request:" in source
-    assert "branches: [main, codex/audit-fixes]" in source
+    assert "branches: [main, 'codex/**']" in source
     assert 'python-version: "3.13.10"' in source
     assert "--network none" in source
     assert "check_schema_manifest_change.py" in source
-    assert "DATABASE_MIGRATION_CA_FILE=/tmp/hmt-acceptance-postgres.crt" in source
+    assert "HMT_CRYPTO_MIGRATION_ACCEPTANCE_CA_FILE=/tmp/hmt-acceptance-postgres.crt" in source
+    assert "-e DATABASE_MIGRATION_CA_FILE=" not in source
     assert "ssl=on" in source
     assert "\n  deploy:" not in source
 

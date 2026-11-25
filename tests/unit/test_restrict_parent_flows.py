@@ -1,5 +1,7 @@
 """Exercise real endpoint bodies with isolated persistence and auth fakes."""
 
+from __future__ import annotations
+
 import ast
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime

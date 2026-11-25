@@ -122,12 +122,14 @@ jobs:
       - name: Create isolated migration database
         run: docker exec hmt-acceptance-postgres createdb -U postgres hmt_migration
       - name: Run full suite including PostgreSQL acceptance and policy concurrency
+        # The migration fixture scopes DATABASE_MIGRATION_CA_FILE to its tests;
+        # exporting it to the whole suite breaks strict application Settings.
         run: |
           mkdir -p test-results
           docker run --rm --network hmt-acceptance \
             -v "$PWD/test-results:/test-results" \
             -v /tmp/hmt-acceptance-tls/server.crt:/tmp/hmt-acceptance-postgres.crt:ro \
-            -e DATABASE_MIGRATION_CA_FILE=/tmp/hmt-acceptance-postgres.crt \
+            -e HMT_CRYPTO_MIGRATION_ACCEPTANCE_CA_FILE=/tmp/hmt-acceptance-postgres.crt \
             -e HMT_CRYPTO_DECIMAL_POSTGRES_URL=postgresql+asyncpg://postgres:acceptance-only@hmt-acceptance-postgres:5432/hmt_acceptance \
             -e HMT_CRYPTO_DECIMAL_POSTGRES_DISPOSABLE=true \
             -e HMT_CRYPTO_REQUIRE_DECIMAL_POSTGRES=true \

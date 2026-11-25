@@ -47,6 +47,19 @@ ROOT = Path(__file__).resolve().parents[2]
 PROBE_SNAPSHOT_ID = UUID("00000000-0000-0000-0000-00000000a001")
 
 
+@pytest.fixture
+def migration_acceptance_ca(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expose the disposable CA only while an explicit migration test runs.
+
+    Ordinary application Settings deliberately rejects this migration-only
+    variable. The dedicated test variable is ignored by application settings;
+    monkeypatch restores the process environment when this fixture finishes.
+    """
+    ca_file = os.environ.get("HMT_CRYPTO_MIGRATION_ACCEPTANCE_CA_FILE")
+    if ca_file is not None:
+        monkeypatch.setenv("DATABASE_MIGRATION_CA_FILE", ca_file)
+
+
 class _ConfiguredDatabases(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -696,6 +709,7 @@ def test_acceptance_rejects_driver_query_tls_downgrades(
 @pytest.mark.integration
 def test_migration_security_and_downgrade_contracts_on_disposable_postgres(
     monkeypatch: pytest.MonkeyPatch,
+    migration_acceptance_ca: None,
 ) -> None:
     url = _acceptance_url()
     monkeypatch.setenv("DATABASE_MIGRATION_URL", url.render_as_string(hide_password=False))
@@ -739,6 +753,7 @@ def test_migration_security_and_downgrade_contracts_on_disposable_postgres(
 @pytest.mark.integration
 def test_phase32_foreign_key_actions_upgrade_and_downgrade_on_disposable_postgres(
     monkeypatch: pytest.MonkeyPatch,
+    migration_acceptance_ca: None,
 ) -> None:
     url = _acceptance_url()
     monkeypatch.setenv("DATABASE_MIGRATION_URL", url.render_as_string(hide_password=False))
