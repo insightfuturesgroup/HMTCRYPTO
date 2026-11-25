@@ -99,6 +99,9 @@ async def run_paper_worker(
 
 def main() -> None:
     """Load settings, install graceful signal handlers, and run one worker."""
+    from hmt_crypto.risk_policy import deployment_policy
+
+    deployment_policy()
 
     configure_logging(json_output=True)
     worker_kind = os.environ.get("HMT_WORKER_KIND", "paper")

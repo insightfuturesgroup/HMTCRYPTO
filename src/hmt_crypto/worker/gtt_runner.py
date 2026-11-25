@@ -18,6 +18,7 @@ from hmt_crypto.api.live_submission import make_live_client_order_id
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
     AccountLiveControl,
+    AccountRiskPolicy,
     CatalogueProduct,
     CatalogueSnapshot,
     GttOrder,
@@ -29,6 +30,7 @@ from hmt_crypto.persistence.models import (
     PrivateWorkerLease,
     ProtectionGroup,
 )
+from hmt_crypto.risk_policy import policy_rejection, record_rejection
 from hmt_crypto.worker.scope import normalize_worker_uuid
 
 
@@ -75,7 +77,8 @@ async def evaluate_one_gtt(
             select(AccountLiveControl).where(AccountLiveControl.account_id == account_id)
         )
         reconciliation = await session.scalar(
-            select(PrivateReconciliationSnapshot).options(
+            select(PrivateReconciliationSnapshot)
+            .options(
                 load_only(
                     PrivateReconciliationSnapshot.id,
                     PrivateReconciliationSnapshot.observed_at,
@@ -154,6 +157,21 @@ async def evaluate_one_gtt(
         )
         if gtt is None:
             return GttCycleResult("IDLE", None, None)
+        if not gtt.reduce_only:
+            risk = await session.scalar(
+                select(AccountRiskPolicy)
+                .where(AccountRiskPolicy.account_id == account_id)
+                .with_for_update()
+            )
+            reason = policy_rejection(risk, stage="gtt_claim")
+            if reason is None:
+                # This runner implements protective exits only. Never relabel an
+                # entry as reduce-only to grant it the protection exemption.
+                reason = "gtt_entry_not_supported"
+                record_rejection("gtt_claim", reason)
+            gtt.last_error_code = reason
+            gtt.updated_at = now
+            return GttCycleResult("BLOCKED", gtt.id, None)
         quote = await session.scalar(
             select(MarketQuote).where(
                 MarketQuote.region == "india",
@@ -253,7 +271,7 @@ async def evaluate_one_gtt(
                 reduce_only=True,
                 # Protective exits reduce exposure and are deliberately independent
                 # of entry qualification and entry-notional policy.
-                max_order_notional=Decimal("1e50"),
+                max_order_notional=Decimal(0),
             )
         except (ValueError, InvalidOperation, LiveOrderAdmissionError):
             return GttCycleResult("BLOCKED", gtt.id, None)

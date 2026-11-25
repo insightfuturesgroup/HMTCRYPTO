@@ -38,6 +38,7 @@ from hmt_crypto.persistence.models import (
     TradingViewSignal,
     TradingViewStrategy,
 )
+from hmt_crypto.risk_policy import policy_rejection
 from hmt_crypto.worker.scope import normalize_worker_uuid
 
 
@@ -142,8 +143,21 @@ async def admit_one_tradingview_signal(
             select(AccountLiveControl).where(AccountLiveControl.account_id == account_id)
         )
         risk = await session.scalar(
-            select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
+            select(AccountRiskPolicy)
+            .where(AccountRiskPolicy.account_id == account_id)
+            .with_for_update()
         )
+        risk_reason = policy_rejection(risk, stage="signal_claim", reduce_only=reduce_only)
+        if risk_reason:
+            return _reject(signal, now=now, reason=risk_reason)
+        if risk is None and reduce_only:
+            risk = AccountRiskPolicy(
+                enabled=False,
+                version=0,
+                allowed_product_ids="[]",
+                max_order_notional=Decimal(0),
+                max_position_notional=Decimal(0),
+            )
         reconciliation = await session.scalar(
             select(PrivateReconciliationSnapshot)
             .options(
@@ -194,7 +208,7 @@ async def admit_one_tradingview_signal(
             allowed_products = set(json.loads(risk.allowed_product_ids))
         except (TypeError, ValueError):
             return _reject(signal, now=now, reason="invalid_risk_policy")
-        if product_id not in allowed_products:
+        if not reduce_only and product_id not in allowed_products:
             return _reject(signal, now=now, reason="product_not_allowed")
         catalogue = await session.scalar(
             select(CatalogueSnapshot)
@@ -236,7 +250,7 @@ async def admit_one_tradingview_signal(
                 limit_price=signal.limit_price,
                 market_price=market_price,
                 reduce_only=reduce_only,
-                max_order_notional=(risk.max_order_notional if risk.enabled else Decimal("1e30")),
+                max_order_notional=risk.max_order_notional,
             )
             positions = _payload_rows(reconciliation.positions_payload)
             open_orders = _payload_rows(reconciliation.open_orders_payload)
@@ -281,7 +295,7 @@ async def admit_one_tradingview_signal(
             )
         except LiveOrderAdmissionError:
             return _reject(signal, now=now, reason="position_sizing_invalid")
-        if risk.enabled and projected_notional > risk.max_position_notional:
+        if not reduce_only and projected_notional > risk.max_position_notional:
             return _reject(signal, now=now, reason="position_limit")
         daily_net = Decimal(0)
         for item in wallet:

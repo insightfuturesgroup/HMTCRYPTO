@@ -145,6 +145,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        from hmt_crypto.risk_policy import deployment_policy
+
+        deployment_policy()
         stop = asyncio.Event()
         task: asyncio.Future[None] | None = (
             None if background is None else asyncio.ensure_future(background(stop))
@@ -511,9 +514,13 @@ def create_app(
 
     @app.get("/api/v1/metrics")
     async def prometheus_metrics(request: Request) -> Response:
+        from prometheus_client import generate_latest
+
+        from hmt_crypto.risk_policy import REJECTIONS
+
         await require_session(request)
         return Response(
-            content=metrics.render(),
+            content=metrics.render() + generate_latest(REJECTIONS),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 

@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
@@ -105,6 +106,7 @@ from hmt_crypto.persistence.models import (
     WatchlistGroup,
     WatchlistItem,
 )
+from hmt_crypto.risk_policy import deployment_policy, policy_rejection, record_rejection
 
 _MAX_SESSION_TOUCH_INTERVAL_SECONDS = 300
 
@@ -193,6 +195,27 @@ def _page_payload_rows(
         "page": page,
         "pageSize": page_size,
     }
+
+
+def _require_entry_policy(policy: object | None, *, stage: str, reduce_only: bool) -> None:
+    reason = policy_rejection(policy, stage=stage, reduce_only=reduce_only)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
+
+
+def _save_policy_decimal(value: str, field: str) -> Decimal:
+    try:
+        parsed = Decimal(value)
+        if not parsed.is_finite():
+            raise InvalidOperation()
+        if parsed <= 0:
+            reason = f"risk_policy_non_positive_{field}"
+        else:
+            return _positive_decimal(value)
+    except (InvalidOperation, HTTPException):
+        reason = f"risk_policy_malformed_{field}"
+    record_rejection("save", reason)
+    raise HTTPException(status_code=400, detail=reason)
 
 
 class _Body(BaseModel):
@@ -298,8 +321,8 @@ class RiskPolicyBody(_Body):
     max_order_notional: str = Field(min_length=1, max_length=64)
     max_position_notional: str = Field(min_length=1, max_length=64)
     max_daily_loss: str = Field(min_length=1, max_length=64)
-    max_open_orders: int = Field(ge=1, le=10_000)
-    max_inflight_signals: int = Field(default=5, ge=1, le=100)
+    max_open_orders: int = Field(ge=1, le=10_000, strict=True)
+    max_inflight_signals: int = Field(default=5, ge=1, le=100, strict=True)
     usd_inr_rate: str = Field(default="100", min_length=1, max_length=64)
     allowed_product_ids: list[int] = Field(default_factory=list, max_length=500)
     product_scope_mode: Literal["SELECTED", "ALL_SUPPORTED"] = "SELECTED"
@@ -3385,6 +3408,10 @@ def install_platform_routes(
                     or replay.limit_price != requested_limit
                 ):
                     raise HTTPException(status_code=409, detail="idempotency_conflict")
+                replay_risk = await session.scalar(
+                    select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == body.account_id)
+                )
+                _require_entry_policy(replay_risk, stage="preview", reduce_only=body.reduce_only)
                 return {
                     "previewId": str(replay.id),
                     "accountId": str(replay.account_id),
@@ -3402,6 +3429,16 @@ def install_platform_routes(
             risk = await session.scalar(
                 select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == body.account_id)
             )
+            _require_entry_policy(risk, stage="preview", reduce_only=body.reduce_only)
+            if risk is None and body.reduce_only:
+                # Exit evidence uses version zero; this transient object is never saved.
+                risk = AccountRiskPolicy(
+                    enabled=False,
+                    version=0,
+                    allowed_product_ids="[]",
+                    max_order_notional=Decimal(0),
+                    max_position_notional=Decimal(0),
+                )
             global_control = await session.get(PlatformLiveControl, "global")
             lease = await session.scalar(
                 select(PrivateWorkerLease).where(PrivateWorkerLease.account_id == body.account_id)
@@ -3466,7 +3503,7 @@ def install_platform_routes(
                 and control.reconciled_at >= now - timedelta(seconds=60)
                 and gate_open
                 and risk is not None
-                and body.product_id in allowed
+                and (body.reduce_only or body.product_id in allowed)
                 and lease is not None
                 and lease.lease_until > now
                 and reconciliation is not None
@@ -3523,9 +3560,7 @@ def install_platform_routes(
                     limit_price=body.limit_price,
                     market_price=market_price,
                     reduce_only=body.reduce_only,
-                    max_order_notional=(
-                        risk.max_order_notional if risk.enabled else Decimal("1e30")
-                    ),
+                    max_order_notional=risk.max_order_notional,
                 )
             except LiveOrderAdmissionError:
                 raise HTTPException(status_code=400, detail="invalid_order_sizing") from None
@@ -3610,7 +3645,7 @@ def install_platform_routes(
                     contracts=abs(other_size),
                     price=Decimal(other_quote.mark_price),
                 )
-            if risk.enabled and aggregate_exposure > risk.max_position_notional:
+            if not body.reduce_only and aggregate_exposure > risk.max_position_notional:
                 raise HTTPException(status_code=409, detail="position_limit_exceeded")
             daily_net = Decimal(0)
             for item in wallet:
@@ -3725,6 +3760,14 @@ def install_platform_routes(
             permission = await account_permission(session, actor, preview.account_id)
             if actor.role == "viewer" or permission == "view":
                 raise HTTPException(status_code=403, detail="trading_permission_required")
+            admission_policy = await session.scalar(
+                select(AccountRiskPolicy)
+                .where(AccountRiskPolicy.account_id == preview.account_id)
+                .with_for_update()
+            )
+            _require_entry_policy(
+                admission_policy, stage="admission", reduce_only=preview.reduce_only
+            )
             replay = await session.scalar(
                 select(LiveOrderIntent).where(
                     LiveOrderIntent.account_id == preview.account_id,
@@ -3743,9 +3786,14 @@ def install_platform_routes(
                     AccountLiveControl.account_id == preview.account_id
                 )
             )
-            risk = await session.scalar(
-                select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == preview.account_id)
-            )
+            risk = admission_policy
+            if (
+                not preview.reduce_only
+                and risk is not None
+                and risk.version != preview.risk_policy_version
+            ):
+                record_rejection("admission", "risk_policy_changed")
+                raise HTTPException(status_code=409, detail="risk_policy_changed")
             lease = await session.scalar(
                 select(PrivateWorkerLease).where(
                     PrivateWorkerLease.account_id == preview.account_id
@@ -3759,8 +3807,14 @@ def install_platform_routes(
                 used is not None
                 or preview.expires_at <= now
                 or control is None
-                or risk is None
-                or risk.version != preview.risk_policy_version
+                or (
+                    not preview.reduce_only
+                    and (
+                        risk is None
+                        or risk.version != preview.risk_policy_version
+                        or preview.notional > risk.max_order_notional
+                    )
+                )
                 or control.reconciliation_state != "ready"
                 or control.reconciled_at is None
                 or control.reconciled_at < now - timedelta(seconds=60)
@@ -4506,7 +4560,10 @@ def install_platform_routes(
                     "maxOpenOrders": row.max_open_orders,
                     "maxInflightSignals": row.max_inflight_signals,
                     "limitCurrency": row.limit_currency,
-                    "usdInrRate": str(row.usd_inr_rate),
+                    "usdInrRate": str(deployment_policy().policy_conversion_rate),
+                    "storedPolicyConversionRate": str(row.usd_inr_rate),
+                    "policyConversionRate": str(deployment_policy().policy_conversion_rate),
+                    "conversionRateLabel": "policy conversion rate",
                     "maxOrderLimitInr": str(row.max_order_limit_inr),
                     "maxPositionLimitInr": str(row.max_position_limit_inr),
                     "maxDailyLossLimitInr": str(row.max_daily_loss_limit_inr),
@@ -4536,19 +4593,27 @@ def install_platform_routes(
         ):
             raise HTTPException(status_code=400, detail="invalid_product_scope")
         inr_limits = (
-            _positive_decimal(body.max_order_notional),
-            _positive_decimal(body.max_position_notional),
-            _positive_decimal(body.max_daily_loss),
+            _save_policy_decimal(body.max_order_notional, "max_order_limit_inr"),
+            _save_policy_decimal(body.max_position_notional, "max_position_limit_inr"),
+            _save_policy_decimal(body.max_daily_loss, "max_daily_loss_limit_inr"),
         )
-        usd_inr_rate = _positive_decimal(body.usd_inr_rate)
-        if (
-            inr_limits != (Decimal("5000"), Decimal("10000"), Decimal("2000"))
-            or usd_inr_rate != Decimal("100")
-            or body.max_open_orders != 5
-            or body.max_inflight_signals != 5
-        ):
-            raise HTTPException(status_code=409, detail="risk_scope_requires_requalification")
+        usd_inr_rate = deployment_policy().policy_conversion_rate
+        if _positive_decimal(body.usd_inr_rate) != usd_inr_rate:
+            raise HTTPException(status_code=409, detail="risk_policy_conversion_rate_mismatch")
         limits = tuple(value / usd_inr_rate for value in inr_limits)
+        candidate_policy = SimpleNamespace(
+            enabled=True,
+            usd_inr_rate=usd_inr_rate,
+            max_order_notional=limits[0],
+            max_position_notional=limits[1],
+            max_daily_loss=limits[2],
+            max_order_limit_inr=inr_limits[0],
+            max_position_limit_inr=inr_limits[1],
+            max_daily_loss_limit_inr=inr_limits[2],
+            max_open_orders=body.max_open_orders,
+            max_inflight_signals=body.max_inflight_signals,
+        )
+        _require_entry_policy(candidate_policy, stage="save", reduce_only=False)
         now = datetime.now(UTC)
         async with database.transaction() as session:
             account = await session.get(Account, account_id)
@@ -5916,8 +5981,14 @@ def install_platform_routes(
                             TradingViewSignal.status.in_(("received", "admitted")),
                         )
                     )
-                    if risk is None or (
-                        risk.enabled and int(inflight or 0) >= risk.max_inflight_signals
+                    risk_reason = policy_rejection(risk, stage="receipt", reduce_only=reduce_only)
+                    if risk_reason:
+                        rejected.append({"accountId": str(link.account_id), "reason": risk_reason})
+                        continue
+                    if (
+                        not reduce_only
+                        and risk is not None
+                        and int(inflight or 0) >= risk.max_inflight_signals
                     ):
                         rejected.append(
                             {
@@ -6020,8 +6091,11 @@ def install_platform_routes(
                         TradingViewSignal.status.in_(("received", "admitted")),
                     )
                 )
-                if risk is None or (
-                    risk.enabled and int(inflight or 0) >= risk.max_inflight_signals
+                _require_entry_policy(risk, stage="receipt", reduce_only=strategy.reduce_only)
+                if (
+                    not strategy.reduce_only
+                    and risk is not None
+                    and int(inflight or 0) >= risk.max_inflight_signals
                 ):
                     raise HTTPException(status_code=409, detail="signal_concurrency_exceeded")
                 if (strategy.order_type == "limit") != (body.limit_price is not None):

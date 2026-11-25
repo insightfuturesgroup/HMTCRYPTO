@@ -3696,7 +3696,7 @@ function RiskPage({
         </select>
         <label className="flex items-center gap-3 rounded border p-3">
           <input checked={riskEnabled} onChange={(e) => setRiskEnabled(e.target.checked)} type="checkbox" />
-          <span><strong>Risk {riskEnabled ? "ON" : "OFF"}</strong><br /><small>OFF bypasses owner-configurable limits; exchange validation, reduce-only checks, credentials, health gates, and emergency stop remain enforced.</small></span>
+          <span><strong>Risk {riskEnabled ? "ON" : "OFF"}</strong><br /><small>OFF blocks new entries. Reduce-only exits, cancellation, and emergency stop remain available.</small></span>
         </label>
         <label className="flex items-center gap-3 rounded border p-3">
           <input checked={autoActivation} onChange={(e) => setAutoActivation(e.target.checked)} type="checkbox" />
@@ -3737,11 +3737,11 @@ function RiskPage({
           />
         </label>
         <label>
-          Fixed INR per USD
+          Policy conversion rate (INR per USD)
           <input
             className="block w-full rounded border px-3 py-2"
             min="1"
-            onChange={(e) => setUsdInrRate(e.target.value)}
+            readOnly
             type="number"
             value={usdInrRate}
           />
@@ -3749,8 +3749,9 @@ function RiskPage({
         <p className="md:col-span-2">
           Effective USD limits: order ${Number(maxOrder || 0) / Number(usdInrRate || 1)},
           exposure ${Number(maxPosition || 0) / Number(usdInrRate || 1)}, daily loss
-          ${Number(maxLoss || 0) / Number(usdInrRate || 1)}. Changing the approved
-          ₹100/USD policy requires requalification.
+          ${Number(maxLoss || 0) / Number(usdInrRate || 1)}. This is a policy conversion
+          rate, not an FX quote. Conversion is conservative only while the market
+          rate is at or below this deployment constant.
         </p>
         <label>
           Maximum open orders
@@ -4926,7 +4927,7 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
                     {a.riskMode === "ENFORCED"
                       ? "Enforced"
                       : a.riskMode === "OWNER_OVERRIDE"
-                        ? "Owner override"
+                        ? "Disabled (entries blocked)"
                         : "Missing"}
                   </td>
                   <td>

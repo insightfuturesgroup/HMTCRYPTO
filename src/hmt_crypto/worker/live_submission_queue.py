@@ -37,6 +37,7 @@ from hmt_crypto.persistence.models import (
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
 )
+from hmt_crypto.risk_policy import policy_rejection, record_rejection
 from hmt_crypto.worker.scope import normalize_worker_uuid
 
 
@@ -291,7 +292,9 @@ async def claim_next_live_submission(
         )
         global_control = await session.get(PlatformLiveControl, "global")
         risk = await session.scalar(
-            select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
+            select(AccountRiskPolicy)
+            .where(AccountRiskPolicy.account_id == account_id)
+            .with_for_update()
         )
         reconciliation = await session.scalar(
             select(PrivateReconciliationSnapshot)
@@ -420,6 +423,23 @@ async def claim_next_live_submission(
             return None
         intent = await session.get(LiveOrderIntent, submission.intent_id)
         preview = None if intent is None else await session.get(LiveOrderPreview, intent.preview_id)
+        if preview is not None:
+            risk_reason = policy_rejection(
+                risk, stage="submission_claim", reduce_only=preview.reduce_only
+            )
+            if risk_reason:
+                submission.last_error_code = risk_reason
+                submission.updated_at = now
+                return None
+            if (
+                not preview.reduce_only
+                and risk is not None
+                and preview.risk_policy_version != risk.version
+            ):
+                record_rejection("submission_claim", "risk_policy_changed")
+                submission.last_error_code = "risk_policy_changed"
+                submission.updated_at = now
+                return None
         if (
             intent is None
             or preview is None
@@ -430,6 +450,7 @@ async def claim_next_live_submission(
                 and (
                     risk is None
                     or preview.risk_policy_version != risk.version
+                    or preview.notional > risk.max_order_notional
                     or not control.entries_enabled
                     or global_control is None
                     or not global_control.entries_enabled
