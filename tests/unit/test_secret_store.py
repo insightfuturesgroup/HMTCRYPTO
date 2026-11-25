@@ -61,7 +61,7 @@ async def test_scheduled_deletion_is_restored_and_replaced(monkeypatch: pytest.M
         "import_module",
         lambda name: _Boto3 if name == "boto3" else original(name),
     )
-    store = AwsDeltaSecretStore(region="ap-southeast-2", prefix="hmt-crypto/delta")
+    store = AwsDeltaSecretStore(region="ap-south-1", prefix="hmt-crypto/delta")
 
     receipt = await store.put(
         account_id=UUID("00000000-0000-4000-8000-000000000123"),

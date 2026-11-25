@@ -38,7 +38,7 @@ def _claim() -> private_runner._Claim:
         account_id=_DriverUUID("32468e34-b2a5-4d5e-9a82-64aa3e8ab148"),
         credential_version=1,
         external_user_id="12345",
-        secret_arn="arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:hmt-crypto/delta/test",
+        secret_arn="arn:aws:secretsmanager:ap-south-1:123456789012:secret:hmt-crypto/delta/test",
         generation=1,
         product_ids=frozenset({27, 3136}),
     )
@@ -47,7 +47,7 @@ def _claim() -> private_runner._Claim:
 def _process() -> PrivateWorkerSettings:
     return PrivateWorkerSettings(
         HMT_PRIVATE_WORKER_ID="00000000-0000-0000-0000-000000000123",
-        HMT_AWS_REGION="ap-southeast-2",
+        HMT_AWS_REGION="ap-south-1",
         HMT_PRIVATE_READ_ONLY="false",
     )
 

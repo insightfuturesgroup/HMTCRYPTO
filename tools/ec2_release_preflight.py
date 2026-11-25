@@ -12,6 +12,15 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID
 
+APPROVED_AWS_REGIONS = frozenset({"ap-south-1"})
+
+
+def _approved_region(values: dict[str, str]) -> str:
+    region = _require(values, "HMT_AWS_REGION")
+    if region not in APPROVED_AWS_REGIONS:
+        raise PreflightError("unapproved setting: HMT_AWS_REGION")
+    return region
+
 
 class PreflightError(RuntimeError):
     """A release invariant is absent or unsafe."""
@@ -102,13 +111,14 @@ def verify(repo: Path, config: Path, expected_commit: str, *, compose: bool) -> 
     project_ref = supabase_host.removesuffix(".supabase.co")
     _require(api, "HMT_SUPABASE_PUBLISHABLE_KEY")
     _require(api, "HMT_SUPABASE_SECRET_KEY")
-    _require(api, "HMT_AWS_REGION", "ap-southeast-2")
+    api_region = _approved_region(api)
     UUID(_require(api, "HMT_API_ACCOUNT_ID"))
     _require(worker, "HMT_LIVE_ORDER_DISPATCH_ENABLED", "false")
     _require(worker, "PRODUCTION_WRITES_FORBIDDEN", "true")
     if worker.get("HMT_LIVE_ORDER_QUALIFICATION_SHA256", ""):
         raise PreflightError("qualification digest must be empty during locked deployment")
-    _require(worker, "HMT_AWS_REGION", "ap-southeast-2")
+    if _approved_region(worker) != api_region:
+        raise PreflightError("API and worker HMT_AWS_REGION must match")
     runtime_user, _ = _database_url(_require(migration, "DATABASE_URL"), direct=False)
     _, migration_host = _database_url(_require(migration, "DATABASE_MIGRATION_URL"), direct=True)
     if (
