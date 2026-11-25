@@ -67,19 +67,115 @@ remote check. Start from the reviewed repository directory with its installed
 editable project/dev dependencies. Save the following password-free script as
 `/tmp/hmt-migrate.py`, then run `python /tmp/hmt-migrate.py` from that directory.
 Do not enable shell tracing or environment/process diagnostic logging.
+The identical executable helper is `tools/migrate_mumbai.py`; run it from the
+repository root with `python tools/migrate_mumbai.py` if preferred.
+
+Alembic `env.py` reads `DATABASE_MIGRATION_URL` and `DATABASE_URL`; its optional
+TLS CA setting is `DATABASE_MIGRATION_CA_FILE`. It does not load app settings.
+The helper additionally sets and validates these runtime-loader settings using
+`ControlRuntimeSettings(_env_file=None)` before Alembic, without opening an engine:
+
+| Setting | Helper value / purpose |
+| --- | --- |
+| `DATABASE_URL` | Distinct runtime session-pooler URL, built in memory |
+| `DATABASE_MIGRATION_URL` | Direct owner URL, built in memory |
+| `DATABASE_MIGRATION_CA_FILE` | Absolute project CA path for owner TLS |
+| `DATABASE_CA_FILE` | Same CA path for runtime configuration |
+| `DATABASE_SINGLE_PROCESS` | `false`; PostgreSQL multi-process deployment |
+| `EXECUTION_MODE` | `LIVE`; records target scope, does not submit orders |
+| `DELTA_REGION` | `india` |
+| `DELTA_ENV` | `prod` |
+| `PRODUCTION_WRITES_FORBIDDEN` | `true` |
+| `HMT_LIVE_ORDER_DISPATCH_ENABLED` | `false` |
+| `HMT_PRIVATE_READ_ONLY` | `true` |
+
+The final three settings explicitly preserve closed write/dispatch behavior. No
+Auth/Delta keys or account IDs are required for migrations. Runtime-loader fields
+otherwise have defaults; explicitly setting them prevents accidental SQLite or
+PAPER defaults. `HMT_CRYPTO_ALLOW_EMPTY_DOWNGRADE` is only a destructive baseline
+downgrade acknowledgement, not an upgrade requirement; this helper does not set it.
+No process settings are written to disk, and previous values are restored on exit.
 
 ```python
+"""Interactive owner migration helper; never prints exception messages or URLs."""
+
 import getpass
 import os
-from pathlib import Path
+import re
+import ssl
 import subprocess
 import sys
+from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.engine import URL
 
-def run():
+from hmt_crypto.api.settings import ControlRuntimeSettings
+from hmt_crypto.persistence.migration_configuration import MigrationConfigurationError
+
+
+def build_environment(
+    ca: Path, pooler: str, owner_password: str, runtime_password: str
+) -> dict[str, str]:
+    project = "pwnbqwzwfmzlddhndgtm"
+    return {
+        "DATABASE_MIGRATION_URL": URL.create(
+            "postgresql+asyncpg",
+            username="postgres",
+            password=owner_password,
+            host=f"db.{project}.supabase.co",
+            port=5432,
+            database="postgres",
+        ).render_as_string(hide_password=False),
+        "DATABASE_URL": URL.create(
+            "postgresql+asyncpg",
+            username=f"hmt_crypto_app.{project}",
+            password=runtime_password,
+            host=pooler,
+            port=5432,
+            database="postgres",
+        ).render_as_string(hide_password=False),
+        "DATABASE_MIGRATION_CA_FILE": str(ca),
+        "DATABASE_CA_FILE": str(ca),
+        "DATABASE_SINGLE_PROCESS": "false",
+        "EXECUTION_MODE": "LIVE",
+        "DELTA_REGION": "india",
+        "DELTA_ENV": "prod",
+        "PRODUCTION_WRITES_FORBIDDEN": "true",
+        "HMT_LIVE_ORDER_DISPATCH_ENABLED": "false",
+        "HMT_PRIVATE_READ_ONLY": "true",
+    }
+
+
+def failure_diagnostic(error: Exception) -> str:
+    # Class names are bounded; exception messages are never included in output.
+    name = type(error).__name__
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name):
+        name = "Exception"
+    if isinstance(error, MigrationConfigurationError):
+        hint = (
+            "guard admission: verify direct owner, distinct runtime role, "
+            "target and CA configuration"
+        )
+    elif isinstance(error, ssl.SSLError):
+        hint = "TLS: verify project CA, certificate hostname and clock; do not bypass verification"
+    elif isinstance(error, OSError):
+        hint = "connection: verify DNS, IPv6/direct IPv4 route and port 5432"
+    elif re.fullmatch(
+        r"Database migration failed without exposing server diagnostics \(SQLSTATE 28[A-Z0-9]{3}\)",
+        str(error),
+    ):
+        hint = "authentication: verify owner credentials and login permission"
+    else:
+        # env.py intentionally suppresses driver details; do not undo that boundary.
+        hint = (
+            "details redacted: check connection/TLS/auth, role grants and migration prerequisites"
+        )
+    return f"Migration failed [{name}]: {hint}."
+
+
+def run() -> None:
     if sys.version_info[:3] != (3, 13, 10) or not sys.stdin.isatty():
         raise RuntimeError("Use Python 3.13.10 in an interactive terminal")
     root = Path.cwd()
@@ -94,27 +190,17 @@ def run():
     if not ca.is_absolute() or not ca.is_file():
         raise RuntimeError("CA file missing")
     pooler = input("Exact session-pooler hostname from project dashboard: ").strip()
-    if not pooler.endswith(".pooler.supabase.com") or any(c in pooler for c in "/:@ ?#"):
+    if not re.fullmatch(r"[a-z0-9-]+\.pooler\.supabase\.com", pooler):
         raise RuntimeError("Invalid session-pooler hostname")
-    project = "pwnbqwzwfmzlddhndgtm"
     owner_password = getpass.getpass("Database owner password: ")
     runtime_password = getpass.getpass("hmt_crypto_app password: ")
     if not owner_password or not runtime_password:
         raise RuntimeError("Passwords required")
-    values = {
-        "DATABASE_MIGRATION_URL": URL.create(
-            "postgresql+asyncpg", username="postgres", password=owner_password,
-            host=f"db.{project}.supabase.co", port=5432, database="postgres",
-        ).render_as_string(hide_password=False),
-        "DATABASE_URL": URL.create(
-            "postgresql+asyncpg", username=f"hmt_crypto_app.{project}",
-            password=runtime_password, host=pooler, port=5432, database="postgres",
-        ).render_as_string(hide_password=False),
-        "DATABASE_MIGRATION_CA_FILE": str(ca),
-    }
+    values = build_environment(ca, pooler, owner_password, runtime_password)
     previous = {key: os.environ.get(key) for key in values}
     try:
         os.environ.update(values)
+        ControlRuntimeSettings(_env_file=None).database_runtime_config()
         config = Config(str(root / "alembic.ini"))
         command.upgrade(config, "head")
         command.current(config)
@@ -125,12 +211,13 @@ def run():
             else:
                 os.environ[key] = value
 
-try:
-    run()
-except Exception:
-    # Do not render exception objects: a driver error might contain a URL.
-    print("Migration failed; investigate with secret-safe diagnostics.", file=sys.stderr)
-    sys.exit(1)
+
+if __name__ == "__main__":
+    try:
+        run()
+    except Exception as error:
+        print(failure_diagnostic(error), file=sys.stderr)
+        sys.exit(1)
 ```
 
 The script passes passwords to Alembic in the same process, not command arguments
@@ -142,6 +229,10 @@ before use; it is not evidence that migrations were run.
 password characters; enter the original password, not a pre-encoded version.
 Passwords do not need to be alphanumeric. This document contains real public
 project/domain identifiers, but no real passwords, API keys, tokens or CA contents.
+On failure, the helper prints only a bounded exception class name and a fixed
+hint. Driver messages, URL/password values and tracebacks are not printed. When
+Alembic has already redacted driver diagnostics, the hint remains generic; it
+cannot reliably distinguish TLS from a network failure after that redaction.
 
 ## 3. Auth, platform admin, and locked account
 

@@ -13,8 +13,8 @@ from hmt_crypto.risk_policy import COUNTS, MONEY, RiskDeploymentPolicy, _reason,
 
 class RecoveryAlertSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="HMT_RECOVERY_", env_file=None, frozen=True)
-    warning_seconds: int = Field(default=30, gt=0)
-    critical_seconds: int = Field(default=120, gt=0)
+    warning_seconds: int = Field(default=15, gt=0)
+    critical_seconds: int = Field(default=60, gt=0)
 
     @model_validator(mode="after")
     def ordered(self) -> "RecoveryAlertSettings":

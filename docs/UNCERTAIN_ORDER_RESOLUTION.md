@@ -23,8 +23,8 @@ manually mark ACCEPTED, resend the order, or infer execution from a net position
    not removal of recovery debt. Reopen entries only through reviewed gates after
    reconciliation, protection and incident review pass.
 
-Worker deployment thresholds: `HMT_RECOVERY_WARNING_SECONDS=30` and
-`HMT_RECOVERY_CRITICAL_SECONDS=120`; critical must exceed warning. The API must
+Worker deployment thresholds: `HMT_RECOVERY_WARNING_SECONDS=15` and
+`HMT_RECOVERY_CRITICAL_SECONDS=60`; critical must exceed warning. The API must
 use the same values so portal severity agrees. Missing send time is critical.
 `live_recovery_uncertainty_aged` is emitted when recovery checks exceed a threshold;
 `hmt_live_recovery_aged_checks_total{severity="warning|critical"}` counts checks,

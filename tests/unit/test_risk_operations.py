@@ -91,7 +91,7 @@ def test_migration_password_reserved_characters_round_trip():
     assert password not in wire
 
 
-@pytest.mark.parametrize("age,severity", [(29, None), (30, "warning"), (120, "critical")])
+@pytest.mark.parametrize("age,severity", [(14, None), (15, "warning"), (60, "critical")])
 def test_uncertainty_age_thresholds(age, severity):
     now = datetime.now(UTC)
     state = subject.uncertainty_status(now - timedelta(seconds=age), now=now)
