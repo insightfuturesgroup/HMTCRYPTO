@@ -41,8 +41,7 @@ STATEMENTS: Sequence[tuple[str, str]] = (
     ("add_group_id", "ALTER TABLE hmt_crypto.watchlist_items ADD COLUMN group_id UUID"),
     (
         "add_position",
-        "ALTER TABLE hmt_crypto.watchlist_items "
-        "ADD COLUMN position BIGINT DEFAULT 0 NOT NULL",
+        "ALTER TABLE hmt_crypto.watchlist_items ADD COLUMN position BIGINT DEFAULT 0 NOT NULL",
     ),
     (
         "backfill_groups",
@@ -81,8 +80,7 @@ STATEMENTS: Sequence[tuple[str, str]] = (
     ),
     (
         "drop_old_unique",
-        "ALTER TABLE hmt_crypto.watchlist_items "
-        "DROP CONSTRAINT uq_watchlist_user_symbol",
+        "ALTER TABLE hmt_crypto.watchlist_items DROP CONSTRAINT uq_watchlist_user_symbol",
     ),
     ("drop_old_index", "DROP INDEX hmt_crypto.ix_watchlist_user_created"),
     (
@@ -97,8 +95,7 @@ STATEMENTS: Sequence[tuple[str, str]] = (
     ),
     (
         "runtime_grant",
-        "GRANT SELECT, INSERT, UPDATE, DELETE "
-        "ON hmt_crypto.watchlist_groups TO hmt_crypto_app",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON hmt_crypto.watchlist_groups TO hmt_crypto_app",
     ),
 )
 

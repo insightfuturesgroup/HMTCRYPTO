@@ -222,14 +222,10 @@ async def test_all_tickers_filters_futures_and_accepts_observed_microsecond_time
 
     client = new_client(handler)
     try:
-        tickers = await client.get_tickers(
-            contract_types=("perpetual_futures", "futures")
-        )
+        tickers = await client.get_tickers(contract_types=("perpetual_futures", "futures"))
     finally:
         await client.aclose()
-    assert tickers[0].timestamp == datetime(
-        2023, 11, 14, 22, 13, 20, 123456, tzinfo=UTC
-    )
+    assert tickers[0].timestamp == datetime(2023, 11, 14, 22, 13, 20, 123456, tzinfo=UTC)
     assert list(seen[0].url.params.multi_items()) == [
         ("contract_types", "perpetual_futures,futures")
     ]

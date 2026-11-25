@@ -68,7 +68,7 @@ async def test_subscription_ack_tolerates_interleaved_heartbeat_and_snapshot() -
             '{"name":"orders","symbols":["BTCUSD","ETHUSD"]},'
             '{"name":"positions","symbols":["BTCUSD","ETHUSD"]},'
             '{"name":"margins"},'
-            '{"name":"v2/user_trades","symbols":["BTCUSD","ETHUSD"]}]}'
+            '{"name":"v2/user_trades","symbols":["BTCUSD","ETHUSD"]}]}',
         ]
     )
 

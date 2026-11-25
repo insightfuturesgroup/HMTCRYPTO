@@ -231,8 +231,7 @@ class DeltaPublicClient:
                 or not contract_types
                 or len(set(contract_types)) != len(contract_types)
                 or any(
-                    type(value) is not str
-                    or value not in {"futures", "perpetual_futures"}
+                    type(value) is not str or value not in {"futures", "perpetual_futures"}
                     for value in contract_types
                 )
             ):

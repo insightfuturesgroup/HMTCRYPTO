@@ -207,7 +207,8 @@ async def execute_one_live_order_action(
         )
         global_control = await session.get(PlatformLiveControl, "global")
         reconciliation = await session.scalar(
-            select(PrivateReconciliationSnapshot).options(
+            select(PrivateReconciliationSnapshot)
+            .options(
                 load_only(
                     PrivateReconciliationSnapshot.id,
                     PrivateReconciliationSnapshot.observed_at,

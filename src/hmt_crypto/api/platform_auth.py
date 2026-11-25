@@ -158,9 +158,7 @@ class SupabaseAuthGateway:
 
     async def delete_user(self, auth_user_id: UUID) -> None:
         """Remove a newly created Auth user when local provisioning cannot commit."""
-        response = await self._request(
-            "DELETE", f"/admin/users/{auth_user_id}", privileged=True
-        )
+        response = await self._request("DELETE", f"/admin/users/{auth_user_id}", privileged=True)
         if response.status_code not in {200, 204, 404}:
             raise AuthenticationUnavailable()
 
