@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from prometheus_client import Counter
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
@@ -23,6 +24,7 @@ from hmt_crypto.api.live_submission import (
     require_transition,
     submission_event_sha256,
 )
+from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
     Account,
@@ -39,6 +41,20 @@ from hmt_crypto.persistence.models import (
 )
 from hmt_crypto.risk_policy import policy_rejection, record_rejection
 from hmt_crypto.worker.scope import normalize_worker_uuid
+
+RECOVERY_MISSING = Counter(
+    "hmt_live_recovery_missing_evidence_total",
+    "Recovery remains unresolved because required fill evidence is missing",
+    ("reason",),
+)
+
+
+def _missing_recovery_evidence(reason: str) -> None:
+    # Only fixed internal reason names reach this boundary; never log payloads.
+    RECOVERY_MISSING.labels(reason=reason).inc()
+    get_logger("worker.live_recovery").warning(
+        "live_recovery_evidence_missing", reason=reason, outcome="UNCERTAIN"
+    )
 
 
 def _database_uuid(value: object) -> UUID:
@@ -92,7 +108,6 @@ async def has_live_submission_recovery_debt(database: Database, *, account_id: U
             .where(
                 LiveOrderSubmission.account_id == account_id,
                 LiveOrderSubmission.status.in_(("SENDING", "UNCERTAIN")),
-                LiveOrderIntent.hidden_at.is_(None),
             )
             .limit(1)
         )
@@ -132,7 +147,6 @@ async def claim_live_submission_recovery(
             .where(
                 LiveOrderSubmission.account_id == account_id,
                 LiveOrderSubmission.status.in_(("SENDING", "UNCERTAIN")),
-                LiveOrderIntent.hidden_at.is_(None),
             )
             .order_by(LiveOrderSubmission.created_at, LiveOrderSubmission.id)
             .limit(1)
@@ -186,7 +200,7 @@ async def claim_live_submission_recovery(
 
 
 def _fill_recovery_observation(
-    fills_payload: str,
+    fills_payload: str | None,
     *,
     product_id: int,
     side: str,
@@ -194,6 +208,9 @@ def _fill_recovery_observation(
     sent_at: datetime,
 ) -> RecoveryObservation | None:
     """Accept only one uniquely matching fully-filled Delta order."""
+    if fills_payload is None:
+        _missing_recovery_evidence("fills_payload")
+        return None
     try:
         rows = json.loads(fills_payload)
     except (TypeError, ValueError):
@@ -208,6 +225,19 @@ def _fill_recovery_observation(
         if row.get("side") != side:
             continue
         order_id, size, created_at = row.get("order_id"), row.get("size"), row.get("created_at")
+        if order_id is None:
+            _missing_recovery_evidence("order_id")
+            return None
+        if size is None:
+            _missing_recovery_evidence("size")
+            return None
+        if (
+            not isinstance(order_id, (int, str))
+            or isinstance(order_id, bool)
+            or not isinstance(size, (int, str))
+            or isinstance(size, bool)
+        ):
+            return None
         try:
             order_id = int(order_id)
             size = int(size)
