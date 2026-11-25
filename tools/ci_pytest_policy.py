@@ -27,6 +27,22 @@ def pytest_deselected(items):
     )
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items):
+    """Treat database acceptance coverage as mandatory safety execution."""
+    for item in items:
+        if (
+            "postgres_repository_db" in item.fixturenames
+            or item.name == "test_raw_postgres_decimal_boundary_and_catalogue_contract"
+            or item.name
+            in {
+                "test_migration_security_and_downgrade_contracts_on_disposable_postgres",
+                "test_phase32_foreign_key_actions_upgrade_and_downgrade_on_disposable_postgres",
+            }
+        ):
+            item.add_marker(pytest.mark.safety)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     report = (yield).get_result()

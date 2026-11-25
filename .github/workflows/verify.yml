@@ -28,7 +28,8 @@ jobs:
       - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m ruff format --check .
       - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m ruff check .
       - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m mypy src
-      - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m pytest -q -rs -p tools.ci_pytest_policy
+      # Full pytest execution lives in postgres-acceptance so database safety
+      # tests receive disposable services rather than silently skipping.
 
   ui:
     runs-on: ubuntu-24.04
@@ -73,7 +74,7 @@ jobs:
           -v /tmp/hmt-acceptance-tls:/tls:ro
           -e POSTGRES_PASSWORD=acceptance-only
           -e POSTGRES_DB=hmt_acceptance
-          postgres:16-bookworm
+          postgres:17-bookworm
           -c ssl=on
           -c ssl_cert_file=/tls/server.crt
           -c ssl_key_file=/tls/server.key
@@ -88,31 +89,33 @@ jobs:
           exit 1
       - name: Create isolated migration database
         run: docker exec hmt-acceptance-postgres createdb -U postgres hmt_migration
-      - name: Run 14 repository and decimal acceptance cases offline
+      - name: Run full suite including all 17 PostgreSQL acceptance cases
         run: |
+          mkdir -p test-results
           docker run --rm --network hmt-acceptance \
+            -v "$PWD/test-results:/test-results" \
+            -v /tmp/hmt-acceptance-tls/server.crt:/tmp/hmt-acceptance-postgres.crt:ro \
+            -e DATABASE_MIGRATION_CA_FILE=/tmp/hmt-acceptance-postgres.crt \
             -e HMT_CRYPTO_DECIMAL_POSTGRES_URL=postgresql+asyncpg://postgres:acceptance-only@hmt-acceptance-postgres:5432/hmt_acceptance \
             -e HMT_CRYPTO_DECIMAL_POSTGRES_DISPOSABLE=true \
             -e HMT_CRYPTO_REQUIRE_DECIMAL_POSTGRES=true \
             -e HMT_CRYPTO_REPOSITORY_POSTGRES_URL=postgresql+asyncpg://postgres:acceptance-only@hmt-acceptance-postgres:5432/hmt_acceptance \
             -e HMT_CRYPTO_REPOSITORY_POSTGRES_DISPOSABLE=true \
             -e HMT_CRYPTO_REQUIRE_REPOSITORY_POSTGRES=true \
-            hmt-crypto-test:${{ github.sha }} \
-            python -m pytest -q \
-              tests/integration/test_exact_decimal_postgresql_acceptance.py::test_raw_postgres_decimal_boundary_and_catalogue_contract \
-              tests/integration/test_repository_postgresql_acceptance.py -k 'test_postgres_'
-      - name: Run the 15th migration-chain acceptance case offline
-        run: |
-          docker run --rm --network hmt-acceptance \
-            -v /tmp/hmt-acceptance-tls/server.crt:/tmp/hmt-acceptance-postgres.crt:ro \
-            -e DATABASE_MIGRATION_CA_FILE=/tmp/hmt-acceptance-postgres.crt \
             -e HMT_CRYPTO_MIGRATION_ACCEPTANCE_URL=postgresql+asyncpg://postgres:acceptance-only@hmt-acceptance-postgres:5432/hmt_migration \
             -e HMT_CRYPTO_MIGRATION_ACCEPTANCE_DISPOSABLE=true \
             -e HMT_CRYPTO_REQUIRE_MIGRATION_POSTGRES=true \
             -e HMT_CRYPTO_ALLOW_EMPTY_DOWNGRADE=I_ACKNOWLEDGE_EMPTY_DEV_DATABASE \
             hmt-crypto-test:${{ github.sha }} \
-            python -m pytest -q \
-              tests/integration/test_migration_postgresql_acceptance.py::test_migration_security_and_downgrade_contracts_on_disposable_postgres
+            python -m pytest -q -rs -p tools.ci_pytest_policy \
+              --junitxml=/test-results/full-suite.xml
+      - name: Preserve full-suite results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-suite-pg17
+          path: test-results/full-suite.xml
+          if-no-files-found: error
 
   deployment-shape:
     runs-on: ubuntu-24.04
