@@ -50,6 +50,7 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions(base="base", head="heads"))
     assert [(revision.revision, revision.down_revision) for revision in revisions] == [
+        ("phase32_restrict_foreign_keys_v1", "phase31_dynamic_tradingview_v1"),
         ("phase31_dynamic_tradingview_v1", "phase30_ensure_password_state_v1"),
         ("phase30_ensure_password_state_v1", "phase29_merge_auth_controls_v1"),
         (
@@ -91,7 +92,7 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
         ("phase2_hardening_v1", "phase2_baseline_v1"),
         ("phase2_baseline_v1", None),
     ]
-    assert script.get_current_head() == "phase31_dynamic_tradingview_v1"
+    assert script.get_current_head() == "phase32_restrict_foreign_keys_v1"
     assert len("phase8_version_width_v1") <= 32
     assert max(len(revision.revision) for revision in revisions) <= 128
 

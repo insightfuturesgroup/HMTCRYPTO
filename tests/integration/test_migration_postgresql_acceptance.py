@@ -355,6 +355,90 @@ async def _version(url: URL) -> str | None:
         await engine.dispose()
 
 
+async def _foreign_key_actions(url: URL) -> list[tuple[str, str, str]]:
+    engine = create_async_engine(
+        url,
+        hide_parameters=True,
+        connect_args=migration_connect_args(url),
+    )
+    try:
+        async with engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    "SELECT constraint_record.conname, "
+                    "constraint_record.confupdtype::text, "
+                    "constraint_record.confdeltype::text "
+                    "FROM pg_catalog.pg_constraint AS constraint_record "
+                    "JOIN pg_catalog.pg_class AS relation "
+                    "ON relation.oid = constraint_record.conrelid "
+                    "JOIN pg_catalog.pg_namespace AS namespace "
+                    "ON namespace.oid = relation.relnamespace "
+                    "WHERE namespace.nspname = 'hmt_crypto' "
+                    "AND constraint_record.contype = 'f' "
+                    "ORDER BY constraint_record.conname"
+                )
+            )
+            return [(str(name), str(update), str(delete)) for name, update, delete in result]
+    finally:
+        await engine.dispose()
+
+
+async def _insert_valid_platform_session(url: URL) -> tuple[UUID, UUID]:
+    user_id = UUID("00000000-0000-0000-0000-00000000b001")
+    session_id = UUID("00000000-0000-0000-0000-00000000b002")
+    engine = create_async_engine(
+        url,
+        hide_parameters=True,
+        connect_args=migration_connect_args(url),
+    )
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO hmt_crypto.platform_users ("
+                    "id, auth_user_id, email, full_name, role, status, "
+                    "password_change_required, created_at, updated_at"
+                    ") VALUES ("
+                    ":user_id, :auth_user_id, 'migration-probe@example.invalid', "
+                    "'Migration Probe', 'viewer', 'active', false, now(), now()"
+                    ")"
+                ),
+                {"user_id": user_id, "auth_user_id": user_id},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO hmt_crypto.platform_sessions ("
+                    "id, user_id, token_sha256, created_at, expires_at, last_seen_at"
+                    ") VALUES ("
+                    ":session_id, :user_id, :token, now(), "
+                    "now() + interval '1 hour', now()"
+                    ")"
+                ),
+                {"session_id": session_id, "user_id": user_id, "token": "b" * 64},
+            )
+    finally:
+        await engine.dispose()
+    return user_id, session_id
+
+
+async def _platform_session_exists(url: URL, session_id: UUID) -> bool:
+    engine = create_async_engine(
+        url,
+        hide_parameters=True,
+        connect_args=migration_connect_args(url),
+    )
+    try:
+        async with engine.connect() as connection:
+            return bool(
+                await connection.scalar(
+                    text("SELECT EXISTS (SELECT 1 FROM hmt_crypto.platform_sessions WHERE id=:id)"),
+                    {"id": session_id},
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
 async def _insert_data_bearing_probe(url: URL) -> None:
     engine = create_async_engine(
         url,
@@ -650,3 +734,44 @@ def test_migration_security_and_downgrade_contracts_on_disposable_postgres(
     finally:
         asyncio.run(_drop_disposable_objects(url, drop_retention_role=retention_role_created))
     assert asyncio.run(_schema_exists(url)) is False
+
+
+@pytest.mark.integration
+def test_phase32_foreign_key_actions_upgrade_and_downgrade_on_disposable_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = _acceptance_url()
+    monkeypatch.setenv("DATABASE_MIGRATION_URL", url.render_as_string(hide_password=False))
+    runtime_url = url.set(username="hmt_runtime_acceptance", password="unused-runtime-secret")
+    monkeypatch.setenv("DATABASE_URL", runtime_url.render_as_string(hide_password=False))
+    config = Config(str(ROOT / "alembic.ini"))
+    prior_cascades = {
+        "crypto_contract_settings_account_id_fkey",
+        "fk_tv_webhook_keys_configuration",
+        "tradingview_configuration_accounts_account_id_fkey",
+        "tradingview_configuration_accounts_configuration_id_fkey",
+        "tradingview_symbol_mappings_account_id_fkey",
+    }
+    try:
+        command.upgrade(config, "phase31_dynamic_tradingview_v1")
+        _, session_id = asyncio.run(_insert_valid_platform_session(url))
+
+        command.upgrade(config, "head")
+        upgraded = asyncio.run(_foreign_key_actions(url))
+        assert upgraded
+        assert all(update == "r" and delete == "r" for _, update, delete in upgraded)
+        assert asyncio.run(_platform_session_exists(url, session_id))
+
+        command.downgrade(config, "phase31_dynamic_tradingview_v1")
+        downgraded = asyncio.run(_foreign_key_actions(url))
+        assert downgraded
+        assert all(update == "a" for _, update, _ in downgraded)
+        assert {name for name, _, delete in downgraded if delete == "c"} == prior_cascades
+        assert all(delete in {"c", "r"} for _, _, delete in downgraded)
+        assert asyncio.run(_platform_session_exists(url, session_id))
+
+        command.upgrade(config, "head")
+        assert asyncio.run(_version(url)) == "phase32_restrict_foreign_keys_v1"
+        assert asyncio.run(_platform_session_exists(url, session_id))
+    finally:
+        asyncio.run(_drop_disposable_objects(url, drop_retention_role=False))

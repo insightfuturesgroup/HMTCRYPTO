@@ -2,12 +2,12 @@
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
-    ForeignKey,
     Index,
     Numeric,
     Text,
@@ -15,11 +15,22 @@ from sqlalchemy import (
     Uuid,
     text,
 )
+from sqlalchemy import (
+    ForeignKey as _SQLAlchemyForeignKey,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from hmt_crypto.persistence.db import Base
 from hmt_crypto.persistence.schema_support import NulFreeString, StrictBigInteger, bounded
 from hmt_crypto.persistence.types import UTCDateTime
+
+
+def ForeignKey(column: str, **kwargs: Any) -> _SQLAlchemyForeignKey:
+    """Build platform foreign keys with the schema's restrictive action contract."""
+
+    kwargs["onupdate"] = "RESTRICT"
+    kwargs["ondelete"] = "RESTRICT"
+    return _SQLAlchemyForeignKey(column, **kwargs)
 
 
 class PlatformUser(Base):
