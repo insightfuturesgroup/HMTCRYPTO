@@ -22,7 +22,16 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from hmt_crypto.persistence.db import Base
 from hmt_crypto.persistence.schema_support import NulFreeString, StrictBigInteger, bounded
-from hmt_crypto.persistence.types import UTCDateTime
+from hmt_crypto.persistence.types import ExactDecimal, UTCDateTime, exact_decimal_checks
+
+
+def _exact_decimal_checks(*column_names: str) -> tuple[CheckConstraint, ...]:
+    decimal_type = ExactDecimal(38, 18)
+    return tuple(
+        constraint
+        for column_name in column_names
+        for constraint in exact_decimal_checks(column_name, decimal_type)
+    )
 
 
 def ForeignKey(column: str, **kwargs: Any) -> _SQLAlchemyForeignKey:
@@ -230,6 +239,7 @@ class MarketQuote(Base):
 class MarketCandle(Base):
     __tablename__ = "market_candles"
     __table_args__ = (
+        *_exact_decimal_checks("open", "high", "low", "close", "volume"),
         CheckConstraint("region = 'india'", name="india_only"),
         CheckConstraint("environment = 'prod'", name="prod_only"),
         CheckConstraint("resolution = '1m'", name="resolution"),
@@ -255,11 +265,11 @@ class MarketCandle(Base):
     symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
     resolution: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
     timestamp: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
-    open: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    high: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    low: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    close: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    volume: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    open: Mapped[Decimal] = mapped_column(ExactDecimal(38, 18), nullable=False)
+    high: Mapped[Decimal] = mapped_column(ExactDecimal(38, 18), nullable=False)
+    low: Mapped[Decimal] = mapped_column(ExactDecimal(38, 18), nullable=False)
+    close: Mapped[Decimal] = mapped_column(ExactDecimal(38, 18), nullable=False)
+    volume: Mapped[Decimal | None] = mapped_column(ExactDecimal(38, 18))
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
@@ -307,6 +317,7 @@ class ProtectionGroup(Base):
 
     __tablename__ = "protection_groups"
     __table_args__ = (
+        *_exact_decimal_checks("average_fill_price"),
         CheckConstraint(
             "status IN ('pending_fill','armed','claiming','completed','cancelled','failed')",
             name="status_allowed",
@@ -329,7 +340,7 @@ class ProtectionGroup(Base):
     symbol: Mapped[str] = mapped_column(NulFreeString(128), nullable=False)
     exit_side: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
     protected_contracts: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
-    average_fill_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    average_fill_price: Mapped[Decimal] = mapped_column(ExactDecimal(38, 18), nullable=False)
     strategy_version: Mapped[int | None] = mapped_column(StrictBigInteger())
     protection_version: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     catalogue_revision: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
@@ -359,6 +370,7 @@ class GttOrder(Base):
 
     __tablename__ = "gtt_orders"
     __table_args__ = (
+        *_exact_decimal_checks("trail_anchor"),
         CheckConstraint(
             "trigger_kind IN ('stop_loss','target','trailing_stop')", name="trigger_kind_allowed"
         ),
@@ -408,7 +420,7 @@ class GttOrder(Base):
     trigger_price: Mapped[str | None] = mapped_column(NulFreeString(64))
     trail_offset: Mapped[str | None] = mapped_column(NulFreeString(64))
     limit_price: Mapped[str | None] = mapped_column(NulFreeString(64))
-    trail_anchor: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    trail_anchor: Mapped[Decimal | None] = mapped_column(ExactDecimal(38, 18))
     last_quote_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.market_quotes.id", ondelete="RESTRICT")
     )
@@ -636,6 +648,7 @@ class TradingViewWebhookKey(Base):
 class TradingViewSignal(Base):
     __tablename__ = "tradingview_signals"
     __table_args__ = (
+        *_exact_decimal_checks("atr_value"),
         CheckConstraint("side IN ('buy','sell')", name="side_allowed"),
         CheckConstraint(
             "status IN ('received','admitted','rejected','duplicate')", name="status_allowed"
@@ -676,7 +689,7 @@ class TradingViewSignal(Base):
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.platform_users.id", ondelete="RESTRICT")
     )
-    atr_value: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    atr_value: Mapped[Decimal | None] = mapped_column(ExactDecimal(38, 18))
     atr_multiplier: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
     stop_loss_multiplier: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
     target_multiplier: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
@@ -821,6 +834,15 @@ class AccountRiskPolicy(Base):
 
     __tablename__ = "account_risk_policies"
     __table_args__ = (
+        *_exact_decimal_checks(
+            "max_order_notional",
+            "max_position_notional",
+            "max_daily_loss",
+            "usd_inr_rate",
+            "max_order_limit_inr",
+            "max_position_limit_inr",
+            "max_daily_loss_limit_inr",
+        ),
         CheckConstraint("max_order_notional > 0", name="max_order_notional_pos"),
         CheckConstraint("max_position_notional > 0", name="max_position_notional_pos"),
         CheckConstraint("max_daily_loss > 0", name="max_daily_loss_pos"),
@@ -841,23 +863,23 @@ class AccountRiskPolicy(Base):
     account_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.accounts.id", ondelete="RESTRICT"), nullable=False
     )
-    max_order_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    max_position_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    max_daily_loss: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    max_order_notional: Mapped[Decimal] = mapped_column(ExactDecimal(38, 18), nullable=False)
+    max_position_notional: Mapped[Decimal] = mapped_column(ExactDecimal(38, 18), nullable=False)
+    max_daily_loss: Mapped[Decimal] = mapped_column(ExactDecimal(38, 18), nullable=False)
     max_open_orders: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     max_inflight_signals: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False, default=5)
     limit_currency: Mapped[str] = mapped_column(NulFreeString(8), nullable=False, default="INR")
     usd_inr_rate: Mapped[Decimal] = mapped_column(
-        Numeric(18, 6), nullable=False, default=Decimal("100")
+        ExactDecimal(38, 18), nullable=False, default=Decimal("100")
     )
     max_order_limit_inr: Mapped[Decimal] = mapped_column(
-        Numeric(38, 18), nullable=False, default=Decimal("5000")
+        ExactDecimal(38, 18), nullable=False, default=Decimal("5000")
     )
     max_position_limit_inr: Mapped[Decimal] = mapped_column(
-        Numeric(38, 18), nullable=False, default=Decimal("10000")
+        ExactDecimal(38, 18), nullable=False, default=Decimal("10000")
     )
     max_daily_loss_limit_inr: Mapped[Decimal] = mapped_column(
-        Numeric(38, 18), nullable=False, default=Decimal("2000")
+        ExactDecimal(38, 18), nullable=False, default=Decimal("2000")
     )
     allowed_product_ids: Mapped[str] = mapped_column(Text, nullable=False)
     product_scope_mode: Mapped[str] = mapped_column(
@@ -967,6 +989,7 @@ class LiveOrderPreview(Base):
 
     __tablename__ = "live_order_previews"
     __table_args__ = (
+        *_exact_decimal_checks("limit_price", "price", "notional"),
         CheckConstraint("side IN ('buy','sell')", name="side_allowed"),
         CheckConstraint("order_type IN ('market','limit')", name="order_type_allowed"),
         CheckConstraint("contracts >= 1", name="contracts_pos"),
@@ -989,11 +1012,11 @@ class LiveOrderPreview(Base):
     side: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
     contracts: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     order_type: Mapped[str] = mapped_column(NulFreeString(8), nullable=False)
-    limit_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    limit_price: Mapped[Decimal | None] = mapped_column(ExactDecimal(38, 18))
     reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     price_basis: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)
-    price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
-    notional: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    price: Mapped[Decimal] = mapped_column(ExactDecimal(38, 18), nullable=False)
+    notional: Mapped[Decimal] = mapped_column(ExactDecimal(38, 18), nullable=False)
     catalogue_snapshot_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("hmt_crypto.catalogue_snapshots.id", ondelete="RESTRICT"), nullable=False
     )
@@ -1233,6 +1256,7 @@ class LiveOrderAction(Base):
 
     __tablename__ = "live_order_actions"
     __table_args__ = (
+        *_exact_decimal_checks("target_limit_price"),
         CheckConstraint("action IN ('CANCEL','MODIFY')", name="action_allowed"),
         CheckConstraint(
             "status IN ('PENDING','SENDING','UNCERTAIN','SUCCEEDED','REJECTED','BLOCKED')",
@@ -1268,7 +1292,7 @@ class LiveOrderAction(Base):
     order_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     product_id: Mapped[int] = mapped_column(StrictBigInteger(), nullable=False)
     target_size: Mapped[int | None] = mapped_column(StrictBigInteger())
-    target_limit_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    target_limit_price: Mapped[Decimal | None] = mapped_column(ExactDecimal(38, 18))
     request_payload: Mapped[str] = mapped_column(Text, nullable=False)
     request_sha256: Mapped[str] = mapped_column(NulFreeString(64), nullable=False)
     status: Mapped[str] = mapped_column(NulFreeString(16), nullable=False)

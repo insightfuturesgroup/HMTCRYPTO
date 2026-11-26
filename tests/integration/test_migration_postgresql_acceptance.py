@@ -762,10 +762,10 @@ def test_migration_security_and_downgrade_contracts_on_disposable_postgres(
         assert evidence == (
             76,
             30,
+            False,
             True,
             True,
-            True,
-            "phase33_private_function_acl_v1",
+            "phase34_exact_decimal_v1",
             0,
             0,
         )
@@ -773,7 +773,7 @@ def test_migration_security_and_downgrade_contracts_on_disposable_postgres(
         retention_role_created = True
         with pytest.raises(RuntimeError, match="without exposing server diagnostics"):
             command.downgrade(config, "phase2_baseline_v1")
-        assert asyncio.run(_version(url)) == "phase2_hardening_v1"
+            assert asyncio.run(_version(url)) == "phase31_dynamic_tradingview_v1"
     finally:
         asyncio.run(_drop_disposable_objects(url, drop_retention_role=retention_role_created))
     assert asyncio.run(_schema_exists(url)) is False

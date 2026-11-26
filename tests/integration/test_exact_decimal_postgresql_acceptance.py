@@ -64,6 +64,18 @@ INVALID_38_18 = (
     "CAST('-Infinity' AS NUMERIC)",
 )
 
+PLAIN_NUMERIC_ALLOWLIST = {
+    ("tradingview_strategies", "stop_loss_pct"): "numeric(9,6)",
+    ("tradingview_strategies", "target_pct"): "numeric(9,6)",
+    ("tradingview_strategies", "trailing_offset_pct"): "numeric(9,6)",
+    ("crypto_contract_settings", "atr_multiplier"): "numeric(18,8)",
+    ("crypto_contract_settings", "stop_loss_multiplier"): "numeric(18,8)",
+    ("crypto_contract_settings", "target_multiplier"): "numeric(18,8)",
+    ("tradingview_signals", "atr_multiplier"): "numeric(18,8)",
+    ("tradingview_signals", "stop_loss_multiplier"): "numeric(18,8)",
+    ("tradingview_signals", "target_multiplier"): "numeric(18,8)",
+}
+
 
 def _database_target(url: URL) -> tuple[str, int, str]:
     try:
@@ -477,8 +489,17 @@ async def test_raw_postgres_decimal_boundary_and_catalogue_contract():
                     (probe.name, "positive_amount"),
                     (probe.name, "nonnegative_amount"),
                 }
-                assert {(row[0], row[1]) for row in numeric_rows} == expected_numeric
-                assert all(row[2] == -1 and row[3] == "numeric" for row in numeric_rows)
+                actual_numeric = {(row[0], row[1]) for row in numeric_rows}
+                assert actual_numeric == expected_numeric | set(PLAIN_NUMERIC_ALLOWLIST)
+                actual_formats = {(row[0], row[1]): row[3] for row in numeric_rows}
+                assert {
+                    column: actual_formats[column] for column in PLAIN_NUMERIC_ALLOWLIST
+                } == PLAIN_NUMERIC_ALLOWLIST
+                assert all(
+                    row[2] == -1 and row[3] == "numeric"
+                    for row in numeric_rows
+                    if (row[0], row[1]) in expected_numeric
+                )
 
                 constraint_rows = (
                     await translated.execute(
@@ -496,7 +517,7 @@ async def test_raw_postgres_decimal_boundary_and_catalogue_contract():
                 expected_constraints = _decimal_constraint_names(
                     translated, (*metadata.tables.values(), probe)
                 )
-                assert len(expected_constraints) == 102
+                assert len(expected_constraints) == len(_decimal_columns()) * 3 + 11
                 assert expected_constraints <= set(actual_constraints)
                 assert all(actual_constraints[name] for name in expected_constraints)
             finally:

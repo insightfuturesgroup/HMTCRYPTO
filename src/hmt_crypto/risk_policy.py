@@ -9,20 +9,21 @@ from prometheus_client import Counter
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from hmt_crypto.domain.money import PositiveDecimal
 from hmt_crypto.logging import get_logger
 
 
 class RiskDeploymentPolicy(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="HMT_RISK_", env_file=None, frozen=True)
 
-    policy_conversion_rate: Decimal = Field(default=Decimal("100"), gt=0, allow_inf_nan=False)
-    reference_rate: Decimal = Field(default=Decimal("100"), gt=0, allow_inf_nan=False)
-    max_order_notional: Decimal = Field(default=Decimal("50"), gt=0, allow_inf_nan=False)
-    max_position_notional: Decimal = Field(default=Decimal("100"), gt=0, allow_inf_nan=False)
-    max_daily_loss: Decimal = Field(default=Decimal("20"), gt=0, allow_inf_nan=False)
-    max_order_limit_inr: Decimal = Field(default=Decimal("5000"), gt=0, allow_inf_nan=False)
-    max_position_limit_inr: Decimal = Field(default=Decimal("10000"), gt=0, allow_inf_nan=False)
-    max_daily_loss_limit_inr: Decimal = Field(default=Decimal("2000"), gt=0, allow_inf_nan=False)
+    policy_conversion_rate: PositiveDecimal = Decimal("100")
+    reference_rate: PositiveDecimal = Decimal("100")
+    max_order_notional: PositiveDecimal = Decimal("50")
+    max_position_notional: PositiveDecimal = Decimal("100")
+    max_daily_loss: PositiveDecimal = Decimal("20")
+    max_order_limit_inr: PositiveDecimal = Decimal("5000")
+    max_position_limit_inr: PositiveDecimal = Decimal("10000")
+    max_daily_loss_limit_inr: PositiveDecimal = Decimal("2000")
     max_open_orders: int = Field(default=5, gt=0)
     max_inflight_signals: int = Field(default=5, gt=0)
 
