@@ -545,8 +545,6 @@ async def _exercise_append_only_and_retention_purge(url: URL) -> None:
             for statement in (
                 "CREATE ROLE hmt_audit_retention NOLOGIN",
                 "GRANT USAGE ON SCHEMA hmt_crypto TO hmt_audit_retention",
-                "GRANT SELECT, DELETE ON hmt_crypto.api_audit_payloads TO hmt_audit_retention",
-                "GRANT INSERT ON hmt_crypto.api_audit_events TO hmt_audit_retention",
                 "GRANT EXECUTE ON FUNCTION "
                 "hmt_crypto.purge_expired_audit_payload(uuid, text) "
                 "TO hmt_audit_retention",
@@ -554,6 +552,23 @@ async def _exercise_append_only_and_retention_purge(url: URL) -> None:
                 "SET ROLE hmt_audit_retention",
             ):
                 await connection.execute(text(statement))
+            for forbidden, values in (
+                (
+                    text(
+                        "UPDATE hmt_crypto.api_audit_payloads "
+                        "SET payload_text = payload_text WHERE owning_event_id = :identifier"
+                    ),
+                    {"identifier": payload.owning_event_id},
+                ),
+                (ApiAuditEvent.__table__.insert(), _row_values(public_root())),
+            ):
+                try:
+                    async with connection.begin_nested():
+                        await connection.execute(forbidden, values)
+                except DBAPIError as error:
+                    assert getattr(error.orig, "sqlstate", None) == "42501"
+                else:
+                    raise AssertionError("retention role received direct audit mutation access")
             result = await connection.execute(
                 text(
                     "SELECT * FROM hmt_crypto.purge_expired_audit_payload("

@@ -357,6 +357,17 @@ def test_purge_decoder_accepts_exact_ordered_database_result_only() -> None:
     assert receipt.actor_role_name == "hmt_audit_retention"
 
 
+def test_purge_decoder_reconstructs_database_json_context_and_slot() -> None:
+    row = _purge_row()
+    row["context"] = row["context"].model_dump(mode="json")
+    row["payload_slot"] = str.__str__(row["payload_slot"])
+
+    receipt = decode_audit_payload_purge_result(row)
+
+    assert type(receipt.context) is PublicAuditContext
+    assert receipt.payload_slot is PayloadSlot.REQUEST
+
+
 @pytest.mark.parametrize(
     "change",
     (

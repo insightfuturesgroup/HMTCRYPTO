@@ -52,7 +52,10 @@ def test_phase32_uses_not_valid_then_validate_and_restores_prior_actions(monkeyp
 
 def test_migration_chain_has_one_head_after_phase32() -> None:
     script = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
-    assert script.get_heads() == ["phase33_private_function_acl_v1"]
+    assert script.get_heads() == ["phase33b_retention_purge_v1"]
+    assert script.get_revision("phase33b_retention_purge_v1").down_revision == (
+        "phase33_private_function_acl_v1"
+    )
     assert script.get_revision("phase33_private_function_acl_v1").down_revision == (
         "phase32_restrict_foreign_keys_v1"
     )
