@@ -38,6 +38,8 @@ def test_downgrade_restores_only_repository_defined_prior_public_function(monkey
     monkeypatch.setattr(module.op, "execute", execute)
     module.downgrade()
     sql = "\n".join(str(call.args[0]) for call in execute.call_args_list)
+    assert "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA hmt_crypto FROM PUBLIC" in sql
+    assert "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA hmt_crypto FROM %I" in sql
     assert "GRANT EXECUTE ON FUNCTION " in sql
     assert "guard_account_reconciliation_checkpoints_v1() TO PUBLIC" in sql
     assert "GRANT EXECUTE ON ALL FUNCTIONS" not in sql

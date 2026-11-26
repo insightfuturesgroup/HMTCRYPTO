@@ -595,6 +595,12 @@ async def _drop_disposable_objects(url: URL, *, drop_retention_role: bool) -> No
     )
     try:
         async with engine.begin() as connection:
+            # Phase33 changes a cluster-level owner default. Dropping a disposable
+            # schema cannot undo it, so restore PostgreSQL's standard function
+            # default before another acceptance case recreates the migration chain.
+            await connection.execute(
+                text("ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC")
+            )
             await connection.execute(text("DROP SCHEMA IF EXISTS hmt_crypto CASCADE"))
             await connection.execute(text("DROP TABLE IF EXISTS public.hmt_crypto_alembic_version"))
             if drop_retention_role:

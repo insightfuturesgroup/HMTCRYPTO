@@ -24,6 +24,15 @@ LEFT JOIN pg_roles r ON r.oid = a.grantee
 WHERE n.nspname = 'hmt_crypto'
 ORDER BY 1,2,3,4"""
 
+PHASE32_BROWSER_ACL = [
+    (
+        "hmt_crypto.guard_account_reconciliation_checkpoints_v1()",
+        "PUBLIC",
+        "EXECUTE",
+        False,
+    )
+]
+
 
 async def evidence(url, *, check_private=False):
     engine = create_async_engine(
@@ -77,8 +86,12 @@ def test_private_function_acl_upgrade_downgrade_postgres(monkeypatch):
     try:
         command.upgrade(config, "phase32_restrict_foreign_keys_v1")
         before = asyncio.run(evidence(url))
+        assert [row for row in before if row[1] in {"PUBLIC", "anon", "authenticated"}] == (
+            PHASE32_BROWSER_ACL
+        )
         command.upgrade(config, "head")
-        asyncio.run(evidence(url, check_private=True))
+        after = asyncio.run(evidence(url, check_private=True))
+        assert not [row for row in after if row[1] in {"PUBLIC", "anon", "authenticated"}]
         command.downgrade(config, "phase32_restrict_foreign_keys_v1")
         assert asyncio.run(evidence(url)) == before
         command.upgrade(config, "head")

@@ -65,6 +65,23 @@ def downgrade() -> None:
     This deliberately reopens the old PUBLIC grant. Roll back the app without
     downgrading this security revision unless that reopening is explicitly reviewed.
     """
+    op.execute(sa.text("REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA hmt_crypto FROM PUBLIC"))
+    op.execute(
+        sa.text(
+            """DO $restore_private_function_acl$
+DECLARE browser text;
+BEGIN
+    FOREACH browser IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT FROM pg_roles WHERE rolname = browser) THEN
+            EXECUTE format(
+                'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA hmt_crypto FROM %I', browser
+            );
+        END IF;
+    END LOOP;
+END
+$restore_private_function_acl$;"""
+        )
+    )
     op.execute(
         sa.text(
             "GRANT EXECUTE ON FUNCTION "

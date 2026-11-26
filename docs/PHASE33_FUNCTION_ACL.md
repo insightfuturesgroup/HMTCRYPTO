@@ -14,6 +14,20 @@ forward migration from phase32, with no edits to existing migrations.
 | `reject_append_only_mutation()` | Yes | None |
 | `reject_platform_audit_mutation()` | Yes | None |
 
+On a genuinely fresh role-first PostgreSQL 17 cluster, the complete effective
+browser ACL before phase33 is therefore one PUBLIC row for
+`guard_account_reconciliation_checkpoints_v1()` and no PUBLIC, anon or
+authenticated rows for the other five functions. After phase33 all six have zero
+browser-principal EXECUTE rows. Downgrade first revokes browser EXECUTE from all
+six and then restores only that one repository-defined PUBLIC grant.
+
+The later owner-only phase32 observation came from test-cluster contamination,
+not a contradictory fresh migration. A preceding phase33 lifecycle dropped the
+application schema but left phase33's global owner default revoke in the cluster;
+functions recreated by the next phase32 migration therefore inherited owner-only
+ACLs. Disposable cleanup now restores PostgreSQL's standard global PUBLIC
+function default before another acceptance case recreates the schema.
+
 The catalogue audit included every pg_proc object in this schema and the effective
 default ACL when proacl is NULL. Empty explicit ACL arrays are treated as no
 grants. After upgrade all six routines have zero grants to the three browser
@@ -44,9 +58,11 @@ a new extension owner or role.
 
 ## Downgrade
 
-Downgrade restores the repository-defined phase32 state: PUBLIC EXECUTE on the
-checkpoint trigger helper and the owners' built-in global PUBLIC function
-default. It does not broadly grant EXECUTE on all existing private functions.
+Downgrade deterministically restores the repository-defined phase32 state: it
+revokes PUBLIC/anon/authenticated EXECUTE from every private function, grants
+PUBLIC EXECUTE only on the checkpoint trigger helper, and restores the owners'
+built-in global PUBLIC function default. It does not broadly grant EXECUTE on all
+existing private functions.
 It does not reconstruct arbitrary grants introduced outside migration history.
 If the project has custom default ACLs, review that difference before upgrading
 or downgrading; the fresh-baseline qualification is not a claim of exact rollback
