@@ -220,9 +220,12 @@ async def postgres_repository_db():
             await connection.run_sync(metadata.create_all)
         yield db
     finally:
-        async with db.engine.begin() as connection:
-            await connection.execute(DropSchema(schema, cascade=True))
-        await db.engine.dispose()
+        try:
+            async with db.engine.begin() as connection:
+                # Failed transactional setup can roll back CREATE SCHEMA too.
+                await connection.execute(DropSchema(schema, cascade=True, if_exists=True))
+        finally:
+            await db.engine.dispose()
 
 
 @pytest.mark.asyncio
