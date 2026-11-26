@@ -19,7 +19,11 @@ def test_fake_environment_satisfies_runtime_loader_and_owner_guard(monkeypatch, 
     ca = tmp_path / "ca.crt"
     ca.write_text("offline fixture; no TLS connection is attempted")
     values = build_environment(
-        ca, "aws-0-ap-south-1.pooler.supabase.com", "owner@/%fixture", "runtime@/%fixture"
+        ca,
+        "aws-0-ap-south-1.pooler.supabase.com",
+        "owner@/%fixture",
+        "runtime@/%fixture",
+        project_ref="abcdefghijklmnopqrst",
     )
     for name, value in values.items():
         monkeypatch.setenv(name, value)

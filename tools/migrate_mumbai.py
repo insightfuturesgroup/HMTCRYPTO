@@ -17,9 +17,11 @@ from hmt_crypto.persistence.migration_configuration import MigrationConfiguratio
 
 
 def build_environment(
-    ca: Path, pooler: str, owner_password: str, runtime_password: str
+    ca: Path, pooler: str, owner_password: str, runtime_password: str, *, project_ref: str
 ) -> dict[str, str]:
-    project = "pwnbqwzwfmzlddhndgtm"
+    if not re.fullmatch(r"[a-z]{20}", project_ref):
+        raise ValueError("Invalid project reference")
+    project = project_ref
     return {
         "DATABASE_MIGRATION_URL": URL.create(
             "postgresql+asyncpg",
@@ -47,6 +49,15 @@ def build_environment(
         "HMT_LIVE_ORDER_DISPATCH_ENABLED": "false",
         "HMT_PRIVATE_READ_ONLY": "true",
     }
+
+
+def read_project_reference() -> str:
+    project = os.environ.get("HMT_SUPABASE_PROJECT_REF")
+    if project is None:
+        project = getpass.getpass("Supabase project reference (hidden): ").strip()
+    if not re.fullmatch(r"[a-z]{20}", project):
+        raise ValueError("Invalid project reference")
+    return project
 
 
 def failure_diagnostic(error: Exception) -> str:
@@ -87,6 +98,7 @@ def run() -> None:
         raise RuntimeError("Require clean reviewed checkout")
     if input("Type APP STOPPED to acknowledge API/workers stopped: ") != "APP STOPPED":
         raise RuntimeError("Stop application before migration")
+    project_ref = read_project_reference()
     ca = Path(input("Absolute project CA certificate path: ").strip())
     if not ca.is_absolute() or not ca.is_file():
         raise RuntimeError("CA file missing")
@@ -97,7 +109,9 @@ def run() -> None:
     runtime_password = getpass.getpass("hmt_crypto_app password: ")
     if not owner_password or not runtime_password:
         raise RuntimeError("Passwords required")
-    values = build_environment(ca, pooler, owner_password, runtime_password)
+    values = build_environment(
+        ca, pooler, owner_password, runtime_password, project_ref=project_ref
+    )
     previous = {key: os.environ.get(key) for key in values}
     try:
         os.environ.update(values)

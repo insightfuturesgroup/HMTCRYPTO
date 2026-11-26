@@ -12,7 +12,7 @@ deployment and qualification.
 
 Use the dedicated AWS account and EC2 instance in Mumbai, `ap-south-1`.
 The release preflight approves only this region and requires API/worker agreement.
-The target Supabase project is `pwnbqwzwfmzlddhndgtm`, PostgreSQL 17, in Mumbai.
+The target Supabase project is `<project-ref>`, PostgreSQL 17, in Mumbai.
 Follow [the Mumbai bootstrap runbook](MUMBAI_BOOTSTRAP.md) for role creation,
 password handling, laptop migrations and first-user/account setup.
 

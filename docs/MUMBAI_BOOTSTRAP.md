@@ -1,16 +1,22 @@
 # Mumbai project bootstrap and direct migrations
 
 Operator runbook only; these commands have not been executed against Supabase. Target:
-`pwnbqwzwfmzlddhndgtm`, Mumbai (`ap-south-1`), PostgreSQL 17. Keep entry gates closed.
+`<project-ref>`, Mumbai (`ap-south-1`), PostgreSQL 17. Keep entry gates closed.
 Use the reviewed checkout and Python 3.13.10. Package installation may use registries;
 it is preparation, separate from offline test execution. Never paste passwords into SQL,
 command arguments, shell history, tickets, or this repository.
 
+Replace template placeholders through the operator workflow. The helper reads
+the project reference through a hidden prompt, or from an already-populated
+private `HMT_SUPABASE_PROJECT_REF` environment variable. It has no project default.
+Obtain the reference from the dashboard Connect hostname; do not set it inline in
+a shell command. See [the identifier guard](PUBLIC_IDENTIFIER_GUARD.md) for checks.
+
 ## Connection admission
 
 Runtime uses the dashboard's **session pooler**, port 5432, qualified username
-`hmt_crypto_app.pwnbqwzwfmzlddhndgtm`. Alembic currently requires the direct owner
-endpoint, `db.pwnbqwzwfmzlddhndgtm.supabase.co:5432`, username `postgres`.
+`hmt_crypto_app.<project-ref>`. Alembic currently requires the direct owner
+endpoint, `db.<project-ref>.supabase.co:5432`, username `postgres`.
 Do not guess the pooler hostname from a region: copy it from Connect in this project.
 
 The migration guard rejects every `.pooler.supabase.com` endpoint, port 6543, and
@@ -38,7 +44,7 @@ The CA is public certificate material, not the database password. Use `psql` wit
 an interactive password prompt (requires a working direct route):
 
 ```bash
-PSQL_HISTORY=/dev/null psql -X -W "host=db.pwnbqwzwfmzlddhndgtm.supabase.co port=5432 dbname=postgres user=postgres sslmode=verify-full sslrootcert=/absolute/path/supabase-ca.crt"
+PSQL_HISTORY=/dev/null psql -X -W "host=db.<project-ref>.supabase.co port=5432 dbname=postgres user=postgres sslmode=verify-full sslrootcert=/absolute/path/supabase-ca.crt"
 ```
 
 In that **psql session**, on a new project:
@@ -116,9 +122,11 @@ from hmt_crypto.persistence.migration_configuration import MigrationConfiguratio
 
 
 def build_environment(
-    ca: Path, pooler: str, owner_password: str, runtime_password: str
+    ca: Path, pooler: str, owner_password: str, runtime_password: str, *, project_ref: str
 ) -> dict[str, str]:
-    project = "pwnbqwzwfmzlddhndgtm"
+    if not re.fullmatch(r"[a-z]{20}", project_ref):
+        raise ValueError("Invalid project reference")
+    project = project_ref
     return {
         "DATABASE_MIGRATION_URL": URL.create(
             "postgresql+asyncpg",
@@ -146,6 +154,15 @@ def build_environment(
         "HMT_LIVE_ORDER_DISPATCH_ENABLED": "false",
         "HMT_PRIVATE_READ_ONLY": "true",
     }
+
+
+def read_project_reference() -> str:
+    project = os.environ.get("HMT_SUPABASE_PROJECT_REF")
+    if project is None:
+        project = getpass.getpass("Supabase project reference (hidden): ").strip()
+    if not re.fullmatch(r"[a-z]{20}", project):
+        raise ValueError("Invalid project reference")
+    return project
 
 
 def failure_diagnostic(error: Exception) -> str:
@@ -186,6 +203,7 @@ def run() -> None:
         raise RuntimeError("Require clean reviewed checkout")
     if input("Type APP STOPPED to acknowledge API/workers stopped: ") != "APP STOPPED":
         raise RuntimeError("Stop application before migration")
+    project_ref = read_project_reference()
     ca = Path(input("Absolute project CA certificate path: ").strip())
     if not ca.is_absolute() or not ca.is_file():
         raise RuntimeError("CA file missing")
@@ -196,7 +214,9 @@ def run() -> None:
     runtime_password = getpass.getpass("hmt_crypto_app password: ")
     if not owner_password or not runtime_password:
         raise RuntimeError("Passwords required")
-    values = build_environment(ca, pooler, owner_password, runtime_password)
+    values = build_environment(
+        ca, pooler, owner_password, runtime_password, project_ref=project_ref
+    )
     previous = {key: os.environ.get(key) for key in values}
     try:
         os.environ.update(values)
@@ -258,7 +278,7 @@ against the reviewed SHA before starting services. Do not copy old-project users
 keys, UUIDs or credential ARNs into this project by assumption.
 
 Deployment values to replace: `HMT_AWS_REGION=ap-south-1` (API and worker),
-`HMT_SUPABASE_URL=https://pwnbqwzwfmzlddhndgtm.supabase.co`, both Auth keys,
+`HMT_SUPABASE_URL=https://<project-ref>.supabase.co`, both Auth keys,
 each runtime `DATABASE_URL`, owner `DATABASE_MIGRATION_URL`, both database CA
 file settings/certificate mounts, `HMT_API_ACCOUNT_ID`, and region/account-specific
 Secrets Manager ARNs and IAM permissions. Verify `HMT_API_ALLOWED_ORIGIN` matches
