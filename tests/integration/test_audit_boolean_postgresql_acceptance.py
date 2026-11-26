@@ -52,6 +52,7 @@ async def exercise(url, name, valid, invalid):
     check = next(item for item in api_audit_checks() if item.name == name)
     compiled = str(check.sqltext.compile(dialect=postgresql.dialect()))
     constraint_name = f"ck_api_audit_events_{name}"
+    canonical = {}
     try:
         async with engine.begin() as connection:
             definition = await connection.scalar(
@@ -63,11 +64,28 @@ async def exercise(url, name, valid, invalid):
                 {"name": constraint_name},
             )
             assert definition is not None
-            for source, sql in (("orm", f"CHECK ({compiled})"), ("migration", definition)):
+            for source in ("orm", "migration"):
                 table = f"audit_boolean_{source}"
+                # Copy the migration's parsed CHECK expression, not its deparsed SQL.
+                # Re-parsing pg_get_constraintdef can redistribute equivalent array
+                # casts and is not an idempotent text-normalization operation.
+                options = " INCLUDING CONSTRAINTS" if source == "migration" else ""
                 await connection.execute(
-                    text(f"CREATE TEMP TABLE {table} (LIKE hmt_crypto.api_audit_events)")
+                    text(f"CREATE TEMP TABLE {table} (LIKE hmt_crypto.api_audit_events{options})")
                 )
+                if source == "migration":
+                    unrelated = await connection.scalars(
+                        text(
+                            "SELECT conname FROM pg_constraint "
+                            "WHERE conrelid = to_regclass(:table) AND conname <> :name"
+                        ),
+                        {"table": table, "name": constraint_name},
+                    )
+                    for other in unrelated:
+                        quoted = connection.dialect.identifier_preparer.quote(other)
+                        await connection.execute(
+                            text(f"ALTER TABLE {table} DROP CONSTRAINT {quoted}")
+                        )
                 # Isolate this predicate from unrelated NOT NULL and variant constraints.
                 columns = await connection.scalars(
                     text(
@@ -81,9 +99,13 @@ async def exercise(url, name, valid, invalid):
                     await connection.execute(
                         text(f"ALTER TABLE {table} ALTER COLUMN {quoted} DROP NOT NULL")
                     )
-                await connection.execute(
-                    text(f"ALTER TABLE {table} ADD CONSTRAINT {constraint_name} {sql}")
-                )
+                if source == "orm":
+                    await connection.execute(
+                        text(
+                            f"ALTER TABLE {table} ADD CONSTRAINT {constraint_name} "
+                            f"CHECK ({compiled})"
+                        )
+                    )
                 normalized = await connection.scalar(
                     text(
                         "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
@@ -92,6 +114,7 @@ async def exercise(url, name, valid, invalid):
                     {"table": table, "name": constraint_name},
                 )
                 assert normalized == definition
+                canonical[source] = normalized
                 if valid:
                     fields = ", ".join(valid)
                     binds = ", ".join(f":{field}" for field in valid)
@@ -109,6 +132,7 @@ async def exercise(url, name, valid, invalid):
                         )
                     assert rejected.value.orig.sqlstate == "23514"
                     await savepoint.rollback()
+            assert canonical["orm"] == canonical["migration"]
     finally:
         await engine.dispose()
 

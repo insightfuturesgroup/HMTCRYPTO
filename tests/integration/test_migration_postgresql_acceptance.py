@@ -276,7 +276,9 @@ async def _schema_evidence(
                         SELECT acl.grantee
                         FROM pg_catalog.pg_namespace AS namespace
                         CROSS JOIN LATERAL pg_catalog.aclexplode(
-                            COALESCE(namespace.nspacl, ARRAY[]::aclitem[])
+                            NULLIF(COALESCE(namespace.nspacl,
+                                pg_catalog.acldefault('n', namespace.nspowner)),
+                                ARRAY[]::aclitem[])
                         ) AS acl
                         WHERE namespace.nspname = 'hmt_crypto'
                         UNION ALL
@@ -285,7 +287,11 @@ async def _schema_evidence(
                         JOIN pg_catalog.pg_namespace AS namespace
                           ON namespace.oid = relation.relnamespace
                         CROSS JOIN LATERAL pg_catalog.aclexplode(
-                            COALESCE(relation.relacl, ARRAY[]::aclitem[])
+                            NULLIF(COALESCE(relation.relacl,
+                                pg_catalog.acldefault(
+                                    CASE WHEN relation.relkind = 'S' THEN 'S'
+                                        ELSE 'r' END::"char", relation.relowner)),
+                                ARRAY[]::aclitem[])
                         ) AS acl
                         WHERE namespace.nspname = 'hmt_crypto'
                            OR (
@@ -298,10 +304,10 @@ async def _schema_evidence(
                         JOIN pg_catalog.pg_namespace AS namespace
                           ON namespace.oid = procedure.pronamespace
                         CROSS JOIN LATERAL pg_catalog.aclexplode(
-                            COALESCE(
+                            NULLIF(COALESCE(
                                 procedure.proacl,
                                 pg_catalog.acldefault('f', procedure.proowner)
-                            )
+                            ), ARRAY[]::aclitem[])
                         ) AS acl
                         WHERE namespace.nspname = 'hmt_crypto'
                         UNION ALL
@@ -309,7 +315,9 @@ async def _schema_evidence(
                         FROM pg_catalog.pg_default_acl AS defaults
                         JOIN pg_catalog.pg_namespace AS namespace
                           ON namespace.oid = defaults.defaclnamespace
-                        CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) AS acl
+                        CROSS JOIN LATERAL pg_catalog.aclexplode(
+                            NULLIF(defaults.defaclacl, ARRAY[]::aclitem[])
+                        ) AS acl
                         WHERE namespace.nspname = 'hmt_crypto'
                     )
                     SELECT count(*)
