@@ -18,7 +18,7 @@ from sqlalchemy import CheckConstraint, Column, Integer, MetaData, Table, column
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
-from sqlalchemy.schema import CreateSchema
+from sqlalchemy.schema import AddConstraint, CreateSchema
 
 from hmt_crypto.persistence.configuration import database_url
 from hmt_crypto.persistence.db import APP_SCHEMA, NAMING_CONVENTION
@@ -172,6 +172,35 @@ def _decimal_columns() -> set[tuple[str, str]]:
     }
 
 
+def _constraint_create_rules() -> dict[object, object]:
+    """Snapshot SQLAlchemy's mutable DDL rules on the process-global metadata."""
+    return {
+        constraint: constraint._create_rule
+        for table in metadata.tables.values()
+        for constraint in table.constraints
+    }
+
+
+def _restore_constraint_create_rules(rules: dict[object, object]) -> None:
+    for constraint, create_rule in rules.items():
+        constraint._create_rule = create_rule
+
+
+def test_postgres_acceptance_owns_ddl_metadata() -> None:
+    original = next(
+        constraint
+        for constraint in metadata.tables[f"{APP_SCHEMA}.accounts"].foreign_key_constraints
+        if constraint.name == "fk_accounts_current_credential_scope"
+    )
+    rules = _constraint_create_rules()
+    AddConstraint(original)
+    assert original._create_rule is not rules[original]
+
+    _restore_constraint_create_rules(rules)
+
+    assert original._create_rule is rules[original]
+
+
 def _decimal_constraint_names(
     connection: AsyncConnection, tables: tuple[Table, ...]
 ) -> set[tuple[str, str]]:
@@ -302,7 +331,11 @@ async def test_raw_postgres_decimal_boundary_and_catalogue_contract():
                 translated = await connection.execution_options(
                     schema_translate_map={APP_SCHEMA: schema}
                 )
-                await translated.run_sync(metadata.create_all)
+                create_rules = _constraint_create_rules()
+                try:
+                    await translated.run_sync(metadata.create_all)
+                finally:
+                    _restore_constraint_create_rules(create_rules)
                 probe = _probe_table()
                 await translated.run_sync(probe.create)
 

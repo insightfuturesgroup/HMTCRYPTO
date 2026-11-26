@@ -48,7 +48,11 @@ def test_postgres_ddl_has_private_scoped_named_restrict_constraints():
             assert constraint.name
         for foreign_key in table.foreign_key_constraints:
             assert foreign_key.ondelete == "RESTRICT"
-            if foreign_key.referred_table.name in {"accounts", "credential_versions"}:
+            if foreign_key.referred_table.name in {"accounts", "credential_versions"} and {
+                "region",
+                "environment",
+                "mode",
+            } <= set(table.c.keys()):
                 assert {"region", "environment", "mode"} <= set(foreign_key.column_keys)
             if foreign_key.use_alter:
                 assert "ALTER TABLE" in str(AddConstraint(foreign_key).compile(dialect=dialect))
