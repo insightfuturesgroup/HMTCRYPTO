@@ -34,6 +34,14 @@ hmt_crypto or defaults of unrelated creator roles. Review this scope before a
 hosted migration. Any new schema-creator role must receive the same reviewed
 default-privilege policy before it may create private functions.
 
+Any future extension installation or new function owner requires an explicit
+EXECUTE privilege review before it is introduced. Confirm the effective global
+and schema-local defaults for that owner, inventory the extension-created or
+owner-created routines, and record every intended PUBLIC, anon, authenticated and
+application-role EXECUTE grant. The phase33 global default revoke applies only to
+the owners it names; it does not automatically protect functions created later by
+a new extension owner or role.
+
 ## Downgrade
 
 Downgrade restores the repository-defined phase32 state: PUBLIC EXECUTE on the
