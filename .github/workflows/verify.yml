@@ -123,6 +123,14 @@ jobs:
           exit 1
       - name: Create isolated migration database
         run: docker exec hmt-acceptance-postgres createdb -U postgres hmt_migration
+      - name: Create restricted runtime role before migrations
+        run: >-
+          docker exec hmt-acceptance-postgres psql -X -U postgres -d postgres
+          -v ON_ERROR_STOP=1 -c
+          'CREATE ROLE hmt_crypto_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+          NOREPLICATION NOBYPASSRLS;
+          GRANT CONNECT ON DATABASE hmt_acceptance TO hmt_crypto_app;
+          GRANT CONNECT ON DATABASE hmt_migration TO hmt_crypto_app;'
       - name: Run full suite including PostgreSQL acceptance and policy concurrency
         # The migration fixture scopes DATABASE_MIGRATION_CA_FILE to its tests;
         # exporting it to the whole suite breaks strict application Settings.

@@ -739,12 +739,12 @@ def test_migration_security_and_downgrade_contracts_on_disposable_postgres(
         command.upgrade(config, "head")
         evidence = asyncio.run(_schema_evidence(url))
         assert evidence == (
-            43,
-            29,
+            76,
+            30,
             True,
             True,
             True,
-            "phase5_reconcile_checkpoint_v1",
+            "phase33_private_function_acl_v1",
             0,
             0,
         )
@@ -779,7 +779,7 @@ def test_phase32_foreign_key_actions_upgrade_and_downgrade_on_disposable_postgre
         command.upgrade(config, "phase31_dynamic_tradingview_v1")
         _, session_id = asyncio.run(_insert_valid_platform_session(url))
 
-        command.upgrade(config, "head")
+        command.upgrade(config, "phase32_restrict_foreign_keys_v1")
         upgraded = asyncio.run(_foreign_key_actions(url))
         assert upgraded
         assert all(update == "r" and delete == "r" for _, update, delete in upgraded)
@@ -793,7 +793,7 @@ def test_phase32_foreign_key_actions_upgrade_and_downgrade_on_disposable_postgre
         assert all(delete in {"c", "r"} for _, _, delete in downgraded)
         assert asyncio.run(_platform_session_exists(url, session_id))
 
-        command.upgrade(config, "head")
+        command.upgrade(config, "phase32_restrict_foreign_keys_v1")
         assert asyncio.run(_version(url)) == "phase32_restrict_foreign_keys_v1"
         assert asyncio.run(_platform_session_exists(url, session_id))
     finally:
