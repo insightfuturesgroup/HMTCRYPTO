@@ -21,7 +21,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.schema import CreateIndex, CreateTable
-from test_coordination_schema import BASELINE, SCOPE, graph, held, incarnation, lease, save
+from test_coordination_schema import SCOPE, graph, held, incarnation, lease, save
 from test_scheduler_heartbeat_schema import projection
 
 from hmt_crypto.persistence.errors import PersistenceError, PersistenceValueError

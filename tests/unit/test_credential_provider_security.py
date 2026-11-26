@@ -118,7 +118,7 @@ def _reachable_plaintext(roots: list[object]) -> set[str]:
         if isinstance(value, dict):
             pending.extend((item, depth + 1) for pair in value.items() for item in pair)
             continue
-        if isinstance(value, (list, tuple, set, frozenset)):
+        if isinstance(value, list | tuple | set | frozenset):
             pending.extend((item, depth + 1) for item in value)
             continue
         attributes = getattr(value, "__dict__", None)

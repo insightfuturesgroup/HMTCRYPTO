@@ -57,6 +57,12 @@ jobs:
       - run: docker build --target test -t hmt-crypto-test:${{ github.sha }} .
       - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m ruff format --check .
       - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m ruff check .
+      - name: Run offline tooling and migration safety regressions
+        run: >-
+          docker run --rm --network none hmt-crypto-test:${{ github.sha }}
+          python -m pytest -q -rs tests/unit/test_ci_lint_policy.py
+          tests/unit/test_phase33_function_acl.py tests/unit/test_migration_history.py
+          tests/unit/test_phase32_restrict_foreign_keys.py tests/unit/test_ci_migration_ca_scope.py
       - run: docker run --rm --network none hmt-crypto-test:${{ github.sha }} python -m mypy src
       # Full pytest execution lives in postgres-acceptance so database safety
       # tests receive disposable services rather than silently skipping.

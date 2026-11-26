@@ -169,7 +169,7 @@ def _acceptance_traceback_retains_secret(error: BaseException, secret: str) -> b
             return any(
                 retains(item, depth=depth + 1, seen=seen) for pair in value.items() for item in pair
             )
-        if isinstance(value, (list, tuple, set, frozenset)):
+        if isinstance(value, list | tuple | set | frozenset):
             return any(retains(item, depth=depth + 1, seen=seen) for item in value)
         attributes = getattr(value, "__dict__", None)
         return type(attributes) is dict and any(

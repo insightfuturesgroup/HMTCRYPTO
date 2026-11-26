@@ -92,7 +92,7 @@ def _contains_raw(value: object, secrets: tuple[object, ...], *, depth: int = 12
         return any(
             _contains_raw(item, secrets, depth=depth - 1) for pair in value.items() for item in pair
         )
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, list | tuple | set | frozenset):
         return any(_contains_raw(item, secrets, depth=depth - 1) for item in value)
     attributes = getattr(value, "__dict__", None)
     if isinstance(attributes, dict) and _contains_raw(attributes, secrets, depth=depth - 1):

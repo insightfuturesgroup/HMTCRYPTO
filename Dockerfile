@@ -22,6 +22,7 @@ WORKDIR /workspace
 COPY pyproject.toml README.md alembic.ini Dockerfile docker-compose.yml docker-compose.ec2.yml ./
 COPY .github ./.github
 COPY .gitignore ./.gitignore
+COPY .dockerignore ./.dockerignore
 COPY deploy ./deploy
 COPY docs ./docs
 COPY ops ./ops

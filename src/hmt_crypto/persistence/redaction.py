@@ -106,7 +106,7 @@ def _redact_mapping_value(name: str, value: object, *, seen: set[int], depth: in
     if "url" in parts and isinstance(value, (str, httpx.URL)):
         return redact_url(value)
     if normalized in {"body", "request_body", "response_body", "payload"} and isinstance(
-        value, (str, bytes, bytearray, memoryview)
+        value, str | bytes | bytearray | memoryview
     ):
         return safe_body_summary(value)
     if normalized in {"header", "headers", "request_headers", "response_headers"} and isinstance(
@@ -124,13 +124,13 @@ def _redact_mapping_value(name: str, value: object, *, seen: set[int], depth: in
 def _redact(value: object, *, seen: set[int], depth: int) -> JsonValue:
     if depth > _MAX_REDACTION_DEPTH:
         return _MAX_DEPTH
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, bool | int | float | str):
         return value
     if isinstance(value, SecretStr):
         return REDACTED
     if isinstance(value, (Decimal, UUID, datetime, date)):
         return str(value)
-    if isinstance(value, (bytes, bytearray, memoryview)):
+    if isinstance(value, bytes | bytearray | memoryview):
         raw = bytes(value)
         return {"byte_length": len(raw), "sha256": sha256(raw).hexdigest()}
 

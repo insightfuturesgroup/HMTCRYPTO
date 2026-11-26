@@ -115,7 +115,7 @@ class L2Observation(ProductObservation):
 
 
 def _levels(value: object, *, ascending: bool, allow_zero: bool) -> tuple[BookLevel, ...]:
-    if not isinstance(value, (tuple, list)):
+    if not isinstance(value, tuple | list):
         raise TypeError("book levels must be an ordered sequence")
     levels = tuple(value)
     if any(type(level) is not BookLevel for level in levels):

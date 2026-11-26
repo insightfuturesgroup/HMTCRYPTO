@@ -101,8 +101,8 @@ def _assert_close(actual: object, expected: object, *, absolute: float, relative
     if expected is None:
         assert actual is None
         return
-    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
-        assert isinstance(actual, (int, float)) and not isinstance(actual, bool)
+    if isinstance(expected, int | float) and not isinstance(expected, bool):
+        assert isinstance(actual, int | float) and not isinstance(actual, bool)
         assert math.isclose(float(actual), float(expected), abs_tol=absolute, rel_tol=relative)
         return
     if isinstance(expected, list):

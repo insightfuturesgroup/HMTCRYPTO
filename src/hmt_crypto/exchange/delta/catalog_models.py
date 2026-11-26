@@ -288,7 +288,7 @@ def _canonical_value(value: object) -> object:
         if any(type(key) is not str for key in value):
             raise TypeError("canonical product mappings require string keys")
         return {key: _canonical_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [_canonical_value(item) for item in value]
     if value is None or type(value) in {bool, int, str}:
         return value

@@ -78,6 +78,13 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# Reviewed baseline: 59 UP038 sites, 18 built-in-only conversions qualified;
+# remaining 41 involve third-party/custom classes, ABCs or exception/AST types.
+# Union evaluation can invoke metaclass __or__; preserve runtime evaluation.
+# UP040 baseline: 16 eager aliases (8 unions, 8 subscriptions). PEP 695 aliases
+# are lazy TypeAliasType objects, not behavior-neutral runtime replacements.
+# See docs/LINT_BASELINE_POLICY.md. All other selected rules stay enforced.
+ignore = ["UP038", "UP040"]
 
 # Keep the Phase 0 prose baseline outside Python formatting gates.
 [tool.ruff.format]
