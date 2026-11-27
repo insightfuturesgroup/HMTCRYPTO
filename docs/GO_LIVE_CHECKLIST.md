@@ -16,6 +16,8 @@ approval after every preceding mandatory item is complete.
       `test_execution_metadata_tables_and_compiles_postgres` proves account_id-only FKs remain.
 - [ ] Post-UI: replace host-built images with CI-built ARM64 images in private ECR,
       published through GitHub OIDC and deployed by immutable digest via the instance role.
+- [ ] Audit retention is not operational: no login role or job calls the purge function;
+      payloads are not purged.
 
 These blockers prohibit go-live. A reachable locked UI is not acceptance evidence.
 
