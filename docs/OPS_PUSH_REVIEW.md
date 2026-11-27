@@ -54,11 +54,15 @@ YOU WILL BE PROMPTED FOR: Nothing. Open HMTCRYPTO > Actions > verify > the lates
 audit-branch/PR commit. Also inspect the PR Checks tab.
 COMMAND: Review backend, ui, postgres-acceptance and deployment-shape jobs and
 download the full-suite-pg17 artifact when available. Do not run a deploy workflow.
-EXPECTED OUTPUT: Passing verification jobs with exactly two documented scoped-FK
-assertions reported as XFAIL by tools.ci_pytest_policy, not two unexplained red jobs:
+EXPECTED OUTPUT: Passing verification jobs with exactly one documented scoped-FK
+assertion reported as XFAIL by tools.ci_pytest_policy, not an unexplained red job:
 
 - tests/integration/test_execution_schema_metadata.py::test_execution_metadata_tables_and_compiles_postgres
-- tests/integration/test_identity_catalogue_schema.py::test_postgres_ddl_has_private_scoped_named_restrict_constraints
+
+The identity/catalogue scoped-constraint test is a normal passing test. It verifies
+named constraints, restrictive account/credential foreign keys on scope-bearing
+tables, and the foundational composite account foreign key. Keep it out of the
+exception list and do not weaken its assertions.
 
 Any other failure, missing expected failure, unexpected pass, or safety skip/deselection
 must fail verification. The expected-failure list must be empty before go-live.
