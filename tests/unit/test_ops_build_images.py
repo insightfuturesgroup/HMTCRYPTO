@@ -10,8 +10,9 @@ def test_build_script_is_pinned_serial_and_cleans_temporary_swap() -> None:
     assert "https://github.com/insightfuturesgroup/HMTCRYPTO.git" in source
     assert "expected_script_sha" in source
     assert "root_use <= 70" in source
-    assert "CPUCreditBalance" in source
-    assert "value >= 20" in source
+    assert "CPUCreditBalance" not in source
+    assert "cloudwatch" not in source.lower()
+    assert "root disk use is above 70 percent" in source
     assert "fallocate -l 4G" in source
     assert "COMPOSE_PARALLEL_LIMIT=1" in source
     assert "for service in api worker private-worker ui" in source

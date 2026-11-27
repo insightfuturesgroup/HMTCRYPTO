@@ -43,7 +43,7 @@ unset HMT_SHA HMT_SCRIPT_SHA
 
 Do not continue on a mismatch. The script repeats its own SHA check before any host change.
 
-EXPECTED OUTPUT: PASS for disk/credits, pinned checkout and swap; four sequential
+EXPECTED OUTPUT: PASS for disk, pinned checkout and swap; four sequential
 BUILD lines; image names and byte sizes only; final PASS confirming swap removal.
 
 FAILURE FORMAT: share only the last fixed `STOP`, `BUILD`, or `PASS` line and the

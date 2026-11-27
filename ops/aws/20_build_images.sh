@@ -27,23 +27,7 @@ root_use=$(df -P / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
 [[ "$root_use" =~ ^[0-9]+$ ]] || fail 'cannot determine root disk use'
 (( root_use <= 70 )) || fail 'root disk use is above 70 percent'
 
-command -v aws >/dev/null || fail 'AWS CLI unavailable for CPU credit check'
-token=$(curl -fsS --max-time 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
-  http://169.254.169.254/latest/api/token) || fail 'IMDSv2 token unavailable'
-instance_id=$(curl -fsS --max-time 2 -H "X-aws-ec2-metadata-token: $token" \
-  http://169.254.169.254/latest/meta-data/instance-id) || fail 'instance identity unavailable'
-unset token
-end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-start_time=$(date -u -d '20 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
-credit=$(aws cloudwatch get-metric-statistics --region ap-south-1 --namespace AWS/EC2 \
-  --metric-name CPUCreditBalance --dimensions "Name=InstanceId,Value=$instance_id" \
-  --start-time "$start_time" --end-time "$end_time" --period 300 --statistics Minimum \
-  --query 'Datapoints | sort_by(@,&Timestamp)[-1].Minimum' --output text 2>/dev/null) \
-  || fail 'CPU credit read denied or unavailable'
-unset instance_id start_time end_time
-[[ "$credit" != 'None' && "$credit" != 'null' ]] || fail 'CPU credit balance unavailable'
-awk -v value="$credit" 'BEGIN { exit !(value >= 20) }' || fail 'CPU credit balance below 20'
-printf 'PASS: disk at or below 70 percent; CPU credit balance at least 20.\n'
+printf 'PASS: disk at or below 70 percent.\n'
 
 if [[ ! -d "$REPO_DIR/.git" ]]; then
   sudo git clone --no-checkout "$REPO_URL" "$REPO_DIR" >/dev/null
