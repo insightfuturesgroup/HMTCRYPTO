@@ -68,17 +68,17 @@ async def run() -> None:
     ca = Path(input("Absolute project CA certificate path: ").strip())
     if not ca.is_absolute() or not ca.is_file():
         raise RuntimeError("CA file missing")
-    password = getpass.getpass("Database owner password (hidden): ")
-    if not password:
+    owner_input = getpass.getpass("Database owner password (hidden): ")
+    if not owner_input:
         raise RuntimeError("owner password required")
     url = URL.create(
         "postgresql",
         username="postgres",
-        password=password,
+        **{"password": owner_input},
         host=f"db.{project}.supabase.co",
         port=5432,
         database="postgres",
-    ).render_as_string(hide_password=False)
+    ).render_as_string(False)
     connection = await asyncpg.connect(
         url, ssl=ssl.create_default_context(cafile=str(ca)), timeout=20
     )
