@@ -9,6 +9,7 @@ from tools.ops_post_migration import (
     EXPECTED_FKS,
     EXPECTED_HEAD,
     FUNCTIONS,
+    VERSION_TABLE,
     _redact_first_line,
     apply_and_verify,
     diagnose,
@@ -37,7 +38,7 @@ class FakeDiagnosticConnection:
 
     async def fetchval(self, statement: str, *args: object) -> object:
         self.statements.append(statement)
-        if "alembic_version" in statement:
+        if VERSION_TABLE in statement:
             return EXPECTED_HEAD
         if "pg_roles" in statement:
             return self.role_exists
@@ -80,6 +81,8 @@ def test_read_only_diagnostic_passes_and_never_executes(
     assert all(
         statement.lstrip().upper().startswith("SELECT") for statement in connection.statements
     )
+    assert connection.statements[0] == f"SELECT version_num FROM {VERSION_TABLE}"
+    assert VERSION_TABLE == "public.hmt_crypto_alembic_version"
 
 
 def test_read_only_diagnostic_steps_are_independent(

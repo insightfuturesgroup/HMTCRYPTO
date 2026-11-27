@@ -16,6 +16,7 @@ from sqlalchemy.engine import URL
 
 EXPECTED_HEAD = "phase34_exact_decimal_v1"
 EXPECTED_FKS = 189
+VERSION_TABLE = "public.hmt_crypto_alembic_version"
 FUNCTIONS = (
     "hmt_crypto.guard_account_reconciliation_checkpoints_v1()",
     "hmt_crypto.guard_api_audit_payload_mutation()",
@@ -63,7 +64,7 @@ async def diagnose(connection: Any) -> bool:
     passed = True
 
     try:
-        revision = await connection.fetchval("SELECT version_num FROM alembic_version")
+        revision = await connection.fetchval(f"SELECT version_num FROM {VERSION_TABLE}")
         if revision != EXPECTED_HEAD:
             raise DiagnosticFailure("unexpected migration revision")
         print(f"PASS: alembic revision | {EXPECTED_HEAD}")
@@ -163,7 +164,7 @@ async def apply_and_verify(connection: Any) -> None:
         "GRANT EXECUTE ON FUNCTION "
         "hmt_crypto.purge_expired_audit_payload(uuid, text) TO hmt_audit_retention"
     )
-    if await connection.fetchval("SELECT version_num FROM alembic_version") != EXPECTED_HEAD:
+    if await connection.fetchval(f"SELECT version_num FROM {VERSION_TABLE}") != EXPECTED_HEAD:
         raise RuntimeError("unexpected migration revision")
     total, restrictive = await connection.fetchrow(
         """SELECT count(*)::integer,
