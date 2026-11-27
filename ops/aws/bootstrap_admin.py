@@ -82,7 +82,7 @@ def main() -> int:
         account_id = str(account.get("account_id", ""))
         if account.get("entries_enabled") is not False or account.get("exits_enabled") is not False:
             raise RuntimeError
-        path = Path("/run/hmt/api.env")
+        path = Path("/etc/hmt/api.env")
         updated = replace_account_id(path.read_text(), account_id)
         descriptor = os.open(path, os.O_WRONLY | os.O_TRUNC, 0o600)
         try:
@@ -99,7 +99,7 @@ def main() -> int:
         )
         print("PASS: sole initial admin bound to supplied Auth user")
         print("PASS: locked account bootstrapped with entry and exit gates disabled")
-        print("PASS: API account binding updated in tmpfs and API recreated")
+        print("PASS: API account binding updated in /etc/hmt and API recreated")
         return 0
     except Exception:
         print("STOP: admin/account bootstrap failed; inputs and diagnostics suppressed")

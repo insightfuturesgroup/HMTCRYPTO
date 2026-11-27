@@ -15,6 +15,8 @@ def test_build_script_is_pinned_serial_and_cleans_temporary_swap() -> None:
     assert "root disk use is above 70 percent" in source
     assert "fallocate -l 4G" in source
     assert "COMPOSE_PARALLEL_LIMIT=1" in source
+    assert 'git -c safe.directory="$REPO_DIR"' in source
+    assert "sudo env HMT_TLS_EMAIL=build-only@example.invalid docker compose" in source
     assert "for service in api worker private-worker ui" in source
     assert "docker builder prune --force" in source
     assert "trap cleanup_swap" in source

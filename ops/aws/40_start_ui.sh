@@ -16,7 +16,7 @@ printf '\n'
 [[ "$reviewed_sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'STOP: invalid reviewed SHA'; exit 1; }
 [[ "$elastic_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo 'STOP: invalid IP'; exit 1; }
 
-sudo python3 tools/ec2_release_preflight.py --config /run/hmt --expected-commit "$reviewed_sha" \
+sudo python3 tools/ec2_release_preflight.py --config /etc/hmt --expected-commit "$reviewed_sha" \
   >/tmp/hmt-preflight-safe.json || { cat /tmp/hmt-preflight-safe.json; exit 1; }
 grep -q '"status": "PASS"' /tmp/hmt-preflight-safe.json || { echo 'STOP: preflight failed'; exit 1; }
 rm -f /tmp/hmt-preflight-safe.json
@@ -32,8 +32,8 @@ if ss -ltnH | awk '{print $4}' | grep -Eq '(:80|:443)$'; then
   echo 'STOP: host TCP 80 or 443 is already occupied'
   exit 1
 fi
-for file in /run/hmt/{compose,api,worker,migration}.env; do
-  sudo test -f "$file" || { echo 'STOP: tmpfs environment missing; rerun ops-5'; exit 1; }
+for file in /etc/hmt/{compose,api,worker,migration}.env; do
+  sudo test -f "$file" || { echo 'STOP: protected environment missing; rerun ops-5'; exit 1; }
 done
 for image in hmt-crypto-ec2-api hmt-crypto-ec2-worker hmt-crypto-ec2-private-worker hmt-crypto-ec2-ui; do
   sudo docker image inspect "$image" >/dev/null 2>&1 || { echo "STOP: image missing: $image"; exit 1; }

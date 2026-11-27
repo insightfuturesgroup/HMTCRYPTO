@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_URL='https://github.com/insightfuturesgroup/HMTCRYPTO.git'
 REPO_DIR='/opt/hmt-crypto'
 SWAP_FILE='/swapfile-hmt-build'
-COMPOSE=(sudo docker compose -f docker-compose.ec2.yml)
+COMPOSE=(sudo env HMT_TLS_EMAIL=build-only@example.invalid docker compose -f docker-compose.ec2.yml)
 
 fail() { printf 'STOP: %s\n' "$1" >&2; exit 1; }
 cleanup_swap() {
@@ -30,13 +30,16 @@ root_use=$(df -P / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
 printf 'PASS: disk at or below 70 percent.\n'
 
 if [[ ! -d "$REPO_DIR/.git" ]]; then
-  sudo git clone --no-checkout "$REPO_URL" "$REPO_DIR" >/dev/null
+  sudo git -c safe.directory="$REPO_DIR" clone --no-checkout "$REPO_URL" "$REPO_DIR" >/dev/null
 fi
-sudo git -C "$REPO_DIR" remote set-url origin "$REPO_URL"
-sudo git -C "$REPO_DIR" fetch --depth=1 origin "$reviewed_sha" >/dev/null
-sudo git -C "$REPO_DIR" checkout --detach --force "$reviewed_sha" >/dev/null
-[[ -z "$(sudo git -C "$REPO_DIR" status --porcelain)" ]] || fail 'checkout is not clean'
-[[ "$(sudo git -C "$REPO_DIR" rev-parse HEAD)" == "$reviewed_sha" ]] \
+sudo git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" remote set-url origin "$REPO_URL"
+sudo git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" fetch --depth=1 origin "$reviewed_sha" \
+  >/dev/null
+sudo git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" checkout --detach --force \
+  "$reviewed_sha" >/dev/null
+[[ -z "$(sudo git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" status --porcelain)" ]] \
+  || fail 'checkout is not clean'
+[[ "$(sudo git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" rev-parse HEAD)" == "$reviewed_sha" ]] \
   || fail 'checkout does not match reviewed SHA'
 printf 'PASS: clean HTTPS checkout pinned to reviewed SHA.\n'
 

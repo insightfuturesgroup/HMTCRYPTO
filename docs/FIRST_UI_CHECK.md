@@ -44,7 +44,7 @@ PROMPTS: CI-green deploy SHA and Mac-computed script SHA256.
 
 COMMAND: execute the verified `ops/aws/20_build_images.sh` bootstrap.
 
-EXPECTED OUTPUT: disk/CPU PASS, pinned checkout, temporary swap, four serial image
+EXPECTED OUTPUT: disk PASS, pinned checkout, temporary swap, four serial image
 builds, image names/sizes, cache prune and swap removal.
 
 FAILURE FORMAT: last fixed line, service, safe resource totals only.
@@ -59,7 +59,7 @@ PROMPTS: see `docs/OPS_5_INSTALL_CONFIG.md`; all sensitive values are hidden.
 
 COMMAND: `bash ops/aws/30_install_config.sh`
 
-EXPECTED OUTPUT: CA verified, secret configuration in root-only tmpfs, gates closed.
+EXPECTED OUTPUT: CA and environment files verified root-only under `/etc/hmt`, gates closed.
 
 FAILURE FORMAT: fixed STOP/PASS lines only.
 

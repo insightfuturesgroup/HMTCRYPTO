@@ -4,6 +4,8 @@ This is the approved one-time first-UI build path. It changes only the EC2 host:
 it creates and later removes a 4 GiB swapfile, creates or updates `/opt/hmt-crypto`,
 creates local Docker images, and prunes build cache. It does not create AWS resources,
 read application secrets, start services, or open gates.
+Git commands use a command-scoped safe-directory setting for the pinned checkout,
+and Compose receives only the non-secret build placeholder through `sudo`.
 
 ## Step 1: record the reviewed script digest
 

@@ -9,7 +9,7 @@ is a command argument. Ops-4b and ops-5 must already have passed.
 
 COMMAND: `bash ops/aws/40_start_ui.sh`
 
-EXPECTED OUTPUT: PASS for closed-gate release preflight, tmpfs env, DNS, TCP 80/443
+EXPECTED OUTPUT: PASS for closed-gate release preflight, protected `/etc/hmt` env, DNS, TCP 80/443
 readiness, memory, disk and images; then ordered starts for redis, API/worker/private
 worker, UI and Caddy with `--no-deps --no-build`; API liveness status 200.
 

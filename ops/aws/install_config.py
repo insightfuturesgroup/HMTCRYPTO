@@ -1,4 +1,4 @@
-"""Render locked deployment configuration in tmpfs; install only the public CA on disk."""
+"""Atomically install locked deployment configuration under root-only /etc/hmt."""
 
 from __future__ import annotations
 
@@ -63,13 +63,56 @@ def _hidden(label: str) -> str:
     return value
 
 
-def _write(path: Path, content: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+def _write_atomic(path: Path, content: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     try:
-        os.fchmod(descriptor, 0o600)
-        os.write(descriptor, content)
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            os.fchown(descriptor, 0, 0)
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        os.chown(path, 0, 0)
     finally:
-        os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _verify_install(etc: Path, repo: Path, files: dict[str, str]) -> None:
+    directory = etc.stat()
+    if directory.st_mode & 0o777 != 0o700 or (directory.st_uid, directory.st_gid) != (0, 0):
+        raise RuntimeError
+    required = {"supabase-prod-ca.crt", *files}
+    for name in required:
+        metadata = (etc / name).stat()
+        if metadata.st_mode & 0o777 != 0o600 or (metadata.st_uid, metadata.st_gid) != (0, 0):
+            raise RuntimeError
+    links = {
+        repo / ".env": etc / "compose.env",
+        repo / "deploy/ec2/api.env": etc / "api.env",
+        repo / "deploy/ec2/worker.env": etc / "worker.env",
+        repo / "deploy/ec2/migration.env": etc / "migration.env",
+    }
+    if any(not link.is_symlink() or link.resolve() != target for link, target in links.items()):
+        raise RuntimeError
+    joined = "\n".join(files.values())
+    required_closed = (
+        "PRODUCTION_WRITES_FORBIDDEN=true",
+        "HMT_PRIVATE_READ_ONLY=true",
+        "HMT_LIVE_ORDER_DISPATCH_ENABLED=false",
+        "HMT_LIVE_ORDER_QUALIFICATION_SHA256=\n",
+    )
+    if any(value not in joined for value in required_closed):
+        raise RuntimeError
 
 
 def main() -> int:
@@ -107,31 +150,44 @@ def main() -> int:
             or migration.hostname != f"db.{project_host}"
         ):
             raise ValueError
+        old_umask = os.umask(0o077)
         etc = Path("/etc/hmt")
-        run = Path("/run/hmt")
+        legacy_run = Path("/run/hmt")
         etc.mkdir(mode=0o700, parents=True, exist_ok=True)
-        run.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(etc, 0o700)
-        os.chmod(run, 0o700)
-        _write(etc / "supabase-prod-ca.crt", ca)
-        (run / "supabase-prod-ca.crt").unlink(missing_ok=True)
-        (run / "supabase-prod-ca.crt").symlink_to(etc / "supabase-prod-ca.crt")
-        for name, content in render_files(values).items():
-            _write(run / name, content.encode())
+        os.chown(etc, 0, 0)
+        files = render_files(values)
+        _write_atomic(etc / "supabase-prod-ca.crt", ca)
+        for name, content in files.items():
+            _write_atomic(etc / name, content.encode())
         for link, target in {
-            repo / ".env": run / "compose.env",
-            repo / "deploy/ec2/api.env": run / "api.env",
-            repo / "deploy/ec2/worker.env": run / "worker.env",
-            repo / "deploy/ec2/migration.env": run / "migration.env",
+            repo / ".env": etc / "compose.env",
+            repo / "deploy/ec2/api.env": etc / "api.env",
+            repo / "deploy/ec2/worker.env": etc / "worker.env",
+            repo / "deploy/ec2/migration.env": etc / "migration.env",
         }.items():
             link.unlink(missing_ok=True)
             link.symlink_to(target)
-        print("PASS: CA digest matched and public certificate installed mode 600")
-        print("PASS: secret configuration installed root-only in tmpfs")
+        if legacy_run.is_symlink():
+            legacy_run.unlink()
+        else:
+            for name in (*files, "supabase-prod-ca.crt"):
+                (legacy_run / name).unlink(missing_ok=True)
+            try:
+                legacy_run.rmdir()
+            except (FileNotFoundError, OSError):
+                pass
+        _verify_install(etc, repo, files)
+        os.umask(old_umask)
+        print("PASS: /etc/hmt mode 0700 owner root:root")
+        print("PASS: supabase-prod-ca.crt mode 0600 owner root:root")
+        for name in ("compose.env", "api.env", "worker.env", "migration.env"):
+            print(f"PASS: {name} mode 0600 owner root:root")
+        print("PASS: checkout links target /etc/hmt; legacy /run/hmt links removed")
         print("PASS: production writes, dispatch and qualification gates closed")
         return 0
     except Exception:
-        print("STOP: configuration install failed; input values suppressed")
+        print("FAIL: configuration install failed; input values suppressed")
         return 1
 
 

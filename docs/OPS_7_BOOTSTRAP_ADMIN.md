@@ -11,7 +11,7 @@ container through stdin, never command arguments, files, shell history or SSM te
 COMMAND: `bash ops/aws/50_bootstrap_admin.sh`
 
 EXPECTED OUTPUT: three PASS lines: sole admin bound; locked account created with
-entry/exit disabled; tmpfs API account binding updated and API recreated. The
+entry/exit disabled; `/etc/hmt` API account binding updated and API recreated. The
 script uses `platform bootstrap-admin` behavior and `account bootstrap --profile
 delta-india-primary --confirm-locked-live` behavior without exposing inputs.
 

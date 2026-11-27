@@ -6,6 +6,8 @@ from pathlib import Path
 def test_start_script_has_order_and_no_migration() -> None:
     source = Path("ops/aws/40_start_ui.sh").read_text()
     assert "tools/ec2_release_preflight.py" in source
+    assert "--config /etc/hmt" in source
+    assert "/run/hmt" not in source
     assert "disk <= 70" in source
     assert "memory >= 3500000" in source
     assert "--no-deps --no-build redis" in source
