@@ -47,6 +47,19 @@ ROOT = Path(__file__).resolve().parents[2]
 PROBE_SNAPSHOT_ID = UUID("00000000-0000-0000-0000-00000000a001")
 
 
+@pytest.fixture
+def migration_acceptance_ca(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expose the disposable CA only while an explicit migration test runs.
+
+    Ordinary application Settings deliberately rejects this migration-only
+    variable. The dedicated test variable is ignored by application settings;
+    monkeypatch restores the process environment when this fixture finishes.
+    """
+    ca_file = os.environ.get("HMT_CRYPTO_MIGRATION_ACCEPTANCE_CA_FILE")
+    if ca_file is not None:
+        monkeypatch.setenv("DATABASE_MIGRATION_CA_FILE", ca_file)
+
+
 class _ConfiguredDatabases(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -156,7 +169,7 @@ def _acceptance_traceback_retains_secret(error: BaseException, secret: str) -> b
             return any(
                 retains(item, depth=depth + 1, seen=seen) for pair in value.items() for item in pair
             )
-        if isinstance(value, (list, tuple, set, frozenset)):
+        if isinstance(value, list | tuple | set | frozenset):
             return any(retains(item, depth=depth + 1, seen=seen) for item in value)
         attributes = getattr(value, "__dict__", None)
         return type(attributes) is dict and any(
@@ -263,7 +276,9 @@ async def _schema_evidence(
                         SELECT acl.grantee
                         FROM pg_catalog.pg_namespace AS namespace
                         CROSS JOIN LATERAL pg_catalog.aclexplode(
-                            COALESCE(namespace.nspacl, ARRAY[]::aclitem[])
+                            NULLIF(COALESCE(namespace.nspacl,
+                                pg_catalog.acldefault('n', namespace.nspowner)),
+                                ARRAY[]::aclitem[])
                         ) AS acl
                         WHERE namespace.nspname = 'hmt_crypto'
                         UNION ALL
@@ -272,7 +287,11 @@ async def _schema_evidence(
                         JOIN pg_catalog.pg_namespace AS namespace
                           ON namespace.oid = relation.relnamespace
                         CROSS JOIN LATERAL pg_catalog.aclexplode(
-                            COALESCE(relation.relacl, ARRAY[]::aclitem[])
+                            NULLIF(COALESCE(relation.relacl,
+                                pg_catalog.acldefault(
+                                    CASE WHEN relation.relkind = 'S' THEN 'S'
+                                        ELSE 'r' END::"char", relation.relowner)),
+                                ARRAY[]::aclitem[])
                         ) AS acl
                         WHERE namespace.nspname = 'hmt_crypto'
                            OR (
@@ -285,10 +304,10 @@ async def _schema_evidence(
                         JOIN pg_catalog.pg_namespace AS namespace
                           ON namespace.oid = procedure.pronamespace
                         CROSS JOIN LATERAL pg_catalog.aclexplode(
-                            COALESCE(
+                            NULLIF(COALESCE(
                                 procedure.proacl,
                                 pg_catalog.acldefault('f', procedure.proowner)
-                            )
+                            ), ARRAY[]::aclitem[])
                         ) AS acl
                         WHERE namespace.nspname = 'hmt_crypto'
                         UNION ALL
@@ -296,7 +315,9 @@ async def _schema_evidence(
                         FROM pg_catalog.pg_default_acl AS defaults
                         JOIN pg_catalog.pg_namespace AS namespace
                           ON namespace.oid = defaults.defaclnamespace
-                        CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) AS acl
+                        CROSS JOIN LATERAL pg_catalog.aclexplode(
+                            NULLIF(defaults.defaclacl, ARRAY[]::aclitem[])
+                        ) AS acl
                         WHERE namespace.nspname = 'hmt_crypto'
                     )
                     SELECT count(*)
@@ -350,6 +371,90 @@ async def _version(url: URL) -> str | None:
         async with engine.connect() as connection:
             return await connection.scalar(
                 text("SELECT version_num FROM public.hmt_crypto_alembic_version")
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _foreign_key_actions(url: URL) -> list[tuple[str, str, str]]:
+    engine = create_async_engine(
+        url,
+        hide_parameters=True,
+        connect_args=migration_connect_args(url),
+    )
+    try:
+        async with engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    "SELECT constraint_record.conname, "
+                    "constraint_record.confupdtype::text, "
+                    "constraint_record.confdeltype::text "
+                    "FROM pg_catalog.pg_constraint AS constraint_record "
+                    "JOIN pg_catalog.pg_class AS relation "
+                    "ON relation.oid = constraint_record.conrelid "
+                    "JOIN pg_catalog.pg_namespace AS namespace "
+                    "ON namespace.oid = relation.relnamespace "
+                    "WHERE namespace.nspname = 'hmt_crypto' "
+                    "AND constraint_record.contype = 'f' "
+                    "ORDER BY constraint_record.conname"
+                )
+            )
+            return [(str(name), str(update), str(delete)) for name, update, delete in result]
+    finally:
+        await engine.dispose()
+
+
+async def _insert_valid_platform_session(url: URL) -> tuple[UUID, UUID]:
+    user_id = UUID("00000000-0000-0000-0000-00000000b001")
+    session_id = UUID("00000000-0000-0000-0000-00000000b002")
+    engine = create_async_engine(
+        url,
+        hide_parameters=True,
+        connect_args=migration_connect_args(url),
+    )
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO hmt_crypto.platform_users ("
+                    "id, auth_user_id, email, full_name, role, status, "
+                    "password_change_required, created_at, updated_at"
+                    ") VALUES ("
+                    ":user_id, :auth_user_id, 'migration-probe@example.invalid', "
+                    "'Migration Probe', 'viewer', 'active', false, now(), now()"
+                    ")"
+                ),
+                {"user_id": user_id, "auth_user_id": user_id},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO hmt_crypto.platform_sessions ("
+                    "id, user_id, token_sha256, created_at, expires_at, last_seen_at"
+                    ") VALUES ("
+                    ":session_id, :user_id, :token, now(), "
+                    "now() + interval '1 hour', now()"
+                    ")"
+                ),
+                {"session_id": session_id, "user_id": user_id, "token": "b" * 64},
+            )
+    finally:
+        await engine.dispose()
+    return user_id, session_id
+
+
+async def _platform_session_exists(url: URL, session_id: UUID) -> bool:
+    engine = create_async_engine(
+        url,
+        hide_parameters=True,
+        connect_args=migration_connect_args(url),
+    )
+    try:
+        async with engine.connect() as connection:
+            return bool(
+                await connection.scalar(
+                    text("SELECT EXISTS (SELECT 1 FROM hmt_crypto.platform_sessions WHERE id=:id)"),
+                    {"id": session_id},
+                )
             )
     finally:
         await engine.dispose()
@@ -440,8 +545,6 @@ async def _exercise_append_only_and_retention_purge(url: URL) -> None:
             for statement in (
                 "CREATE ROLE hmt_audit_retention NOLOGIN",
                 "GRANT USAGE ON SCHEMA hmt_crypto TO hmt_audit_retention",
-                "GRANT SELECT, DELETE ON hmt_crypto.api_audit_payloads TO hmt_audit_retention",
-                "GRANT INSERT ON hmt_crypto.api_audit_events TO hmt_audit_retention",
                 "GRANT EXECUTE ON FUNCTION "
                 "hmt_crypto.purge_expired_audit_payload(uuid, text) "
                 "TO hmt_audit_retention",
@@ -449,6 +552,23 @@ async def _exercise_append_only_and_retention_purge(url: URL) -> None:
                 "SET ROLE hmt_audit_retention",
             ):
                 await connection.execute(text(statement))
+            for forbidden, values in (
+                (
+                    text(
+                        "UPDATE hmt_crypto.api_audit_payloads "
+                        "SET payload_text = payload_text WHERE owning_event_id = :identifier"
+                    ),
+                    {"identifier": payload.owning_event_id},
+                ),
+                (ApiAuditEvent.__table__.insert(), _row_values(public_root())),
+            ):
+                try:
+                    async with connection.begin_nested():
+                        await connection.execute(forbidden, values)
+                except DBAPIError as error:
+                    assert getattr(error.orig, "sqlstate", None) == "42501"
+                else:
+                    raise AssertionError("retention role received direct audit mutation access")
             result = await connection.execute(
                 text(
                     "SELECT * FROM hmt_crypto.purge_expired_audit_payload("
@@ -490,6 +610,12 @@ async def _drop_disposable_objects(url: URL, *, drop_retention_role: bool) -> No
     )
     try:
         async with engine.begin() as connection:
+            # Phase33 changes a cluster-level owner default. Dropping a disposable
+            # schema cannot undo it, so restore PostgreSQL's standard function
+            # default before another acceptance case recreates the migration chain.
+            await connection.execute(
+                text("ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO PUBLIC")
+            )
             await connection.execute(text("DROP SCHEMA IF EXISTS hmt_crypto CASCADE"))
             await connection.execute(text("DROP TABLE IF EXISTS public.hmt_crypto_alembic_version"))
             if drop_retention_role:
@@ -612,6 +738,7 @@ def test_acceptance_rejects_driver_query_tls_downgrades(
 @pytest.mark.integration
 def test_migration_security_and_downgrade_contracts_on_disposable_postgres(
     monkeypatch: pytest.MonkeyPatch,
+    migration_acceptance_ca: None,
 ) -> None:
     url = _acceptance_url()
     monkeypatch.setenv("DATABASE_MIGRATION_URL", url.render_as_string(hide_password=False))
@@ -633,12 +760,12 @@ def test_migration_security_and_downgrade_contracts_on_disposable_postgres(
         command.upgrade(config, "head")
         evidence = asyncio.run(_schema_evidence(url))
         assert evidence == (
-            43,
-            29,
+            76,
+            30,
+            False,
             True,
             True,
-            True,
-            "phase5_reconcile_checkpoint_v1",
+            "phase34_exact_decimal_v1",
             0,
             0,
         )
@@ -646,7 +773,49 @@ def test_migration_security_and_downgrade_contracts_on_disposable_postgres(
         retention_role_created = True
         with pytest.raises(RuntimeError, match="without exposing server diagnostics"):
             command.downgrade(config, "phase2_baseline_v1")
-        assert asyncio.run(_version(url)) == "phase2_hardening_v1"
+            assert asyncio.run(_version(url)) == "phase31_dynamic_tradingview_v1"
     finally:
         asyncio.run(_drop_disposable_objects(url, drop_retention_role=retention_role_created))
     assert asyncio.run(_schema_exists(url)) is False
+
+
+@pytest.mark.integration
+def test_phase32_foreign_key_actions_upgrade_and_downgrade_on_disposable_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+    migration_acceptance_ca: None,
+) -> None:
+    url = _acceptance_url()
+    monkeypatch.setenv("DATABASE_MIGRATION_URL", url.render_as_string(hide_password=False))
+    runtime_url = url.set(username="hmt_runtime_acceptance", password="unused-runtime-secret")
+    monkeypatch.setenv("DATABASE_URL", runtime_url.render_as_string(hide_password=False))
+    config = Config(str(ROOT / "alembic.ini"))
+    prior_cascades = {
+        "crypto_contract_settings_account_id_fkey",
+        "fk_tv_webhook_keys_configuration",
+        "tradingview_configuration_accounts_account_id_fkey",
+        "tradingview_configuration_accounts_configuration_id_fkey",
+        "tradingview_symbol_mappings_account_id_fkey",
+    }
+    try:
+        command.upgrade(config, "phase31_dynamic_tradingview_v1")
+        _, session_id = asyncio.run(_insert_valid_platform_session(url))
+
+        command.upgrade(config, "phase32_restrict_foreign_keys_v1")
+        upgraded = asyncio.run(_foreign_key_actions(url))
+        assert upgraded
+        assert all(update == "r" and delete == "r" for _, update, delete in upgraded)
+        assert asyncio.run(_platform_session_exists(url, session_id))
+
+        command.downgrade(config, "phase31_dynamic_tradingview_v1")
+        downgraded = asyncio.run(_foreign_key_actions(url))
+        assert downgraded
+        assert all(update == "a" for _, update, _ in downgraded)
+        assert {name for name, _, delete in downgraded if delete == "c"} == prior_cascades
+        assert all(delete in {"c", "r"} for _, _, delete in downgraded)
+        assert asyncio.run(_platform_session_exists(url, session_id))
+
+        command.upgrade(config, "phase32_restrict_foreign_keys_v1")
+        assert asyncio.run(_version(url)) == "phase32_restrict_foreign_keys_v1"
+        assert asyncio.run(_platform_session_exists(url, session_id))
+    finally:
+        asyncio.run(_drop_disposable_objects(url, drop_retention_role=False))

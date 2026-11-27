@@ -29,45 +29,7 @@ CONTROL = VERSIONS / "phase5_control_v1.py"
 RECONCILIATION_CHECKPOINT = VERSIONS / "phase5_reconcile_checkpoint_v1.py"
 RUNTIME_GRANTS = VERSIONS / "phase5_runtime_grants_v1_grant_least_privilege_runtime_access.py"
 MANIFEST = MIGRATIONS / "schema_manifest.json"
-EXPECTED_TABLES = {
-    "accounts",
-    "api_audit_events",
-    "api_audit_payloads",
-    "balance_snapshots",
-    "catalogue_products",
-    "catalogue_snapshots",
-    "command_operations",
-    "credential_versions",
-    "exit_intents",
-    "fill_order_links",
-    "fills",
-    "funding_snapshots",
-    "leadership_leases",
-    "order_attempt_events",
-    "order_attempts",
-    "order_transitions",
-    "orders",
-    "pnl_snapshots",
-    "position_protection_orders",
-    "position_protections",
-    "position_snapshots",
-    "protection_authorizations",
-    "reconciliation_acknowledgements",
-    "reconciliation_drifts",
-    "reconciliation_resources",
-    "reconciliation_runs",
-    "recovery_incarnations",
-    "risk_decisions",
-    "risk_halt_events",
-    "risk_halts",
-    "risk_rate_consumptions",
-    "risk_reservations",
-    "risk_state",
-    "scheduler_state",
-    "signals",
-    "wallet_transactions",
-    "worker_heartbeats",
-}
+EXPECTED_TABLES = set(json.loads(MANIFEST.read_text(encoding="utf-8"))["tables"])
 
 
 def _load(path: Path, name: str) -> ModuleType:
@@ -88,6 +50,11 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions(base="base", head="heads"))
     assert [(revision.revision, revision.down_revision) for revision in revisions] == [
+        ("phase34_exact_decimal_v1", "phase33b_retention_purge_v1"),
+        ("phase33b_retention_purge_v1", "phase33_private_function_acl_v1"),
+        ("phase33_private_function_acl_v1", "phase32_restrict_foreign_keys_v1"),
+        ("phase32_restrict_foreign_keys_v1", "phase31_dynamic_tradingview_v1"),
+        ("phase31_dynamic_tradingview_v1", "phase30_ensure_password_state_v1"),
         ("phase30_ensure_password_state_v1", "phase29_merge_auth_controls_v1"),
         (
             "phase29_merge_auth_controls_v1",
@@ -128,7 +95,7 @@ def test_revision_chain_extends_the_frozen_phase2_history() -> None:
         ("phase2_hardening_v1", "phase2_baseline_v1"),
         ("phase2_baseline_v1", None),
     ]
-    assert script.get_current_head() == "phase30_ensure_password_state_v1"
+    assert script.get_current_head() == "phase34_exact_decimal_v1"
     assert len("phase8_version_width_v1") <= 32
     assert max(len(revision.revision) for revision in revisions) <= 128
 
@@ -602,7 +569,7 @@ def test_offline_upgrade_renders_without_importing_models_or_leaking_dsn(
     assert "CREATE TABLE public.hmt_crypto_alembic_version" in rendered
     assert "CREATE TABLE hmt_crypto_alembic_version" not in rendered
     assert "CREATE SCHEMA hmt_crypto" in rendered
-    assert rendered.count("CREATE TABLE hmt_crypto.") == 73
+    assert rendered.count("CREATE TABLE hmt_crypto.") == 76
     assert "CREATE TABLE hmt_crypto.kill_workflows" in rendered
     assert "CREATE TABLE hmt_crypto.kill_workflow_events" in rendered
     assert "CREATE TABLE hmt_crypto.paper_execution_heads" in rendered

@@ -10,11 +10,14 @@ deployment and qualification.
 
 ## AWS baseline
 
-Use the dedicated AWS account and EC2 instance in `ap-southeast-2`:
+Use the dedicated AWS account and EC2 instance in Mumbai, `ap-south-1`.
+The release preflight approves only this region and requires API/worker agreement.
+The target Supabase project is `<project-ref>`, PostgreSQL 17, in Mumbai.
+Follow [the Mumbai bootstrap runbook](MUMBAI_BOOTSTRAP.md) for role creation,
+password handling, laptop migrations and first-user/account setup.
 
 - Ubuntu 24.04 LTS or Amazon Linux 2023;
-- a 2 GiB ARM64 instance initially (the current host is ARM64); monitor memory and resize when
-  sustained headroom is inadequate;
+- a t4g.medium ARM64 instance with 4 GiB memory; monitor memory and disk headroom;
 - 30 GiB encrypted gp3 EBS;
 - one Elastic IP associated with the instance;
 - IMDSv2 required;

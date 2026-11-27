@@ -133,8 +133,7 @@ async def test_admin_create_user_uses_secret_boundary_and_confirms_email() -> No
     assert request.headers["apikey"] == "server-secret-key"
     assert request.headers["authorization"] == "Bearer server-secret-key"
     assert request.content == (
-        b'{"email":"trader@example.com","password":"One-time-password1!",'
-        b'"email_confirm":true}'
+        b'{"email":"trader@example.com","password":"One-time-password1!","email_confirm":true}'
     )
 
 

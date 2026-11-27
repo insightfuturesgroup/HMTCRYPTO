@@ -245,8 +245,6 @@ async def run_private_stream(
                         max_bytes=1_048_576,
                         stream_label="private",
                     )
-                    if not isinstance(frame, dict):
-                        continue
                     if frame.get("type") in {"heartbeat", "pong"}:
                         monotonic = time.monotonic()
                         if monotonic - last_heartbeat_persisted >= 30:
@@ -330,18 +328,20 @@ async def run_private_stream(
                                 ),
                             }
                         elif isinstance(observation, PositionUpdate):
-                            row = observation.row
+                            position_row = observation.row
                             payload = {
                                 "kind": "position",
                                 "action": observation.action.value,
                                 "position": {
-                                    "product_id": row.product_id,
-                                    "product_symbol": row.symbol,
-                                    "size": row.size,
-                                    "entry_price": format(row.entry_price, "f"),
-                                    "liquidation_price": format(row.liquidation_price, "f"),
-                                    "margin": format(row.margin, "f"),
-                                    "commission": format(row.commission, "f"),
+                                    "product_id": position_row.product_id,
+                                    "product_symbol": position_row.symbol,
+                                    "size": position_row.size,
+                                    "entry_price": format(position_row.entry_price, "f"),
+                                    "liquidation_price": format(
+                                        position_row.liquidation_price, "f"
+                                    ),
+                                    "margin": format(position_row.margin, "f"),
+                                    "commission": format(position_row.commission, "f"),
                                 },
                             }
                         elif isinstance(observation, UserTradeUpdate):

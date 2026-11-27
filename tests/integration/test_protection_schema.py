@@ -6,7 +6,8 @@ from uuid import uuid4
 
 import pytest
 from execution_test_support import command, order
-from execution_test_support import execution_db as execution_db
+from execution_test_support import execution_db as _fixture_execution_db
+from schema_table_source import migration_chain_tables
 from schema_test_support import NOW, account, product, schema_api, scope, snapshot
 from schema_test_support import schema_db as schema_db
 from sqlalchemy import UniqueConstraint, delete, insert, select, text, update
@@ -15,6 +16,9 @@ from sqlalchemy.orm import load_only
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from hmt_crypto.persistence.errors import PersistenceError
+
+# Register the original shared fixture object under its pytest name.
+execution_db = _fixture_execution_db
 
 NEW_TABLES = {
     "exit_intents",
@@ -25,48 +29,8 @@ NEW_TABLES = {
 
 
 def test_exact_four_protection_tables_are_present():
-    baseline = {
-        "accounts",
-        "credential_versions",
-        "catalogue_snapshots",
-        "catalogue_products",
-        "signals",
-        "command_operations",
-        "orders",
-        "order_attempts",
-        "order_attempt_events",
-        "order_transitions",
-        "fills",
-        "fill_order_links",
-        "recovery_incarnations",
-        "leadership_leases",
-        "worker_heartbeats",
-        "scheduler_state",
-        "reconciliation_runs",
-        "reconciliation_resources",
-        "reconciliation_drifts",
-        "reconciliation_acknowledgements",
-        "position_snapshots",
-        "balance_snapshots",
-        "wallet_transactions",
-        "funding_snapshots",
-        "pnl_snapshots",
-        "risk_state",
-        "risk_halts",
-        "risk_halt_events",
-        "risk_decisions",
-        "risk_reservations",
-        "risk_rate_consumptions",
-        "api_audit_events",
-        "api_audit_payloads",
-        "operator_audit_events",
-        "kill_workflows",
-        "kill_workflow_events",
-        "paper_execution_heads",
-        "paper_execution_events",
-        "account_reconciliation_checkpoints",
-    }
-    assert {t.name for t in schema_api().metadata.tables.values()} - baseline == NEW_TABLES
+    assert {t.name for t in schema_api().metadata.tables.values()} == migration_chain_tables()
+    assert NEW_TABLES <= migration_chain_tables()
 
 
 def intent(owner, cmd, row=None, **changes):

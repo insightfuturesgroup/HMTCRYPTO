@@ -132,7 +132,7 @@ def strict_nonnegative_int(value: object, *, name: str) -> int:
 
 def strict_monotonic_value(value: object) -> float:
     """Validate an injected monotonic-clock reading."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigurationError(context={"operation": "monotonic_clock"})
     parsed = float(value)
     if not math.isfinite(parsed) or parsed < 0:
@@ -468,7 +468,7 @@ class RatePermit:
     def __post_init__(self) -> None:
         if (
             isinstance(self.acquired_at, bool)
-            or not isinstance(self.acquired_at, (int, float))
+            or not isinstance(self.acquired_at, int | float)
             or not math.isfinite(float(self.acquired_at))
             or self.acquired_at < 0
         ):
@@ -518,7 +518,7 @@ class RateLimitSnapshot:
             raise ValueError("coordination_mode must be CoordinationMode")
         if self.blocked_until is not None and (
             isinstance(self.blocked_until, bool)
-            or not isinstance(self.blocked_until, (int, float))
+            or not isinstance(self.blocked_until, int | float)
             or not math.isfinite(float(self.blocked_until))
             or self.blocked_until < 0
         ):

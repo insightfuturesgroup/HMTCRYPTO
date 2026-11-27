@@ -8,6 +8,7 @@ import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, Self
 from uuid import UUID, uuid4
 
@@ -760,9 +761,7 @@ async def _recover_live_submission(
         await adapter.aclose()
 
 
-async def _publish_private_stream_update(
-    account_id: UUID, update: dict[str, object]
-) -> None:
+async def _publish_private_stream_update(account_id: UUID, update: dict[str, object]) -> None:
     """Wake recovery and push a compact venue-confirmed account delta."""
     payload = {
         "accountId": str(account_id),
@@ -927,6 +926,9 @@ async def run_private_worker(
     execution_task: asyncio.Task[None] | None = None
     next_retention_at = 0.0
     logger.info("private_worker_started", owner_id=str(process.owner_id))
+    from hmt_crypto.risk_operations import log_risk_configuration
+
+    log_risk_configuration("worker", logger)
     try:
         if not process.read_only and execution.enabled:
             execution_task = asyncio.create_task(
@@ -1007,12 +1009,8 @@ async def run_private_worker(
                                             api_key=api_key,
                                             api_secret=api_secret,
                                             stop=stop,
-                                            publish_update=(
-                                                lambda update, account_id=claim.account_id: (
-                                                    _publish_private_stream_update(
-                                                        account_id, update
-                                                    )
-                                                )
+                                            publish_update=partial(
+                                                _publish_private_stream_update, claim.account_id
                                             ),
                                         )
                                     )
@@ -1187,11 +1185,11 @@ async def run_private_worker(
                 done, pending = await asyncio.wait(
                     {wake, stopped}, return_when=asyncio.FIRST_COMPLETED
                 )
-                for task in pending:
-                    task.cancel()
+                for pending_task in pending:
+                    pending_task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
-                for task in done:
-                    await task
+                for completed_task in done:
+                    await completed_task
             except asyncio.CancelledError:
                 raise
             except Exception:

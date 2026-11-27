@@ -1,5 +1,6 @@
 """Execution metadata must stay private, scoped and restricted to this unit."""
 
+from schema_table_source import migration_chain_tables
 from schema_test_support import schema_api
 from sqlalchemy import MetaData, UniqueConstraint
 from sqlalchemy.dialects import postgresql
@@ -8,51 +9,9 @@ from sqlalchemy.schema import AddConstraint, CreateIndex, CreateTable
 
 def test_execution_metadata_tables_and_compiles_postgres():
     api = schema_api()
-    assert {table.name for table in api.metadata.tables.values()} == {
-        "accounts",
-        "credential_versions",
-        "catalogue_snapshots",
-        "catalogue_products",
-        "signals",
-        "command_operations",
-        "orders",
-        "order_attempts",
-        "order_attempt_events",
-        "order_transitions",
-        "fills",
-        "fill_order_links",
-        "exit_intents",
-        "protection_authorizations",
-        "position_protections",
-        "position_protection_orders",
-        "recovery_incarnations",
-        "leadership_leases",
-        "worker_heartbeats",
-        "scheduler_state",
-        "reconciliation_runs",
-        "reconciliation_resources",
-        "reconciliation_drifts",
-        "reconciliation_acknowledgements",
-        "position_snapshots",
-        "balance_snapshots",
-        "wallet_transactions",
-        "funding_snapshots",
-        "pnl_snapshots",
-        "risk_state",
-        "risk_halts",
-        "risk_halt_events",
-        "risk_decisions",
-        "risk_reservations",
-        "risk_rate_consumptions",
-        "api_audit_events",
-        "api_audit_payloads",
-        "operator_audit_events",
-        "kill_workflows",
-        "kill_workflow_events",
-        "paper_execution_heads",
-        "paper_execution_events",
-        "account_reconciliation_checkpoints",
-    }, "The approved persistence evidence tables are missing"
+    assert {table.name for table in api.metadata.tables.values()} == migration_chain_tables(), (
+        "The approved persistence evidence tables are missing"
+    )
     metadata = MetaData(schema="hmt_crypto", naming_convention=api.metadata.naming_convention)
     for table in api.metadata.tables.values():
         table.to_metadata(metadata)

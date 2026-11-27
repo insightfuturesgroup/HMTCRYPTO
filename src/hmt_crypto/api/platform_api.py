@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
@@ -96,12 +97,17 @@ from hmt_crypto.persistence.models import (
     PrivateReconciliationSnapshot,
     PrivateStreamEvidence,
     PrivateWorkerLease,
+    TradingViewConfiguration,
+    TradingViewConfigurationAccount,
     TradingViewSignal,
     TradingViewStrategy,
+    TradingViewSymbolMapping,
     TradingViewWebhookKey,
     WatchlistGroup,
     WatchlistItem,
 )
+from hmt_crypto.risk_operations import risk_health, uncertainty_status
+from hmt_crypto.risk_policy import deployment_policy, policy_rejection, record_rejection
 
 _MAX_SESSION_TOUCH_INTERVAL_SECONDS = 300
 
@@ -190,6 +196,27 @@ def _page_payload_rows(
         "page": page,
         "pageSize": page_size,
     }
+
+
+def _require_entry_policy(policy: object | None, *, stage: str, reduce_only: bool) -> None:
+    reason = policy_rejection(policy, stage=stage, reduce_only=reduce_only)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
+
+
+def _save_policy_decimal(value: str, field: str) -> Decimal:
+    try:
+        parsed = Decimal(value)
+        if not parsed.is_finite():
+            raise InvalidOperation()
+        if parsed <= 0:
+            reason = f"risk_policy_non_positive_{field}"
+        else:
+            return _positive_decimal(value)
+    except (InvalidOperation, HTTPException):
+        reason = f"risk_policy_malformed_{field}"
+    record_rejection("save", reason)
+    raise HTTPException(status_code=400, detail=reason)
 
 
 class _Body(BaseModel):
@@ -295,8 +322,8 @@ class RiskPolicyBody(_Body):
     max_order_notional: str = Field(min_length=1, max_length=64)
     max_position_notional: str = Field(min_length=1, max_length=64)
     max_daily_loss: str = Field(min_length=1, max_length=64)
-    max_open_orders: int = Field(ge=1, le=10_000)
-    max_inflight_signals: int = Field(default=5, ge=1, le=100)
+    max_open_orders: int = Field(ge=1, le=10_000, strict=True)
+    max_inflight_signals: int = Field(default=5, ge=1, le=100, strict=True)
     usd_inr_rate: str = Field(default="100", min_length=1, max_length=64)
     allowed_product_ids: list[int] = Field(default_factory=list, max_length=500)
     product_scope_mode: Literal["SELECTED", "ALL_SUPPORTED"] = "SELECTED"
@@ -386,7 +413,10 @@ class TradingViewSignalBody(_Body):
     webhook_key: str | None = Field(default=None, min_length=32, max_length=128)
     signal_id: str = Field(min_length=1, max_length=128)
     symbol: str | None = Field(default=None, min_length=1, max_length=128)
-    side: Literal["buy", "sell"]
+    side: Literal["buy", "sell"] | None = None
+    action: Literal["buy", "sell", "exit_long", "exit_short"] | None = None
+    contracts: int = Field(default=1, gt=0, lt=2**31)
+    atr: str | None = Field(default=None, max_length=64)
     timestamp: int | str
     limit_price: str | None = Field(default=None, max_length=64)
 
@@ -401,6 +431,18 @@ class CryptoContractSettingItem(_Body):
     target_multiplier: str = Field(min_length=1, max_length=32)
     lot_multiplier: int = Field(gt=0, lt=2**31)
     enabled: bool
+    tradingview_symbol: str | None = Field(default=None, max_length=128)
+
+
+class TradingViewConfigurationBody(_Body):
+    name: str = Field(min_length=1, max_length=128)
+    account_ids: list[JsonUUID] = Field(min_length=1, max_length=100)
+
+
+class TradingViewConfigurationStateBody(_Body):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    account_ids: list[JsonUUID] | None = Field(default=None, min_length=1, max_length=100)
+    enabled: bool | None = None
 
 
 class CryptoContractSettingsBody(_Body):
@@ -2626,9 +2668,10 @@ def install_platform_routes(
                     account_findings.append(
                         ("critical", "worker_lease", "No active private worker lease")
                     )
-                if risk is None:
+                risk_status = risk_health(risk)
+                if not risk_status["riskValid"]:
                     account_findings.append(
-                        ("warning", "risk_policy", "Live risk policy is not configured")
+                        ("warning", "risk_policy", str(risk_status["entryBlockReason"]))
                     )
                 if control is not None and control.last_error_code is not None:
                     account_findings.append(
@@ -3367,6 +3410,10 @@ def install_platform_routes(
                     or replay.limit_price != requested_limit
                 ):
                     raise HTTPException(status_code=409, detail="idempotency_conflict")
+                replay_risk = await session.scalar(
+                    select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == body.account_id)
+                )
+                _require_entry_policy(replay_risk, stage="preview", reduce_only=body.reduce_only)
                 return {
                     "previewId": str(replay.id),
                     "accountId": str(replay.account_id),
@@ -3384,6 +3431,16 @@ def install_platform_routes(
             risk = await session.scalar(
                 select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == body.account_id)
             )
+            _require_entry_policy(risk, stage="preview", reduce_only=body.reduce_only)
+            if risk is None and body.reduce_only:
+                # Exit evidence uses version zero; this transient object is never saved.
+                risk = AccountRiskPolicy(
+                    enabled=False,
+                    version=0,
+                    allowed_product_ids="[]",
+                    max_order_notional=Decimal(0),
+                    max_position_notional=Decimal(0),
+                )
             global_control = await session.get(PlatformLiveControl, "global")
             lease = await session.scalar(
                 select(PrivateWorkerLease).where(PrivateWorkerLease.account_id == body.account_id)
@@ -3448,7 +3505,7 @@ def install_platform_routes(
                 and control.reconciled_at >= now - timedelta(seconds=60)
                 and gate_open
                 and risk is not None
-                and body.product_id in allowed
+                and (body.reduce_only or body.product_id in allowed)
                 and lease is not None
                 and lease.lease_until > now
                 and reconciliation is not None
@@ -3505,9 +3562,7 @@ def install_platform_routes(
                     limit_price=body.limit_price,
                     market_price=market_price,
                     reduce_only=body.reduce_only,
-                    max_order_notional=(
-                        risk.max_order_notional if risk.enabled else Decimal("1e30")
-                    ),
+                    max_order_notional=risk.max_order_notional,
                 )
             except LiveOrderAdmissionError:
                 raise HTTPException(status_code=400, detail="invalid_order_sizing") from None
@@ -3592,7 +3647,7 @@ def install_platform_routes(
                     contracts=abs(other_size),
                     price=Decimal(other_quote.mark_price),
                 )
-            if risk.enabled and aggregate_exposure > risk.max_position_notional:
+            if not body.reduce_only and aggregate_exposure > risk.max_position_notional:
                 raise HTTPException(status_code=409, detail="position_limit_exceeded")
             daily_net = Decimal(0)
             for item in wallet:
@@ -3707,6 +3762,14 @@ def install_platform_routes(
             permission = await account_permission(session, actor, preview.account_id)
             if actor.role == "viewer" or permission == "view":
                 raise HTTPException(status_code=403, detail="trading_permission_required")
+            admission_policy = await session.scalar(
+                select(AccountRiskPolicy)
+                .where(AccountRiskPolicy.account_id == preview.account_id)
+                .with_for_update()
+            )
+            _require_entry_policy(
+                admission_policy, stage="admission", reduce_only=preview.reduce_only
+            )
             replay = await session.scalar(
                 select(LiveOrderIntent).where(
                     LiveOrderIntent.account_id == preview.account_id,
@@ -3725,9 +3788,14 @@ def install_platform_routes(
                     AccountLiveControl.account_id == preview.account_id
                 )
             )
-            risk = await session.scalar(
-                select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == preview.account_id)
-            )
+            risk = admission_policy
+            if (
+                not preview.reduce_only
+                and risk is not None
+                and risk.version != preview.risk_policy_version
+            ):
+                record_rejection("admission", "risk_policy_changed")
+                raise HTTPException(status_code=409, detail="risk_policy_changed")
             lease = await session.scalar(
                 select(PrivateWorkerLease).where(
                     PrivateWorkerLease.account_id == preview.account_id
@@ -3741,8 +3809,14 @@ def install_platform_routes(
                 used is not None
                 or preview.expires_at <= now
                 or control is None
-                or risk is None
-                or risk.version != preview.risk_policy_version
+                or (
+                    not preview.reduce_only
+                    and (
+                        risk is None
+                        or risk.version != preview.risk_policy_version
+                        or preview.notional > risk.max_order_notional
+                    )
+                )
                 or control.reconciliation_state != "ready"
                 or control.reconciled_at is None
                 or control.reconciled_at < now - timedelta(seconds=60)
@@ -3916,6 +3990,11 @@ def install_platform_routes(
                         "price": str(preview.price),
                         "intentStatus": intent.status,
                         "submissionStatus": submission.status,
+                        **(
+                            uncertainty_status(submission.sent_at, now=datetime.now(UTC))
+                            if submission.status == "UNCERTAIN"
+                            else {}
+                        ),
                         "exchangeOrderId": submission.exchange_order_id,
                         "exchangeOrderState": submission.exchange_order_state,
                         "exchangeSize": submission.exchange_order_size,
@@ -4488,7 +4567,10 @@ def install_platform_routes(
                     "maxOpenOrders": row.max_open_orders,
                     "maxInflightSignals": row.max_inflight_signals,
                     "limitCurrency": row.limit_currency,
-                    "usdInrRate": str(row.usd_inr_rate),
+                    "usdInrRate": str(deployment_policy().policy_conversion_rate),
+                    "storedPolicyConversionRate": str(row.usd_inr_rate),
+                    "policyConversionRate": str(deployment_policy().policy_conversion_rate),
+                    "conversionRateLabel": "policy conversion rate",
                     "maxOrderLimitInr": str(row.max_order_limit_inr),
                     "maxPositionLimitInr": str(row.max_position_limit_inr),
                     "maxDailyLossLimitInr": str(row.max_daily_loss_limit_inr),
@@ -4518,19 +4600,27 @@ def install_platform_routes(
         ):
             raise HTTPException(status_code=400, detail="invalid_product_scope")
         inr_limits = (
-            _positive_decimal(body.max_order_notional),
-            _positive_decimal(body.max_position_notional),
-            _positive_decimal(body.max_daily_loss),
+            _save_policy_decimal(body.max_order_notional, "max_order_limit_inr"),
+            _save_policy_decimal(body.max_position_notional, "max_position_limit_inr"),
+            _save_policy_decimal(body.max_daily_loss, "max_daily_loss_limit_inr"),
         )
-        usd_inr_rate = _positive_decimal(body.usd_inr_rate)
-        if (
-            inr_limits != (Decimal("5000"), Decimal("10000"), Decimal("2000"))
-            or usd_inr_rate != Decimal("100")
-            or body.max_open_orders != 5
-            or body.max_inflight_signals != 5
-        ):
-            raise HTTPException(status_code=409, detail="risk_scope_requires_requalification")
+        usd_inr_rate = deployment_policy().policy_conversion_rate
+        if _positive_decimal(body.usd_inr_rate) != usd_inr_rate:
+            raise HTTPException(status_code=409, detail="risk_policy_conversion_rate_mismatch")
         limits = tuple(value / usd_inr_rate for value in inr_limits)
+        candidate_policy = SimpleNamespace(
+            enabled=True,
+            usd_inr_rate=usd_inr_rate,
+            max_order_notional=limits[0],
+            max_position_notional=limits[1],
+            max_daily_loss=limits[2],
+            max_order_limit_inr=inr_limits[0],
+            max_position_limit_inr=inr_limits[1],
+            max_daily_loss_limit_inr=inr_limits[2],
+            max_open_orders=body.max_open_orders,
+            max_inflight_signals=body.max_inflight_signals,
+        )
+        _require_entry_policy(candidate_policy, stage="save", reduce_only=False)
         now = datetime.now(UTC)
         async with database.transaction() as session:
             account = await session.get(Account, account_id)
@@ -4881,6 +4971,7 @@ def install_platform_routes(
                         "workerLeaseActive": lease is not None and lease.lease_until > now,
                         "workerGeneration": None if lease is None else lease.generation,
                         "riskConfigured": risk is not None,
+                        **risk_health(risk),
                         "riskEnabled": bool(risk and risk.enabled),
                         "riskMode": (
                             "MISSING"
@@ -5015,6 +5106,181 @@ def install_platform_routes(
                 ]
             }
 
+    @app.get("/api/v1/tradingview/configurations")
+    async def list_tradingview_configurations(request: Request) -> dict[str, object]:
+        actor = await principal(request)
+        async with database.transaction() as session:
+            configurations = list(
+                (
+                    await session.execute(
+                        select(TradingViewConfiguration)
+                        .where(TradingViewConfiguration.created_by_user_id == actor.profile_id)
+                        .order_by(desc(TradingViewConfiguration.created_at))
+                    )
+                ).scalars()
+            )
+            config_ids = [row.id for row in configurations]
+            links = (
+                []
+                if not config_ids
+                else list(
+                    (
+                        await session.execute(
+                            select(TradingViewConfigurationAccount).where(
+                                TradingViewConfigurationAccount.configuration_id.in_(config_ids)
+                            )
+                        )
+                    ).scalars()
+                )
+            )
+            keys = (
+                []
+                if not config_ids
+                else list(
+                    (
+                        await session.execute(
+                            select(TradingViewWebhookKey).where(
+                                TradingViewWebhookKey.configuration_id.in_(config_ids),
+                                TradingViewWebhookKey.revoked_at.is_(None),
+                            )
+                        )
+                    ).scalars()
+                )
+            )
+            accounts_by_config: dict[UUID, list[str]] = {}
+            for link in links:
+                accounts_by_config.setdefault(link.configuration_id, []).append(
+                    str(link.account_id)
+                )
+            fingerprints = {row.configuration_id: row.key_fingerprint for row in keys}
+            return {
+                "configurations": [
+                    {
+                        "id": str(row.id),
+                        "name": row.name,
+                        "enabled": row.enabled,
+                        "accountIds": accounts_by_config.get(row.id, []),
+                        "webhookConfigured": row.id in fingerprints,
+                        "webhookFingerprint": fingerprints.get(row.id),
+                        "updatedAt": _utc(row.updated_at),
+                    }
+                    for row in configurations
+                ]
+            }
+
+    @app.post("/api/v1/tradingview/configurations")
+    async def create_tradingview_configuration(
+        body: TradingViewConfigurationBody, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        now, configuration_id = datetime.now(UTC), uuid4()
+        account_ids = list(dict.fromkeys(body.account_ids))
+        async with database.transaction() as session:
+            for account_id in account_ids:
+                permission = await account_permission(session, actor, account_id)
+                if actor.role == "viewer" or permission == "view":
+                    raise HTTPException(status_code=403, detail="trading_permission_required")
+            session.add(
+                TradingViewConfiguration(
+                    id=configuration_id,
+                    created_by_user_id=actor.profile_id,
+                    name=body.name.strip(),
+                    enabled=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            for account_id in account_ids:
+                session.add(
+                    TradingViewConfigurationAccount(
+                        id=uuid4(),
+                        configuration_id=configuration_id,
+                        account_id=account_id,
+                        created_at=now,
+                    )
+                )
+        return {"id": str(configuration_id), "enabled": True}
+
+    @app.patch("/api/v1/tradingview/configurations/{configuration_id}")
+    async def update_tradingview_configuration(
+        configuration_id: UUID,
+        body: TradingViewConfigurationStateBody,
+        request: Request,
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        async with database.transaction() as session:
+            configuration = await session.get(TradingViewConfiguration, configuration_id)
+            if configuration is None or configuration.created_by_user_id != actor.profile_id:
+                raise HTTPException(status_code=404, detail="configuration_not_found")
+            if body.account_ids is not None:
+                account_ids = list(dict.fromkeys(body.account_ids))
+                for account_id in account_ids:
+                    permission = await account_permission(session, actor, account_id)
+                    if actor.role == "viewer" or permission == "view":
+                        raise HTTPException(status_code=403, detail="trading_permission_required")
+                await session.execute(
+                    sql_delete(TradingViewConfigurationAccount).where(
+                        TradingViewConfigurationAccount.configuration_id == configuration_id
+                    )
+                )
+                now = datetime.now(UTC)
+                for account_id in account_ids:
+                    session.add(
+                        TradingViewConfigurationAccount(
+                            id=uuid4(),
+                            configuration_id=configuration_id,
+                            account_id=account_id,
+                            created_at=now,
+                        )
+                    )
+            if body.name is not None:
+                configuration.name = body.name.strip()
+            if body.enabled is not None:
+                configuration.enabled = body.enabled
+            configuration.updated_at = datetime.now(UTC)
+        return {"id": str(configuration_id), "enabled": configuration.enabled}
+
+    @app.post("/api/v1/tradingview/configurations/{configuration_id}/webhook-key")
+    async def rotate_tradingview_configuration_key(
+        configuration_id: UUID, request: Request
+    ) -> dict[str, object]:
+        actor = await principal(request, mutation=True)
+        if actor.last_login_at is None or datetime.now(UTC) - actor.last_login_at > timedelta(
+            minutes=15
+        ):
+            raise HTTPException(status_code=403, detail="fresh_session_required")
+        raw_key = secrets.token_urlsafe(32)
+        digest, now = hashlib.sha256(raw_key.encode("ascii")).hexdigest(), datetime.now(UTC)
+        async with database.transaction() as session:
+            configuration = await session.get(TradingViewConfiguration, configuration_id)
+            if configuration is None or configuration.created_by_user_id != actor.profile_id:
+                raise HTTPException(status_code=404, detail="configuration_not_found")
+            active = list(
+                (
+                    await session.execute(
+                        select(TradingViewWebhookKey).where(
+                            TradingViewWebhookKey.configuration_id == configuration_id,
+                            TradingViewWebhookKey.revoked_at.is_(None),
+                        )
+                    )
+                ).scalars()
+            )
+            for row in active:
+                row.revoked_at = now
+            session.add(
+                TradingViewWebhookKey(
+                    id=uuid4(),
+                    strategy_id=None,
+                    configuration_id=configuration_id,
+                    key_sha256=digest,
+                    key_fingerprint=digest[:12],
+                    created_by_user_id=actor.profile_id,
+                    created_at=now,
+                    revoked_at=None,
+                )
+            )
+        return {"webhookKey": raw_key, "fingerprint": digest[:12], "shownOnce": True}
+
     @app.get("/api/v1/strategies")
     async def list_strategies(request: Request, account_id: UUID) -> dict[str, object]:
         actor = await principal(request)
@@ -5118,9 +5384,29 @@ def install_platform_routes(
             )
             global_rows = {row.product_id: row for row in saved if row.account_id is None}
             account_rows = {row.product_id: row for row in saved if row.account_id is not None}
+            mapping_scope = (
+                or_(
+                    TradingViewSymbolMapping.account_id.is_(None),
+                    TradingViewSymbolMapping.account_id == account_id,
+                )
+                if account_id is not None
+                else TradingViewSymbolMapping.account_id.is_(None)
+            )
+            mappings = list(
+                (
+                    await session.execute(select(TradingViewSymbolMapping).where(mapping_scope))
+                ).scalars()
+            )
+            global_mappings = {row.product_id: row for row in mappings if row.account_id is None}
+            account_mappings = {
+                row.product_id: row for row in mappings if row.account_id is not None
+            }
             rows: list[dict[str, object]] = []
             for product in products:
                 row = account_rows.get(product.product_id) or global_rows.get(product.product_id)
+                mapping = account_mappings.get(product.product_id) or global_mappings.get(
+                    product.product_id
+                )
                 rows.append(
                     {
                         "productId": product.product_id,
@@ -5134,6 +5420,9 @@ def install_platform_routes(
                         "targetMultiplier": str(row.target_multiplier if row else Decimal("1.25")),
                         "lotMultiplier": row.lot_multiplier if row else 1,
                         "enabled": row.enabled if row else True,
+                        "tradingviewSymbol": (
+                            product.symbol if mapping is None else mapping.tradingview_symbol
+                        ),
                         "source": "account"
                         if product.product_id in account_rows
                         else "global"
@@ -5231,6 +5520,39 @@ def install_platform_routes(
                     row.updated_by_user_id = actor.profile_id
                     row.updated_at = now
                 changed += 1
+                tv_symbol = (
+                    (item.tradingview_symbol or catalogue_products[item.product_id]).strip().upper()
+                )
+                if re.fullmatch(r"[A-Z0-9_.:-]+", tv_symbol) is None:
+                    raise HTTPException(status_code=400, detail="invalid_tradingview_symbol")
+                mapping = await session.scalar(
+                    select(TradingViewSymbolMapping).where(
+                        TradingViewSymbolMapping.account_id.is_(None)
+                        if body.account_id is None
+                        else TradingViewSymbolMapping.account_id == body.account_id,
+                        TradingViewSymbolMapping.product_id == item.product_id,
+                    )
+                )
+                if mapping is None:
+                    session.add(
+                        TradingViewSymbolMapping(
+                            id=uuid4(),
+                            account_id=body.account_id,
+                            tradingview_symbol=tv_symbol,
+                            product_id=item.product_id,
+                            delta_symbol=catalogue_products[item.product_id],
+                            enabled=item.enabled,
+                            updated_by_user_id=actor.profile_id,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                else:
+                    mapping.tradingview_symbol = tv_symbol
+                    mapping.delta_symbol = catalogue_products[item.product_id]
+                    mapping.enabled = item.enabled
+                    mapping.updated_by_user_id = actor.profile_id
+                    mapping.updated_at = now
             await append_audit(
                 session,
                 actor=actor,
@@ -5259,6 +5581,7 @@ def install_platform_routes(
                     .join(
                         TradingViewStrategy,
                         TradingViewStrategy.id == TradingViewSignal.strategy_id,
+                        isouter=True,
                     )
                     .where(TradingViewSignal.account_id == account_id)
                     .order_by(desc(TradingViewSignal.received_at))
@@ -5270,10 +5593,12 @@ def install_platform_routes(
                     {
                         "id": str(signal.id),
                         "accountId": str(signal.account_id),
-                        "strategyId": str(signal.strategy_id),
-                        "strategyName": strategy_name,
-                        "productId": product_id,
-                        "symbol": symbol,
+                        "strategyId": (
+                            None if signal.strategy_id is None else str(signal.strategy_id)
+                        ),
+                        "strategyName": strategy_name or "Dynamic webhook",
+                        "productId": signal.product_id or product_id,
+                        "symbol": signal.symbol or symbol,
                         "externalSignalId": signal.external_signal_id,
                         "side": signal.side,
                         "limitPrice": signal.limit_price,
@@ -5307,8 +5632,6 @@ def install_platform_routes(
                 raise HTTPException(status_code=403, detail="permission_denied")
             if not body.protection_required:
                 raise HTTPException(status_code=409, detail="protection_required")
-            if body.symbol not in {"BTCUSD", "ETHUSD"}:
-                raise HTTPException(status_code=409, detail="symbol_not_allowed")
             product = await session.scalar(
                 select(CatalogueProduct)
                 .join(CatalogueSnapshot, CatalogueSnapshot.id == CatalogueProduct.snapshot_id)
@@ -5390,8 +5713,6 @@ def install_platform_routes(
                 )
                 if product is None:
                     raise HTTPException(status_code=409, detail="strategy_product_not_ready")
-                if body.symbol not in {"BTCUSD", "ETHUSD"}:
-                    raise HTTPException(status_code=409, detail="symbol_not_allowed")
                 strategy.product_id = body.product_id
                 strategy.symbol = body.symbol
             for field in (
@@ -5539,6 +5860,16 @@ def install_platform_routes(
             raise HTTPException(status_code=409, detail="stale_signal")
         if re.fullmatch(r"[A-Za-z0-9_.:-]+", body.signal_id) is None:
             raise HTTPException(status_code=400, detail="invalid_signal_id")
+        action = body.action or body.side
+        if action is None:
+            raise HTTPException(status_code=400, detail="signal_action_required")
+        execution_side = (
+            "sell" if action == "exit_long" else "buy" if action == "exit_short" else action
+        )
+        reduce_only = action in {"exit_long", "exit_short"}
+        normalized_symbol = None if body.symbol is None else body.symbol.strip().upper()
+        if normalized_symbol is None or re.fullmatch(r"[A-Z0-9_.:-]+", normalized_symbol) is None:
+            raise HTTPException(status_code=400, detail="invalid_signal_symbol")
         if body.limit_price is not None:
             try:
                 limit = Decimal(body.limit_price)
@@ -5546,12 +5877,23 @@ def install_platform_routes(
                 raise HTTPException(status_code=400, detail="invalid_limit_price") from None
             if not limit.is_finite() or limit <= 0:
                 raise HTTPException(status_code=400, detail="invalid_limit_price")
+        atr_value: Decimal | None = None
+        if body.atr is not None:
+            try:
+                atr_value = Decimal(body.atr)
+            except InvalidOperation:
+                raise HTTPException(status_code=400, detail="invalid_atr") from None
+            if not atr_value.is_finite() or atr_value <= 0:
+                raise HTTPException(status_code=400, detail="invalid_atr")
         digest = hashlib.sha256(key.encode("ascii")).hexdigest()
         payload_digest = hashlib.sha256(
             json.dumps(
                 {
                     "limitPrice": body.limit_price,
-                    "side": body.side,
+                    "action": action,
+                    "atr": body.atr,
+                    "contracts": body.contracts,
+                    "side": execution_side,
                     "signalId": body.signal_id,
                     "symbol": body.symbol,
                     "timestamp": body.timestamp,
@@ -5561,7 +5903,7 @@ def install_platform_routes(
                 sort_keys=True,
             ).encode("ascii")
         ).hexdigest()
-        account_id: UUID | None = None
+        account_ids_to_wake: list[UUID] = []
         async with database.transaction() as session:
             webhook_key = await session.scalar(
                 select(TradingViewWebhookKey).where(
@@ -5569,66 +5911,232 @@ def install_platform_routes(
                     TradingViewWebhookKey.revoked_at.is_(None),
                 )
             )
-            strategy = (
-                None
-                if webhook_key is None
-                else await session.get(TradingViewStrategy, webhook_key.strategy_id)
-            )
-            if strategy is None or not strategy.enabled:
-                raise HTTPException(status_code=404, detail="webhook_not_found")
-            account_id = strategy.account_id
-            if body.symbol is not None and body.symbol != strategy.symbol:
-                raise HTTPException(status_code=409, detail="strategy_symbol_mismatch")
-            if not strategy.protection_required:
-                raise HTTPException(status_code=409, detail="protection_required")
-            qualified, reason, _, _ = await qualification_status(
-                session,
-                account_id=strategy.account_id,
-                now=now,
-            )
-            if not qualified:
-                raise HTTPException(status_code=409, detail=reason)
-            risk = await session.scalar(
-                select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == strategy.account_id)
-            )
-            inflight = await session.scalar(
-                select(func.count(TradingViewSignal.id)).where(
-                    TradingViewSignal.account_id == strategy.account_id,
-                    TradingViewSignal.status.in_(("received", "admitted")),
+            if webhook_key is not None and webhook_key.configuration_id is not None:
+                configuration = await session.get(
+                    TradingViewConfiguration, webhook_key.configuration_id
                 )
-            )
-            if risk is None or (risk.enabled and int(inflight or 0) >= risk.max_inflight_signals):
-                raise HTTPException(status_code=409, detail="signal_concurrency_exceeded")
-            if (strategy.order_type == "limit") != (body.limit_price is not None):
-                raise HTTPException(status_code=409, detail="strategy_signal_incompatible")
-            existing = await session.scalar(
-                select(TradingViewSignal).where(
-                    TradingViewSignal.strategy_id == strategy.id,
-                    TradingViewSignal.external_signal_id == body.signal_id,
+                if configuration is None or not configuration.enabled:
+                    raise HTTPException(status_code=404, detail="webhook_not_found")
+                links = list(
+                    (
+                        await session.execute(
+                            select(TradingViewConfigurationAccount).where(
+                                TradingViewConfigurationAccount.configuration_id == configuration.id
+                            )
+                        )
+                    ).scalars()
                 )
-            )
-            if existing is not None:
-                if existing.payload_sha256 != payload_digest:
-                    raise HTTPException(status_code=409, detail="signal_id_conflict")
-                return JSONResponse(status_code=202, content={"status": "duplicate"})
-            signal_id = uuid4()
-            session.add(
-                TradingViewSignal(
-                    id=signal_id,
-                    strategy_id=strategy.id,
+                if not links:
+                    raise HTTPException(status_code=409, detail="webhook_has_no_accounts")
+                accepted: list[str] = []
+                rejected: list[dict[str, str]] = []
+                for link in links:
+                    mapping = await session.scalar(
+                        select(TradingViewSymbolMapping)
+                        .where(
+                            TradingViewSymbolMapping.tradingview_symbol == normalized_symbol,
+                            TradingViewSymbolMapping.enabled.is_(True),
+                            or_(
+                                TradingViewSymbolMapping.account_id == link.account_id,
+                                TradingViewSymbolMapping.account_id.is_(None),
+                            ),
+                        )
+                        .order_by(desc(TradingViewSymbolMapping.account_id.is_not(None)))
+                        .limit(1)
+                    )
+                    if mapping is None:
+                        rejected.append(
+                            {
+                                "accountId": str(link.account_id),
+                                "reason": "symbol_mapping_not_found",
+                            }
+                        )
+                        continue
+                    setting = await session.scalar(
+                        select(CryptoContractSetting)
+                        .where(
+                            CryptoContractSetting.product_id == mapping.product_id,
+                            or_(
+                                CryptoContractSetting.account_id == link.account_id,
+                                CryptoContractSetting.account_id.is_(None),
+                            ),
+                        )
+                        .order_by(desc(CryptoContractSetting.account_id.is_not(None)))
+                        .limit(1)
+                    )
+                    if setting is None or not setting.enabled:
+                        rejected.append(
+                            {
+                                "accountId": str(link.account_id),
+                                "reason": "contract_setting_disabled",
+                            }
+                        )
+                        continue
+                    qualified, reason, _, _ = await qualification_status(
+                        session, account_id=link.account_id, now=now
+                    )
+                    if not qualified:
+                        rejected.append({"accountId": str(link.account_id), "reason": reason})
+                        continue
+                    risk = await session.scalar(
+                        select(AccountRiskPolicy).where(
+                            AccountRiskPolicy.account_id == link.account_id
+                        )
+                    )
+                    inflight = await session.scalar(
+                        select(func.count(TradingViewSignal.id)).where(
+                            TradingViewSignal.account_id == link.account_id,
+                            TradingViewSignal.status.in_(("received", "admitted")),
+                        )
+                    )
+                    risk_reason = policy_rejection(risk, stage="receipt", reduce_only=reduce_only)
+                    if risk_reason:
+                        rejected.append({"accountId": str(link.account_id), "reason": risk_reason})
+                        continue
+                    if (
+                        not reduce_only
+                        and risk is not None
+                        and int(inflight or 0) >= risk.max_inflight_signals
+                    ):
+                        rejected.append(
+                            {
+                                "accountId": str(link.account_id),
+                                "reason": "signal_concurrency_exceeded",
+                            }
+                        )
+                        continue
+                    existing = await session.scalar(
+                        select(TradingViewSignal).where(
+                            TradingViewSignal.configuration_id == configuration.id,
+                            TradingViewSignal.account_id == link.account_id,
+                            TradingViewSignal.external_signal_id == body.signal_id,
+                        )
+                    )
+                    if existing is not None:
+                        if existing.payload_sha256 != payload_digest:
+                            rejected.append(
+                                {"accountId": str(link.account_id), "reason": "signal_id_conflict"}
+                            )
+                        else:
+                            accepted.append(str(link.account_id))
+                        continue
+                    session.add(
+                        TradingViewSignal(
+                            id=uuid4(),
+                            strategy_id=None,
+                            configuration_id=configuration.id,
+                            account_id=link.account_id,
+                            external_signal_id=body.signal_id,
+                            side=execution_side,
+                            product_id=mapping.product_id,
+                            symbol=mapping.delta_symbol,
+                            contracts=body.contracts * setting.lot_multiplier,
+                            order_type="market",
+                            reduce_only=reduce_only,
+                            created_by_user_id=configuration.created_by_user_id,
+                            atr_value=atr_value,
+                            atr_multiplier=setting.atr_multiplier,
+                            stop_loss_multiplier=setting.stop_loss_multiplier,
+                            target_multiplier=setting.target_multiplier,
+                            limit_price=None,
+                            payload_sha256=payload_digest,
+                            status="received",
+                            rejection_code=None,
+                            intent_id=None,
+                            received_at=now,
+                            processed_at=None,
+                        )
+                    )
+                    accepted.append(str(link.account_id))
+                    account_ids_to_wake.append(link.account_id)
+                if not accepted:
+                    response_content = {
+                        "status": "rejected",
+                        "accounts": rejected,
+                    }
+                    response_status = 409
+                else:
+                    response_content = {
+                        "status": "received",
+                        "acceptedAccountIds": accepted,
+                        "rejectedAccounts": rejected,
+                    }
+                    response_status = 202
+                strategy = None
+            else:
+                response_content = {"status": "received"}
+                response_status = 202
+                strategy = (
+                    None
+                    if webhook_key is None or webhook_key.strategy_id is None
+                    else await session.get(TradingViewStrategy, webhook_key.strategy_id)
+                )
+                if strategy is None:
+                    raise HTTPException(status_code=404, detail="webhook_not_found")
+            if strategy is not None:
+                if not strategy.enabled:
+                    raise HTTPException(status_code=404, detail="webhook_not_found")
+                account_ids_to_wake.append(strategy.account_id)
+                if normalized_symbol != strategy.symbol.upper():
+                    raise HTTPException(status_code=409, detail="strategy_symbol_mismatch")
+                if not strategy.protection_required:
+                    raise HTTPException(status_code=409, detail="protection_required")
+                qualified, reason, _, _ = await qualification_status(
+                    session,
                     account_id=strategy.account_id,
-                    external_signal_id=body.signal_id,
-                    side=body.side,
-                    limit_price=body.limit_price,
-                    payload_sha256=payload_digest,
-                    status="received",
-                    rejection_code=None,
-                    intent_id=None,
-                    received_at=now,
-                    processed_at=None,
+                    now=now,
                 )
-            )
-        if account_id is not None:
+                if not qualified:
+                    raise HTTPException(status_code=409, detail=reason)
+                risk = await session.scalar(
+                    select(AccountRiskPolicy).where(
+                        AccountRiskPolicy.account_id == strategy.account_id
+                    )
+                )
+                inflight = await session.scalar(
+                    select(func.count(TradingViewSignal.id)).where(
+                        TradingViewSignal.account_id == strategy.account_id,
+                        TradingViewSignal.status.in_(("received", "admitted")),
+                    )
+                )
+                _require_entry_policy(risk, stage="receipt", reduce_only=strategy.reduce_only)
+                if (
+                    not strategy.reduce_only
+                    and risk is not None
+                    and int(inflight or 0) >= risk.max_inflight_signals
+                ):
+                    raise HTTPException(status_code=409, detail="signal_concurrency_exceeded")
+                if (strategy.order_type == "limit") != (body.limit_price is not None):
+                    raise HTTPException(status_code=409, detail="strategy_signal_incompatible")
+                existing = await session.scalar(
+                    select(TradingViewSignal).where(
+                        TradingViewSignal.strategy_id == strategy.id,
+                        TradingViewSignal.external_signal_id == body.signal_id,
+                    )
+                )
+                if existing is not None:
+                    if existing.payload_sha256 != payload_digest:
+                        raise HTTPException(status_code=409, detail="signal_id_conflict")
+                    response_content = {"status": "duplicate"}
+                else:
+                    session.add(
+                        TradingViewSignal(
+                            id=uuid4(),
+                            strategy_id=strategy.id,
+                            configuration_id=None,
+                            account_id=strategy.account_id,
+                            external_signal_id=body.signal_id,
+                            side=execution_side,
+                            limit_price=body.limit_price,
+                            payload_sha256=payload_digest,
+                            status="received",
+                            rejection_code=None,
+                            intent_id=None,
+                            received_at=now,
+                            processed_at=None,
+                        )
+                    )
+        for account_id in account_ids_to_wake:
             try:
                 await publish_json(
                     ORDER_CHANNEL,
@@ -5640,7 +6148,7 @@ def install_platform_routes(
                 )
             except Exception:
                 _LOGGER.warning("tradingview_wakeup_publish_failed", account_id=str(account_id))
-        return JSONResponse(status_code=202, content={"status": "received"})
+        return JSONResponse(status_code=response_status, content=response_content)
 
     @app.post("/api/v1/webhooks/tradingview")
     async def stable_tradingview_webhook(body: TradingViewSignalBody) -> JSONResponse:

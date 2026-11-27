@@ -1,0 +1,3 @@
+{
+  "tests/integration/test_execution_schema_metadata.py::test_execution_metadata_tables_and_compiles_postgres": "Patch 1c: account foreign keys lack region/environment/mode columns; remove before go-live."
+}

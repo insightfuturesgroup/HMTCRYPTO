@@ -1,4 +1,5 @@
 # Local secrets; retain the checked-in placeholder template.
+/ops/local.env
 .env
 deploy/ec2/api.env
 deploy/ec2/worker.env

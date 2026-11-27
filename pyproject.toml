@@ -7,7 +7,7 @@ name = "hmt-crypto"
 version = "0.1.0"
 description = "Safety-first Delta Exchange research and paper trading core"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "SQLAlchemy[asyncio]>=2.0.44,<2.1",
     "alembic>=1.17.1,<2",
@@ -35,12 +35,13 @@ hmt-crypto-worker = "hmt_crypto.worker.server:main"
 [project.optional-dependencies]
 dev = [
     "build>=1.2,<2",
+    "hatchling>=1.26,<2",
     "hypothesis>=6.120,<7",
     "mypy>=1.14,<2",
     "pytest>=8.3,<10",
     "pytest-asyncio>=1.0,<2",
     "respx>=0.22,<0.23",
-    "ruff>=0.9,<1",
+    "ruff==0.9.10",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -64,6 +65,7 @@ addopts = "--strict-markers --strict-config"
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
+    "safety: must execute in CI and must never skip or be deselected",
     "unit: isolated behavior with no external services",
     "contract: sanitized exchange payload and protocol contracts",
     "integration: external service integration",
@@ -71,18 +73,25 @@ markers = [
 ]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# Reviewed baseline: 59 UP038 sites, 18 built-in-only conversions qualified;
+# remaining 41 involve third-party/custom classes, ABCs or exception/AST types.
+# Union evaluation can invoke metaclass __or__; preserve runtime evaluation.
+# UP040 baseline: 16 eager aliases (8 unions, 8 subscriptions). PEP 695 aliases
+# are lazy TypeAliasType objects, not behavior-neutral runtime replacements.
+# See docs/LINT_BASELINE_POLICY.md. All other selected rules stay enforced.
+ignore = ["UP038", "UP040"]
 
 # Keep the Phase 0 prose baseline outside Python formatting gates.
 [tool.ruff.format]
 exclude = ["*.md"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = true
 warn_unreachable = true
 show_error_codes = true

@@ -189,9 +189,7 @@ async def read_private_reconciliation(
                 current_query = query
                 seen: set[str] = set()
                 for page_number in range(1, _MAX_PAGES + 1):
-                    headers = signer.sign_now(
-                        "GET", path, query_string=current_query
-                    ).as_headers()
+                    headers = signer.sign_now("GET", path, query_string=current_query).as_headers()
                     headers["Accept"] = "application/json"
                     try:
                         response = await client.get(

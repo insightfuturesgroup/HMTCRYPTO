@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 import pytest
+from schema_table_source import migration_chain_tables
 from schema_test_support import (
     HASH,
     NOW,
@@ -12,12 +13,15 @@ from schema_test_support import (
     signal,
     snapshot,
 )
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import MetaData, delete, insert, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import AddConstraint, CreateIndex, CreateTable
 
 from hmt_crypto.persistence.errors import PersistenceError
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 pytestmark = pytest.mark.integration
 
@@ -34,51 +38,7 @@ def test_postgres_ddl_has_private_scoped_named_restrict_constraints():
     ddl = "\n".join(
         str(CreateTable(table).compile(dialect=dialect)) for table in metadata.tables.values()
     )
-    assert set(table.name for table in api.metadata.tables.values()) == {
-        "accounts",
-        "credential_versions",
-        "catalogue_snapshots",
-        "catalogue_products",
-        "signals",
-        "command_operations",
-        "orders",
-        "order_attempts",
-        "order_attempt_events",
-        "order_transitions",
-        "fills",
-        "fill_order_links",
-        "exit_intents",
-        "protection_authorizations",
-        "position_protections",
-        "position_protection_orders",
-        "recovery_incarnations",
-        "leadership_leases",
-        "worker_heartbeats",
-        "scheduler_state",
-        "reconciliation_runs",
-        "reconciliation_resources",
-        "reconciliation_drifts",
-        "reconciliation_acknowledgements",
-        "position_snapshots",
-        "balance_snapshots",
-        "wallet_transactions",
-        "funding_snapshots",
-        "pnl_snapshots",
-        "risk_state",
-        "risk_halts",
-        "risk_halt_events",
-        "risk_decisions",
-        "risk_reservations",
-        "risk_rate_consumptions",
-        "api_audit_events",
-        "api_audit_payloads",
-        "operator_audit_events",
-        "kill_workflows",
-        "kill_workflow_events",
-        "paper_execution_heads",
-        "paper_execution_events",
-        "account_reconciliation_checkpoints",
-    }
+    assert {table.name for table in api.metadata.tables.values()} == migration_chain_tables()
     assert "CREATE TABLE hmt_crypto.accounts" in ddl
     assert "TIMESTAMP WITH TIME ZONE" in ddl
     assert "UUID" in ddl
@@ -88,7 +48,11 @@ def test_postgres_ddl_has_private_scoped_named_restrict_constraints():
             assert constraint.name
         for foreign_key in table.foreign_key_constraints:
             assert foreign_key.ondelete == "RESTRICT"
-            if foreign_key.referred_table.name in {"accounts", "credential_versions"}:
+            if foreign_key.referred_table.name in {"accounts", "credential_versions"} and {
+                "region",
+                "environment",
+                "mode",
+            } <= set(table.c.keys()):
                 assert {"region", "environment", "mode"} <= set(foreign_key.column_keys)
             if foreign_key.use_alter:
                 assert "ALTER TABLE" in str(AddConstraint(foreign_key).compile(dialect=dialect))

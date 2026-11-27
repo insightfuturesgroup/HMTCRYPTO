@@ -11,7 +11,7 @@ from risk_rate_consumption_schema_support import (
 )
 from risk_reservation_schema_support import reservation_graph
 from schema_test_support import schema_api
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import ForeignKeyConstraint, UniqueConstraint, delete, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import load_only
@@ -20,6 +20,9 @@ from test_coordination_schema import save
 
 from hmt_crypto.persistence.errors import PersistenceError, PersistenceValueError
 from hmt_crypto.persistence.execution_evidence import encode_evidence
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 SCOPE = ("account_id", "region", "environment", "mode")
 RESERVATION_CHILD = (

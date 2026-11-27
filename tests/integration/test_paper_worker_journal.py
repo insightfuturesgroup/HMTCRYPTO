@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 import pytest_asyncio
 from schema_test_support import account
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import delete, func, select
 
 from hmt_crypto.persistence.errors import PersistenceValueError
@@ -22,6 +22,9 @@ from hmt_crypto.worker.paper_repository import (
     PaperJournalConflict,
     PaperJournalRepository,
 )
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 pytestmark = pytest.mark.integration
 

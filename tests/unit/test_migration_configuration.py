@@ -55,7 +55,7 @@ def _traceback_retains_secret(error: BaseException, secret: str) -> bool:
                 for pair in value.items()
                 for item in pair
             )
-        if isinstance(value, (list, tuple, set, frozenset)):
+        if isinstance(value, list | tuple | set | frozenset):
             return any(retains(item, depth=depth + 1, seen_values=seen_values) for item in value)
         attributes = getattr(value, "__dict__", None)
         return type(attributes) is dict and any(

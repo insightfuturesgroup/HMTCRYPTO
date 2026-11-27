@@ -18,7 +18,7 @@ from sqlalchemy import CheckConstraint, Column, Integer, MetaData, Table, column
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
-from sqlalchemy.schema import CreateSchema
+from sqlalchemy.schema import AddConstraint, CreateSchema
 
 from hmt_crypto.persistence.configuration import database_url
 from hmt_crypto.persistence.db import APP_SCHEMA, NAMING_CONVENTION
@@ -63,6 +63,18 @@ INVALID_38_18 = (
     "CAST('Infinity' AS NUMERIC)",
     "CAST('-Infinity' AS NUMERIC)",
 )
+
+PLAIN_NUMERIC_ALLOWLIST = {
+    ("tradingview_strategies", "stop_loss_pct"): "numeric(9,6)",
+    ("tradingview_strategies", "target_pct"): "numeric(9,6)",
+    ("tradingview_strategies", "trailing_offset_pct"): "numeric(9,6)",
+    ("crypto_contract_settings", "atr_multiplier"): "numeric(18,8)",
+    ("crypto_contract_settings", "stop_loss_multiplier"): "numeric(18,8)",
+    ("crypto_contract_settings", "target_multiplier"): "numeric(18,8)",
+    ("tradingview_signals", "atr_multiplier"): "numeric(18,8)",
+    ("tradingview_signals", "stop_loss_multiplier"): "numeric(18,8)",
+    ("tradingview_signals", "target_multiplier"): "numeric(18,8)",
+}
 
 
 def _database_target(url: URL) -> tuple[str, int, str]:
@@ -170,6 +182,35 @@ def _decimal_columns() -> set[tuple[str, str]]:
         for field in table.c
         if isinstance(field.type, ExactDecimal)
     }
+
+
+def _constraint_create_rules() -> dict[object, object]:
+    """Snapshot SQLAlchemy's mutable DDL rules on the process-global metadata."""
+    return {
+        constraint: constraint._create_rule
+        for table in metadata.tables.values()
+        for constraint in table.constraints
+    }
+
+
+def _restore_constraint_create_rules(rules: dict[object, object]) -> None:
+    for constraint, create_rule in rules.items():
+        constraint._create_rule = create_rule
+
+
+def test_postgres_acceptance_owns_ddl_metadata() -> None:
+    original = next(
+        constraint
+        for constraint in metadata.tables[f"{APP_SCHEMA}.accounts"].foreign_key_constraints
+        if constraint.name == "fk_accounts_current_credential_scope"
+    )
+    rules = _constraint_create_rules()
+    AddConstraint(original)
+    assert original._create_rule is not rules[original]
+
+    _restore_constraint_create_rules(rules)
+
+    assert original._create_rule is rules[original]
 
 
 def _decimal_constraint_names(
@@ -302,7 +343,11 @@ async def test_raw_postgres_decimal_boundary_and_catalogue_contract():
                 translated = await connection.execution_options(
                     schema_translate_map={APP_SCHEMA: schema}
                 )
-                await translated.run_sync(metadata.create_all)
+                create_rules = _constraint_create_rules()
+                try:
+                    await translated.run_sync(metadata.create_all)
+                finally:
+                    _restore_constraint_create_rules(create_rules)
                 probe = _probe_table()
                 await translated.run_sync(probe.create)
 
@@ -444,8 +489,17 @@ async def test_raw_postgres_decimal_boundary_and_catalogue_contract():
                     (probe.name, "positive_amount"),
                     (probe.name, "nonnegative_amount"),
                 }
-                assert {(row[0], row[1]) for row in numeric_rows} == expected_numeric
-                assert all(row[2] == -1 and row[3] == "numeric" for row in numeric_rows)
+                actual_numeric = {(row[0], row[1]) for row in numeric_rows}
+                assert actual_numeric == expected_numeric | set(PLAIN_NUMERIC_ALLOWLIST)
+                actual_formats = {(row[0], row[1]): row[3] for row in numeric_rows}
+                assert {
+                    column: actual_formats[column] for column in PLAIN_NUMERIC_ALLOWLIST
+                } == PLAIN_NUMERIC_ALLOWLIST
+                assert all(
+                    row[2] == -1 and row[3] == "numeric"
+                    for row in numeric_rows
+                    if (row[0], row[1]) in expected_numeric
+                )
 
                 constraint_rows = (
                     await translated.execute(
@@ -463,7 +517,7 @@ async def test_raw_postgres_decimal_boundary_and_catalogue_contract():
                 expected_constraints = _decimal_constraint_names(
                     translated, (*metadata.tables.values(), probe)
                 )
-                assert len(expected_constraints) == 102
+                assert len(expected_constraints) == len(_decimal_columns()) * 3 + 11
                 assert expected_constraints <= set(actual_constraints)
                 assert all(actual_constraints[name] for name in expected_constraints)
             finally:

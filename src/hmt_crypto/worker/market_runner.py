@@ -24,6 +24,7 @@ from hmt_crypto.exchange.delta.rate_limiter import RateLimitScope, ScopeKind, We
 from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import CatalogueProduct, CatalogueSnapshot, MarketQuote
+from hmt_crypto.risk_operations import warn_untradeable_products
 from hmt_crypto.worker.public_ticker_stream import run_public_ticker_stream
 
 
@@ -93,6 +94,7 @@ async def run_market_worker(
     last_catalogue = datetime.min.replace(tzinfo=UTC)
     stream_task: asyncio.Task[None] | None = None
     quote_persistence_lock = asyncio.Lock()
+    warned_ceilings = False
     logger.info("market_worker_started", region="india", environment=runtime.delta_env.value)
     try:
         while not stop.is_set():
@@ -194,10 +196,11 @@ async def run_market_worker(
                     in {ContractType.PERPETUAL_FUTURES, ContractType.FUTURES}
                 }
                 stage = "ticker_fetch"
-                tickers = await client.get_tickers(
-                    contract_types=("perpetual_futures", "futures")
-                )
+                tickers = await client.get_tickers(contract_types=("perpetual_futures", "futures"))
                 observed = datetime.now(UTC)
+                if not warned_ceilings:
+                    warn_untradeable_products(snapshot.products, tickers, logger)
+                    warned_ceilings = True
                 stage = "quote_persist"
                 async with quote_persistence_lock:
                     async with database.transaction() as session:

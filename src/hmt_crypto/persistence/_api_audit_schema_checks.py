@@ -2,6 +2,7 @@
 
 from sqlalchemy import CheckConstraint
 
+from hmt_crypto.persistence._api_audit_boolean_checks import AuditBooleanCheck
 from hmt_crypto.persistence._api_audit_contexts import (
     _EXCHANGE_CODES,
     AuditEventKind,
@@ -165,13 +166,15 @@ def api_audit_checks() -> tuple[CheckConstraint, ...]:
             name="descriptor_shape",
         ),
         CheckConstraint(
-            "(retention_mode = 'SUMMARY_ONLY') OR "
-            "(event_kind IN ('ATTEMPT_STARTED','VENUE_PRE_DISPATCH',"
-            "'SIMULATOR_PRE_DISPATCH') AND payload_slot = 'REQUEST') OR "
-            "(event_kind IN ('ATTEMPT_FINISHED','VENUE_ENTERED') "
-            "AND payload_slot = 'RESPONSE') OR "
-            "(event_kind = 'SIMULATOR_OUTCOME' AND entry_possible = 1 "
-            "AND payload_slot = 'RESPONSE')",
+            AuditBooleanCheck(
+                "(retention_mode = 'SUMMARY_ONLY') OR "
+                "(event_kind IN ('ATTEMPT_STARTED','VENUE_PRE_DISPATCH',"
+                "'SIMULATOR_PRE_DISPATCH') AND payload_slot = 'REQUEST') OR "
+                "(event_kind IN ('ATTEMPT_FINISHED','VENUE_ENTERED') "
+                "AND payload_slot = 'RESPONSE') OR "
+                "(event_kind = 'SIMULATOR_OUTCOME' AND entry_possible = 1 "
+                "AND payload_slot = 'RESPONSE')"
+            ),
             name="descriptor_slot",
         ),
         CheckConstraint(
@@ -254,7 +257,7 @@ def api_audit_checks() -> tuple[CheckConstraint, ...]:
             name="causal_literal_shape",
         ),
         CheckConstraint(event_target_call_sql(), name="event_target_call_shape"),
-        CheckConstraint(_terminal_truth_sql(), name="terminal_truth_shape"),
+        CheckConstraint(AuditBooleanCheck(_terminal_truth_sql()), name="terminal_truth_shape"),
         CheckConstraint(
             "http_status IS NULL OR http_status BETWEEN 100 AND 599",
             name="http_status_domain",
@@ -283,10 +286,12 @@ def api_audit_checks() -> tuple[CheckConstraint, ...]:
         CheckConstraint(_response_truth_sql(), name="response_truth_shape"),
         CheckConstraint(_response_route_bound_sql(), name="response_route_bound"),
         CheckConstraint(
-            "(prior_dispatch_event_id IS NULL AND prior_consumption_id IS NULL "
-            "AND prior_bytes_sent_possible IS NULL) OR "
-            "(prior_dispatch_event_id IS NOT NULL AND prior_consumption_id IS NOT NULL "
-            "AND prior_bytes_sent_possible = 1)",
+            AuditBooleanCheck(
+                "(prior_dispatch_event_id IS NULL AND prior_consumption_id IS NULL "
+                "AND prior_bytes_sent_possible IS NULL) OR "
+                "(prior_dispatch_event_id IS NOT NULL AND prior_consumption_id IS NOT NULL "
+                "AND prior_bytes_sent_possible = 1)"
+            ),
             name="transfer_prior_bundle",
         ),
         api_audit_variant_check(),

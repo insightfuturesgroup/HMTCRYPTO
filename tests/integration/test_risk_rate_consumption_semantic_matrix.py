@@ -9,9 +9,12 @@ from risk_rate_consumption_schema_support import (
     committed_modify_consumption_graph,
     divergent_attempt_consumption_graph,
 )
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 
 from hmt_crypto.persistence.errors import PersistenceValueError
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 
 def _hostile_update(db, statement, parameters):

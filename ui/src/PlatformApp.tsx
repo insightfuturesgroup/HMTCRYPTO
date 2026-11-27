@@ -212,6 +212,8 @@ interface HealthAccount {
   workerLeaseActive: boolean;
   riskConfigured: boolean;
   riskEnabled: boolean;
+  riskValid?: boolean;
+  entryBlockReason?: string | null;
   riskMode: "MISSING" | "ENFORCED" | "OWNER_OVERRIDE";
   entriesEnabled: boolean;
   exitsEnabled: boolean;
@@ -246,6 +248,9 @@ interface LocalOrderIntent {
   price: string;
   intentStatus: string;
   submissionStatus: string;
+  uncertainAgeSeconds?: number | null;
+  uncertainSeverity?: string | null;
+  uncertainReason?: string;
   exchangeOrderId: number | null;
   exchangeOrderState: string | null;
   exchangeSize: number | null;
@@ -310,6 +315,16 @@ interface TradingViewStrategyRow {
   updatedAt: string;
 }
 
+interface TradingViewConfigurationRow {
+  id: string;
+  name: string;
+  enabled: boolean;
+  accountIds: string[];
+  webhookConfigured: boolean;
+  webhookFingerprint: string | null;
+  updatedAt: string;
+}
+
 interface TradingViewSignalRow {
   id: string;
   accountId: string;
@@ -333,6 +348,7 @@ interface TradingViewReportRow extends TradingViewSignalRow {
 interface CryptoContractSettingRow {
   productId: number;
   symbol: string;
+  tradingviewSymbol: string;
   atrMultiplier: string;
   atrPeriod: number;
   atrTimeframe: "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d";
@@ -2365,7 +2381,7 @@ function AccountStatePage({
                     <td>{displayPrice(intent.price)}</td>
                     <td><span className={`hmt-status-badge ${intent.submissionStatus.toLowerCase()}`}>{intent.submissionStatus === "UNCERTAIN" ? "CONFIRMING" : intent.submissionStatus.replaceAll("_", " ")}</span></td>
                     <td>{deltaOrderLabel}</td>
-                    <td>{fillLabel ?? intent.exchangeCancellationReason ?? (intent.submissionStatus === "UNCERTAIN" ? "Confirming with Delta; do not retry" : intent.errorCode) ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : "Waiting for Delta acknowledgement")}</td>
+                    <td>{fillLabel ?? intent.exchangeCancellationReason ?? (intent.submissionStatus === "UNCERTAIN" ? `Confirming with Delta; do not retry · ${intent.uncertainAgeSeconds ?? "unknown"}s · ${intent.uncertainReason?.replaceAll("_", " ") ?? "exchange evidence pending"}${intent.uncertainSeverity ? ` · ${intent.uncertainSeverity}` : ""}` : intent.errorCode) ?? (intent.exchangeOrderId ? "Confirmed by Delta" : intent.submissionStatus === "PENDING" ? "Waiting for worker claim" : "Waiting for Delta acknowledgement")}</td>
                     <td>{acknowledgedOrder && canTrade ? <div className="hmt-row-actions"><button onClick={() => void queueAction(acknowledgedOrder, "cancel")} type="button">Cancel</button><button onClick={() => { setModifyOrder(acknowledgedOrder); setModifySize(String(acknowledgedOrder.size ?? "")); setModifyPrice(String(acknowledgedOrder.limit_price ?? "")); }} type="button">Modify</button></div> : intent.submissionStatus === "PENDING" && canTrade ? <div className="hmt-row-actions"><button disabled={cancellingIntentId === intent.intentId} onClick={() => void cancelQueuedIntent(intent.intentId)} type="button">{cancellingIntentId === intent.intentId ? "Cancelling…" : "Cancel"}</button><button disabled title="A queued order cannot be edited. Cancel it and place a replacement, or wait until Delta acknowledges it." type="button">Modify</button></div> : intent.submissionStatus === "UNCERTAIN" && user.role === "admin" ? <button onClick={() => void resolveUncertainIntent(intent.intentId)} type="button">Delete uncertain</button> : ["BLOCKED", "REJECTED", "ACCEPTED"].includes(intent.submissionStatus) && canTrade ? <button onClick={() => void hideCancelledIntent(intent.intentId)} type="button">Delete</button> : <span className="hmt-inline-status">{intent.submissionStatus === "PENDING" ? "Trading permission required" : intent.exchangeOrderId ? "Refreshing order state" : intent.submissionStatus === "CLAIMED" || intent.submissionStatus === "PREPARED" || intent.submissionStatus === "SENDING" ? "Worker claimed · check Delta status" : "No action available"}</span>}</td>
                   </tr>;
                   })}
@@ -2803,6 +2819,9 @@ function TradingViewPage({
   const [targetPct, setTargetPct] = useState("4");
   const [trailingOffsetPct, setTrailingOffsetPct] = useState("1");
   const [strategies, setStrategies] = useState<TradingViewStrategyRow[]>([]);
+  const [configurations, setConfigurations] = useState<TradingViewConfigurationRow[]>([]);
+  const [configurationAccountIds, setConfigurationAccountIds] = useState<string[]>([]);
+  const [shownOnceKey, setShownOnceKey] = useState<string | null>(null);
   const [signals, setSignals] = useState<TradingViewSignalRow[]>([]);
   const [shownOnceUrl, setShownOnceUrl] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -2831,6 +2850,13 @@ function TradingViewPage({
         setNotice("TradingView configuration or logs could not be loaded."),
       );
   }, []);
+  const loadConfigurations = useCallback(() => {
+    void request<{ configurations: TradingViewConfigurationRow[] }>(
+      "/api/v1/tradingview/configurations",
+    ).then((value) => setConfigurations(value.configurations)).catch(() =>
+      setNotice("TradingView webhook keys could not be loaded."),
+    );
+  }, []);
   useEffect(() => {
     void Promise.all([
       request<{ accounts: Account[] }>("/api/v1/accounts"),
@@ -2841,10 +2867,12 @@ function TradingViewPage({
       setAccounts(accountRows.accounts);
       setProducts(productRows.products);
       setAccountId(firstAccount);
+      setConfigurationAccountIds(firstAccount ? [firstAccount] : []);
       setProductId(String(firstProduct?.productId ?? ""));
       load(firstAccount);
+      loadConfigurations();
     });
-  }, [load]);
+  }, [load, loadConfigurations]);
   useEffect(() => {
     if (!accountId) return;
     const stream = new EventSource("/api/v1/accounts/stream", { withCredentials: true });
@@ -3017,8 +3045,83 @@ function TradingViewPage({
       setNotice("The webhook secret could not be revoked.");
     }
   }
+  async function saveDynamicWebhook(event: FormEvent) {
+    event.preventDefault();
+    if (!name.trim() || configurationAccountIds.length === 0) return;
+    setBusy(true);
+    setNotice(null);
+    setShownOnceKey(null);
+    try {
+      const configuration = await request<{ id: string }>(
+        "/api/v1/tradingview/configurations",
+        { method: "POST", body: JSON.stringify({ name: name.trim(), account_ids: configurationAccountIds }) },
+        csrf,
+      );
+      const key = await request<{ webhookKey: string }>(
+        `/api/v1/tradingview/configurations/${configuration.id}/webhook-key`,
+        { method: "POST" },
+        csrf,
+      );
+      setShownOnceKey(key.webhookKey);
+      setName("");
+      setShowCreate(false);
+      setNotice("Webhook key created. Copy the key and JSON template now; the key is shown once.");
+      loadConfigurations();
+    } catch (error) {
+      const code = error instanceof RequestError ? error.code : "unknown_error";
+      setNotice(code === "fresh_session_required"
+        ? "Generating a webhook key requires a login within the last 15 minutes. Sign out, sign in, and try again."
+        : `Webhook creation failed: ${code.replaceAll("_", " ")}.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function toggleDynamicWebhook(configuration: TradingViewConfigurationRow) {
+    try {
+      await request(`/api/v1/tradingview/configurations/${configuration.id}`, {
+        method: "PATCH", body: JSON.stringify({ enabled: !configuration.enabled }),
+      }, csrf);
+      loadConfigurations();
+    } catch (error) {
+      setNotice(error instanceof RequestError ? error.code.replaceAll("_", " ") : "Webhook update failed.");
+    }
+  }
+  async function rotateDynamicWebhook(configuration: TradingViewConfigurationRow) {
+    setShownOnceKey(null);
+    try {
+      const key = await request<{ webhookKey: string }>(
+        `/api/v1/tradingview/configurations/${configuration.id}/webhook-key`,
+        { method: "POST" },
+        csrf,
+      );
+      setShownOnceKey(key.webhookKey);
+      setNotice("Webhook key rotated. Replace the old key in TradingView now; this key is shown once.");
+      loadConfigurations();
+    } catch (error) {
+      setNotice(error instanceof RequestError ? error.code.replaceAll("_", " ") : "Webhook key rotation failed.");
+    }
+  }
   const selected = accounts.find((row) => row.id === accountId);
   const canManage = user.role !== "viewer" && selected?.permission !== "view";
+  if (!libraryOnly) {
+    const template = shownOnceKey === null ? null : JSON.stringify({
+      webhook_key: shownOnceKey,
+      signal_id: "{{strategy.order.id}}-{{timenow}}",
+      symbol: "{{ticker}}",
+      action: "{{strategy.order.action}}",
+      contracts: 1,
+      timestamp: "{{timenow}}",
+    });
+    return <div className="tv-page">
+      <div className="tv-page__title"><div><h1>TradingView Integration</h1><p>One secure key can route dynamic Pine signals to every mapped Delta account.</p></div><button className="tv-primary-button" disabled={accounts.length === 0 || user.role === "viewer"} onClick={() => setShowCreate((value) => !value)} type="button"><Plus size={18} />{showCreate ? "Close" : "Create Webhook Key"}</button></div>
+      <section className="tv-guide"><div className="tv-guide__title"><Info size={20} /><strong>TradingView setup</strong></div><div className="tv-guide__body"><ol><li>Create a key and select one or more Delta accounts.</li><li>Map TradingView tickers under Settings → Crypto Contract Settings.</li><li>In the TradingView alert choose <strong>Order fills</strong> and use <code>{"{{strategy.order.alert_message}}"}</code> as the message.</li></ol><div className="tv-endpoint"><strong>Webhook URL</strong><code>{window.location.origin}/api/v1/webhooks/tradingview</code><button onClick={() => void navigator.clipboard.writeText(`${window.location.origin}/api/v1/webhooks/tradingview`)} type="button"><Copy size={17} /></button></div></div></section>
+      {showCreate ? <section className="tv-create"><h2>Create Webhook Key</h2><form className="grid gap-3" onSubmit={(event) => void saveDynamicWebhook(event)}><label>Name<input maxLength={128} onChange={(event) => setName(event.target.value)} placeholder="Production Key" required value={name} /></label><fieldset><legend>Delta accounts</legend><div className="hmt-order-accounts__grid">{accounts.map((account) => <label className={`hmt-order-account ${configurationAccountIds.includes(account.id) ? "is-selected" : ""}`} key={account.id}><input checked={configurationAccountIds.includes(account.id)} disabled={account.permission === "view"} onChange={(event) => setConfigurationAccountIds((current) => event.target.checked ? [...new Set([...current, account.id])] : current.filter((id) => id !== account.id))} type="checkbox" /><span><strong>{account.profileName}</strong><small>Delta India · {account.permission}</small></span></label>)}</div></fieldset><button className="tv-primary-button" disabled={busy || configurationAccountIds.length === 0} type="submit">{busy ? "Creating…" : "Create and generate key"}</button></form></section> : null}
+      {notice ? <p className="tv-notice" role="status">{notice}</p> : null}
+      {template ? <section className="tv-secret"><div><strong>Copy this JSON now</strong><code>{template}</code></div><button onClick={() => void navigator.clipboard.writeText(template)} type="button"><Copy size={17} />Copy JSON</button></section> : null}
+      <div className="tv-cards">{configurations.map((configuration) => <article className="tv-card" key={configuration.id}><div className="tv-card__header"><div><span className="tv-card__key"><KeyRound size={18} /></span><strong>{configuration.name}</strong><span className={`tv-status ${configuration.enabled ? "is-active" : ""}`}>{configuration.enabled ? "Active" : "Paused"}</span><p>{configuration.accountIds.length} mapped account{configuration.accountIds.length === 1 ? "" : "s"}</p></div><div className="tv-card__actions"><button onClick={() => void rotateDynamicWebhook(configuration)} title="Rotate webhook key" type="button"><RefreshCw size={17} /></button><button onClick={() => void toggleDynamicWebhook(configuration)} title={configuration.enabled ? "Pause" : "Enable"} type="button">{configuration.enabled ? <Pause size={17} /> : <Play size={17} />}</button></div></div><div className="tv-card__secret"><span>Webhook key</span><strong>{configuration.webhookConfigured ? `Configured · ${configuration.webhookFingerprint}` : "Not generated"}</strong></div></article>)}</div>
+      <section className="tv-signal-log"><h2>TradingView signal log</h2><div className="overflow-x-auto"><table><thead><tr><th>Received</th><th>Signal</th><th>Side</th><th>Status</th><th>Reason</th></tr></thead><tbody>{signals.slice(0, 50).map((signal) => <tr key={signal.id}><td>{signal.receivedAt}</td><td>{signal.externalSignalId}</td><td>{signal.side}</td><td>{signal.status}</td><td>{signal.rejectionCode ?? "—"}</td></tr>)}{signals.length === 0 ? <tr><td colSpan={5}>No signals received.</td></tr> : null}</tbody></table></div></section>
+    </div>;
+  }
   return (
     <div className="tv-page">
       <div className="tv-page__title">
@@ -3598,7 +3701,7 @@ function RiskPage({
         </select>
         <label className="flex items-center gap-3 rounded border p-3">
           <input checked={riskEnabled} onChange={(e) => setRiskEnabled(e.target.checked)} type="checkbox" />
-          <span><strong>Risk {riskEnabled ? "ON" : "OFF"}</strong><br /><small>OFF bypasses owner-configurable limits; exchange validation, reduce-only checks, credentials, health gates, and emergency stop remain enforced.</small></span>
+          <span><strong>Risk {riskEnabled ? "ON" : "OFF"}</strong><br /><small>OFF blocks new entries. Reduce-only exits, cancellation, and emergency stop remain available.</small></span>
         </label>
         <label className="flex items-center gap-3 rounded border p-3">
           <input checked={autoActivation} onChange={(e) => setAutoActivation(e.target.checked)} type="checkbox" />
@@ -3639,11 +3742,11 @@ function RiskPage({
           />
         </label>
         <label>
-          Fixed INR per USD
+          Policy conversion rate (INR per USD)
           <input
             className="block w-full rounded border px-3 py-2"
             min="1"
-            onChange={(e) => setUsdInrRate(e.target.value)}
+            readOnly
             type="number"
             value={usdInrRate}
           />
@@ -3651,8 +3754,9 @@ function RiskPage({
         <p className="md:col-span-2">
           Effective USD limits: order ${Number(maxOrder || 0) / Number(usdInrRate || 1)},
           exposure ${Number(maxPosition || 0) / Number(usdInrRate || 1)}, daily loss
-          ${Number(maxLoss || 0) / Number(usdInrRate || 1)}. Changing the approved
-          ₹100/USD policy requires requalification.
+          ${Number(maxLoss || 0) / Number(usdInrRate || 1)}. This is a policy conversion
+          rate, not an FX quote. Conversion is conservative only while the market
+          rate is at or below this deployment constant.
         </p>
         <label>
           Maximum open orders
@@ -3829,6 +3933,7 @@ function ContractSettingsPage({
       atr_period: row.atrPeriod, atr_timeframe: row.atrTimeframe,
       stop_loss_multiplier: row.stopLossMultiplier, target_multiplier: row.targetMultiplier,
       lot_multiplier: row.lotMultiplier, enabled: row.enabled,
+      tradingview_symbol: row.tradingviewSymbol,
     }));
     if (settings.length === 0) return;
     setNotice(null);
@@ -3874,12 +3979,13 @@ function ContractSettingsPage({
         {notice ? <p className="p-4" role="status">{notice}</p> : null}
         <div className="overflow-x-auto">
           <table className="contract-settings-table">
-            <thead><tr><th>Symbol</th><th>ATR multiplier</th><th>ATR period</th><th>ATR timeframe</th><th>SL multiplier</th><th>Target multiplier</th><th>Lot multiplier</th><th>Enabled</th></tr></thead>
+            <thead><tr><th>Delta symbol</th><th>TradingView symbol</th><th>ATR multiplier</th><th>ATR period</th><th>ATR timeframe</th><th>SL multiplier</th><th>Target multiplier</th><th>Lot multiplier</th><th>Enabled</th></tr></thead>
             <tbody>
-              {loading ? <tr><td colSpan={8}>Loading contract settings…</td></tr> : null}
+              {loading ? <tr><td colSpan={9}>Loading contract settings…</td></tr> : null}
               {!loading && visibleRows.map((row) => (
                 <tr key={row.productId}>
                   <td><strong>{row.symbol}</strong><small className="block">{row.source}</small></td>
+                  <td><input aria-label={`TradingView symbol for ${row.symbol}`} value={row.tradingviewSymbol} onChange={(e)=>updateRow(row.productId,{tradingviewSymbol:e.target.value.toUpperCase()})}/></td>
                   <td><input value={row.atrMultiplier} onChange={(e)=>updateRow(row.productId,{atrMultiplier:e.target.value})}/></td>
                   <td><input min="1" type="number" value={row.atrPeriod} onChange={(e)=>updateRow(row.productId,{atrPeriod:Number(e.target.value)})}/></td>
                   <td><select value={row.atrTimeframe} onChange={(e)=>updateRow(row.productId,{atrTimeframe:e.target.value as CryptoContractSettingRow["atrTimeframe"]})}>{["1m","5m","15m","30m","1h","4h","1d"].map((v)=><option key={v}>{v}</option>)}</select></td>
@@ -3889,7 +3995,7 @@ function ContractSettingsPage({
                   <td><input checked={row.enabled} onChange={(e)=>updateRow(row.productId,{enabled:e.target.checked})} type="checkbox" /></td>
                 </tr>
               ))}
-              {!loading && !error && visibleRows.length === 0 ? <tr><td colSpan={8}>No contracts match this search.</td></tr> : null}
+              {!loading && !error && visibleRows.length === 0 ? <tr><td colSpan={9}>No contracts match this search.</td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -4823,11 +4929,11 @@ function AuditPage({ csrf }: { readonly csrf: string }) {
                     {a.reconciliationAgeSeconds ?? "—"}s
                   </td>
                   <td>
-                    {a.riskMode === "ENFORCED"
+                    {a.entryBlockReason ?? (a.riskMode === "ENFORCED"
                       ? "Enforced"
                       : a.riskMode === "OWNER_OVERRIDE"
-                        ? "Owner override"
-                        : "Missing"}
+                        ? "Disabled (entries blocked)"
+                        : "Missing")}
                   </td>
                   <td>
                     E {a.entriesEnabled ? "ON" : "OFF"} · X{" "}

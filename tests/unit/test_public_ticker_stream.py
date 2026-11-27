@@ -74,8 +74,7 @@ class _Socket:
         self.stop = stop
         self.sent: list[str] = []
         self.frames = [
-            '{"type":"subscriptions","channels":['
-            '{"name":"ticker","symbols":["XBTUSD_CAT"]}]}',
+            '{"type":"subscriptions","channels":[{"name":"ticker","symbols":["XBTUSD_CAT"]}]}',
             '{"type":"ticker","ts":1793872800000000,"sy":"XBTUSD_CAT",'
             '"sp":"100.10","d":[{"i":1101,"s":"XBTUSD_CAT","m":"100.00",'
             '"m24hc":"1.5","ohlc":["90","110","80","100"],"oi":["3","1"],'
@@ -132,7 +131,6 @@ async def test_connection_requires_ack_then_publishes_catalogue_bound_ticker() -
     assert ticker.best_bid == 72100
     assert ticker.best_ask == 72101
     assert socket.sent == [
-        '{"type":"subscribe","payload":{"channels":['
-        '{"name":"ticker","symbols":["XBTUSD_CAT"]}]}}',
+        '{"type":"subscribe","payload":{"channels":[{"name":"ticker","symbols":["XBTUSD_CAT"]}]}}',
         '{"type":"enable_heartbeat"}',
     ]

@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 from repository_test_support import fence, seed_scope
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import event, select, update
 
 from hmt_crypto.persistence.errors import PersistenceValueError
@@ -17,6 +17,9 @@ from hmt_crypto.persistence.repository_errors import (
     LeaseUnavailableError,
     RepositoryStateError,
 )
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 
 @pytest.mark.asyncio

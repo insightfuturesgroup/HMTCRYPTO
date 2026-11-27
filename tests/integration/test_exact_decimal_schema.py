@@ -8,6 +8,21 @@ from sqlalchemy.schema import CreateTable
 from hmt_crypto.persistence.types import ExactDecimal
 
 EXPECTED_COLUMNS = {
+    "market_candles": {"open", "high", "low", "close", "volume"},
+    "protection_groups": {"average_fill_price"},
+    "gtt_orders": {"trail_anchor"},
+    "tradingview_signals": {"atr_value"},
+    "account_risk_policies": {
+        "max_order_notional",
+        "max_position_notional",
+        "max_daily_loss",
+        "usd_inr_rate",
+        "max_order_limit_inr",
+        "max_position_limit_inr",
+        "max_daily_loss_limit_inr",
+    },
+    "live_order_previews": {"limit_price", "price", "notional"},
+    "live_order_actions": {"target_limit_price"},
     "orders": {"requested_limit_price", "requested_stop_price"},
     "fills": {"size", "price", "notional", "commission"},
     "exit_intents": {"requested_trigger_price"},
@@ -63,7 +78,7 @@ def test_metadata_discovers_the_complete_exact_decimal_inventory():
         for table_name, column_names in EXPECTED_COLUMNS.items()
         for column_name in column_names
     }
-    assert len(discovered) == 37
+    assert len(discovered) == 56
     assert set(discovered) == expected
     assert {
         (decimal_type.precision, decimal_type.scale) for decimal_type in discovered.values()
@@ -76,17 +91,16 @@ def test_every_discovered_decimal_has_exact_postgres_checks_and_no_sqlite_leakag
     sqlite_dialect = sqlite.dialect()
     for (table_name, column_name), decimal_type in _decimal_columns().items():
         table = api.metadata.tables[f"hmt_crypto.{table_name}"]
-        decimal_constraints = [
-            constraint
-            for constraint in table.constraints
-            if isinstance(constraint, CheckConstraint)
-            and str(constraint.name).startswith(f"ck_{table_name}_decimal_{column_name}_")
-        ]
-        constraints = {str(constraint.name): constraint for constraint in decimal_constraints}
         expected_names = {
             f"ck_{table_name}_decimal_{column_name}_{kind}"
             for kind in ("finite", "magnitude", "scale")
         }
+        decimal_constraints = [
+            constraint
+            for constraint in table.constraints
+            if isinstance(constraint, CheckConstraint) and str(constraint.name) in expected_names
+        ]
+        constraints = {str(constraint.name): constraint for constraint in decimal_constraints}
         actual_names = {str(constraint.name) for constraint in decimal_constraints}
         assert len(decimal_constraints) == 3
         assert actual_names == expected_names, (

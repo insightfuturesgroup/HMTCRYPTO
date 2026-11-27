@@ -60,9 +60,10 @@ async def recover_one_live_submission(
             expected_user_id=external_user_id,
         )
     except LiveOrderRecoveryUnavailable:
-        observation = await reconciled_fill()
-        if observation is None:
+        recovered = await reconciled_fill()
+        if recovered is None:
             return LiveRecoveryResult("UNAVAILABLE", claim.submission_id)
+        observation = recovered
     if observation.result != "FOUND":
         reconciled = await reconciled_fill()
         if reconciled is not None:

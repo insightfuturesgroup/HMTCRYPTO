@@ -266,7 +266,7 @@ def _verify_input(document: dict[str, Any]) -> int:
         timestamps.add(timestamp)
         for field in ("open", "high", "low", "close", "volume"):
             value = candle.get(field)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, int | float):
                 _fail(f"input.candles[{index}].{field} must be numeric")
         if candle["high"] < max(candle["open"], candle["close"]):
             _fail(f"input.candles[{index}].high is below its body")
@@ -300,7 +300,7 @@ def _verify_expected_rows(case: dict[str, Any], spec: dict[str, Any], location: 
     output_fields = spec["outputs"]
     if output_fields == ["value"]:
         for index, value in enumerate(rows):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, int | float):
                 _fail(f"{location}.expected[{index}] must be numeric")
         return
     for index, row_value in enumerate(rows):
@@ -315,7 +315,7 @@ def _verify_expected_rows(case: dict[str, Any], spec: dict[str, Any], location: 
             }
             if value is None and null_allowed:
                 continue
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, int | float):
                 _fail(f"{location}.expected[{index}].{field} must be numeric")
 
 

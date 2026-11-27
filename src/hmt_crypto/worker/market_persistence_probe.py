@@ -75,8 +75,7 @@ async def _run() -> dict[str, object]:
         products = tuple(
             product
             for product in snapshot.products
-            if product.contract_type
-            in {ContractType.PERPETUAL_FUTURES, ContractType.FUTURES}
+            if product.contract_type in {ContractType.PERPETUAL_FUTURES, ContractType.FUTURES}
         )
         connect_args: dict[str, object] = {"server_settings": {"timezone": "UTC"}}
         if config.database_ca_file is not None:
@@ -147,4 +146,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

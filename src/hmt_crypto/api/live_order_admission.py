@@ -151,7 +151,7 @@ def evaluate_order_sizing(
         checked_contracts = positive_integer(contracts)
         contract_value = positive_decimal(product.contract_value)
         tick_size = positive_decimal(product.tick_size)
-        maximum = positive_decimal(max_order_notional)
+        maximum = None if reduce_only else positive_decimal(max_order_notional)
         if order_type == "limit" and limit_price is not None and market_price is not None:
             price = positive_decimal(limit_price)
             price_basis = "limit"
@@ -164,7 +164,7 @@ def evaluate_order_sizing(
         if ticks == 0 or not is_zero(remainder):
             raise NumericContractError
         notional = multiply(price, multiply_integer(contract_value, checked_contracts))
-        if notional > maximum:
+        if maximum is not None and notional > maximum:
             raise NumericContractError
         return OrderSizingEvidence(price=price, price_basis=price_basis, notional=notional)
     except Exception:

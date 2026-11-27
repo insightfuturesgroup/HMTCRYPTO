@@ -21,7 +21,7 @@ def _write(path: Path, content: str, mode: int = 0o600) -> None:
 def _configuration(root: Path) -> None:
     runtime = (
         "DATABASE_URL=postgresql+asyncpg://hmt_crypto_app.project:secret@"
-        "aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?ssl=require\n"
+        "aws-0-ap-south-1.pooler.supabase.com:5432/postgres?ssl=require\n"
         "DATABASE_CA_FILE=/run/secrets/supabase-prod-ca.crt\n"
         "EXECUTION_MODE=LIVE\nDELTA_REGION=india\nDELTA_ENV=prod\n"
         "PRODUCTION_WRITES_FORBIDDEN=true\n"
@@ -38,7 +38,7 @@ def _configuration(root: Path) -> None:
         + "HMT_SUPABASE_URL=https://project.supabase.co\n"
         + "HMT_SUPABASE_PUBLISHABLE_KEY=sb_publishable_test\n"
         + "HMT_SUPABASE_SECRET_KEY=sb_secret_test\n"
-        + "HMT_AWS_REGION=ap-southeast-2\n"
+        + "HMT_AWS_REGION=ap-south-1\n"
         + "HMT_API_ACCOUNT_ID=00000000-0000-4000-8000-000000000001\n",
     )
     _write(
@@ -46,7 +46,7 @@ def _configuration(root: Path) -> None:
         runtime
         + "HMT_LIVE_ORDER_DISPATCH_ENABLED=false\n"
         + "HMT_LIVE_ORDER_QUALIFICATION_SHA256=\n"
-        + "HMT_AWS_REGION=ap-southeast-2\n",
+        + "HMT_AWS_REGION=ap-south-1\n",
     )
     _write(
         root / "migration.env",
@@ -122,4 +122,18 @@ def test_preflight_rejects_disabled_private_read_only_mode(
     _git(monkeypatch)
 
     with pytest.raises(PreflightError, match="HMT_PRIVATE_READ_ONLY"):
+        verify(tmp_path, tmp_path, COMMIT, compose=False)
+
+
+@pytest.mark.safety
+@pytest.mark.parametrize("file", ["api.env", "worker.env"])
+@pytest.mark.parametrize("region", ["eu-west-1", "us-east-1", "", "ap-south-10"])
+def test_preflight_rejects_unapproved_region(tmp_path, monkeypatch, file, region):
+    _configuration(tmp_path)
+    path = tmp_path / file
+    path.write_text(
+        path.read_text().replace("HMT_AWS_REGION=ap-south-1", f"HMT_AWS_REGION={region}")
+    )
+    _git(monkeypatch)
+    with pytest.raises(PreflightError, match="HMT_AWS_REGION"):
         verify(tmp_path, tmp_path, COMMIT, compose=False)

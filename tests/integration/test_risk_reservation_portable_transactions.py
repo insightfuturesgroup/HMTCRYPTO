@@ -27,11 +27,14 @@ from risk_reservation_schema_support import (
     run_test_only_non_authoritative_atomic_terminalize_and_release,
 )
 from schema_test_support import NOW, product, schema_api
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import func, select
 from test_coordination_schema import save
 
 from hmt_crypto.persistence.errors import PersistenceValueError
+
+# Register the original shared fixture object under its pytest name.
+schema_db = _fixture_schema_db
 
 
 async def _reservation_count(schema_db) -> int:

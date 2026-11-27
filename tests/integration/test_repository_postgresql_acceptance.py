@@ -220,9 +220,12 @@ async def postgres_repository_db():
             await connection.run_sync(metadata.create_all)
         yield db
     finally:
-        async with db.engine.begin() as connection:
-            await connection.execute(DropSchema(schema, cascade=True))
-        await db.engine.dispose()
+        try:
+            async with db.engine.begin() as connection:
+                # Failed transactional setup can roll back CREATE SCHEMA too.
+                await connection.execute(DropSchema(schema, cascade=True, if_exists=True))
+        finally:
+            await db.engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -246,6 +249,118 @@ async def test_postgres_two_connection_lease_winner(postgres_repository_db):
     )
     assert sum(isinstance(item, LeaseUnavailableError) for item in results) == 1
     assert sum(not isinstance(item, BaseException) for item in results) == 1
+
+
+@pytest.mark.safety
+@pytest.mark.asyncio
+async def test_postgres_disabling_policy_is_observed_by_waiting_signal_claim(
+    postgres_repository_db,
+):
+    """Observe a real PG row-lock wait, then verify the real claim rejects."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from hmt_crypto.persistence.models import (
+        AccountRiskPolicy,
+        PlatformUser,
+        TradingViewConfiguration,
+        TradingViewSignal,
+    )
+    from hmt_crypto.worker.tradingview_runner import admit_one_tradingview_signal
+
+    db = postgres_repository_db
+    account_scope, _, _ = await seed_scope(db)
+    now = datetime.now(UTC)
+    user_id, configuration_id, signal_id, policy_id = (uuid4() for _ in range(4))
+    async with db.transaction() as session:
+        session.add(
+            PlatformUser(
+                id=user_id,
+                auth_user_id=uuid4(),
+                email=f"{user_id}@example.invalid",
+                full_name="Risk acceptance",
+                role="admin",
+                status="active",
+                password_change_required=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.flush()
+        session.add(
+            TradingViewConfiguration(
+                id=configuration_id,
+                created_by_user_id=user_id,
+                name="risk acceptance",
+                enabled=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(
+            AccountRiskPolicy(
+                id=policy_id,
+                account_id=account_scope.account_id,
+                enabled=True,
+                max_order_notional=Decimal("50"),
+                max_position_notional=Decimal("100"),
+                max_daily_loss=Decimal("20"),
+                max_open_orders=5,
+                max_inflight_signals=5,
+                allowed_product_ids="[27]",
+                version=1,
+                updated_by_user_id=user_id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.flush()
+        session.add(
+            TradingViewSignal(
+                id=signal_id,
+                configuration_id=configuration_id,
+                account_id=account_scope.account_id,
+                external_signal_id="risk-disable-race",
+                side="buy",
+                product_id=27,
+                symbol="BTCUSD",
+                contracts=1,
+                order_type="market",
+                reduce_only=False,
+                created_by_user_id=user_id,
+                payload_sha256="a" * 64,
+                status="received",
+                received_at=now,
+            )
+        )
+
+    probe = _WaitProbe(db)
+    task = None
+    try:
+        async with db.transaction() as holder:
+            policy = await holder.get(AccountRiskPolicy, policy_id, with_for_update=True)
+            policy.enabled = False
+            await holder.flush()
+            task = asyncio.create_task(
+                admit_one_tradingview_signal(
+                    probe,
+                    account_id=account_scope.account_id,
+                    owner_id=uuid4(),
+                )
+            )
+            await probe.blocked_by(holder)
+            assert not task.done(), "Claim must wait for the policy writer's commit"
+        result = await asyncio.wait_for(task, 5)
+        assert result.kind == "REJECTED"
+        assert result.reason == "risk_policy_disabled"
+        async with db.transaction() as session:
+            signal = await session.get(TradingViewSignal, signal_id)
+            assert signal.status == "rejected"
+            assert signal.rejection_code == "risk_policy_disabled"
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from prometheus_client import Counter
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
@@ -23,6 +24,7 @@ from hmt_crypto.api.live_submission import (
     require_transition,
     submission_event_sha256,
 )
+from hmt_crypto.logging import get_logger
 from hmt_crypto.persistence.db import Database
 from hmt_crypto.persistence.models import (
     Account,
@@ -37,7 +39,23 @@ from hmt_crypto.persistence.models import (
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
 )
+from hmt_crypto.risk_operations import alert_uncertainty
+from hmt_crypto.risk_policy import policy_rejection, record_rejection
 from hmt_crypto.worker.scope import normalize_worker_uuid
+
+RECOVERY_MISSING = Counter(
+    "hmt_live_recovery_missing_evidence_total",
+    "Recovery remains unresolved because required fill evidence is missing",
+    ("reason",),
+)
+
+
+def _missing_recovery_evidence(reason: str) -> None:
+    # Only fixed internal reason names reach this boundary; never log payloads.
+    RECOVERY_MISSING.labels(reason=reason).inc()
+    get_logger("worker.live_recovery").warning(
+        "live_recovery_evidence_missing", reason=reason, outcome="UNCERTAIN"
+    )
 
 
 def _database_uuid(value: object) -> UUID:
@@ -91,7 +109,6 @@ async def has_live_submission_recovery_debt(database: Database, *, account_id: U
             .where(
                 LiveOrderSubmission.account_id == account_id,
                 LiveOrderSubmission.status.in_(("SENDING", "UNCERTAIN")),
-                LiveOrderIntent.hidden_at.is_(None),
             )
             .limit(1)
         )
@@ -131,7 +148,6 @@ async def claim_live_submission_recovery(
             .where(
                 LiveOrderSubmission.account_id == account_id,
                 LiveOrderSubmission.status.in_(("SENDING", "UNCERTAIN")),
-                LiveOrderIntent.hidden_at.is_(None),
             )
             .order_by(LiveOrderSubmission.created_at, LiveOrderSubmission.id)
             .limit(1)
@@ -185,7 +201,7 @@ async def claim_live_submission_recovery(
 
 
 def _fill_recovery_observation(
-    fills_payload: str,
+    fills_payload: str | None,
     *,
     product_id: int,
     side: str,
@@ -193,6 +209,9 @@ def _fill_recovery_observation(
     sent_at: datetime,
 ) -> RecoveryObservation | None:
     """Accept only one uniquely matching fully-filled Delta order."""
+    if fills_payload is None:
+        _missing_recovery_evidence("fills_payload")
+        return None
     try:
         rows = json.loads(fills_payload)
     except (TypeError, ValueError):
@@ -207,6 +226,19 @@ def _fill_recovery_observation(
         if row.get("side") != side:
             continue
         order_id, size, created_at = row.get("order_id"), row.get("size"), row.get("created_at")
+        if order_id is None:
+            _missing_recovery_evidence("order_id")
+            return None
+        if size is None:
+            _missing_recovery_evidence("size")
+            return None
+        if (
+            not isinstance(order_id, int | str)
+            or isinstance(order_id, bool)
+            or not isinstance(size, int | str)
+            or isinstance(size, bool)
+        ):
+            return None
         try:
             order_id = int(order_id)
             size = int(size)
@@ -229,6 +261,16 @@ async def recover_from_reconciliation(
     """Resolve an uncertain market order from unique recent fill evidence."""
     async with database.transaction() as session:
         submission = await session.get(LiveOrderSubmission, claim.submission_id)
+        if submission is not None and submission.status == "UNCERTAIN":
+            alert_uncertainty(
+                submission.sent_at,
+                now=datetime.now(UTC),
+                logger=get_logger("worker.live_recovery"),
+                context={
+                    "account_id": str(claim.account_id),
+                    "submission_id": str(claim.submission_id),
+                },
+            )
         intent = (
             None if submission is None else await session.get(LiveOrderIntent, submission.intent_id)
         )
@@ -291,7 +333,9 @@ async def claim_next_live_submission(
         )
         global_control = await session.get(PlatformLiveControl, "global")
         risk = await session.scalar(
-            select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
+            select(AccountRiskPolicy)
+            .where(AccountRiskPolicy.account_id == account_id)
+            .with_for_update()
         )
         reconciliation = await session.scalar(
             select(PrivateReconciliationSnapshot)
@@ -420,6 +464,23 @@ async def claim_next_live_submission(
             return None
         intent = await session.get(LiveOrderIntent, submission.intent_id)
         preview = None if intent is None else await session.get(LiveOrderPreview, intent.preview_id)
+        if preview is not None:
+            risk_reason = policy_rejection(
+                risk, stage="submission_claim", reduce_only=preview.reduce_only
+            )
+            if risk_reason:
+                submission.last_error_code = risk_reason
+                submission.updated_at = now
+                return None
+            if (
+                not preview.reduce_only
+                and risk is not None
+                and preview.risk_policy_version != risk.version
+            ):
+                record_rejection("submission_claim", "risk_policy_changed")
+                submission.last_error_code = "risk_policy_changed"
+                submission.updated_at = now
+                return None
         if (
             intent is None
             or preview is None
@@ -430,6 +491,7 @@ async def claim_next_live_submission(
                 and (
                     risk is None
                     or preview.risk_policy_version != risk.version
+                    or preview.notional > risk.max_order_notional
                     or not control.entries_enabled
                     or global_control is None
                     or not global_control.entries_enabled

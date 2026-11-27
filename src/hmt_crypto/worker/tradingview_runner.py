@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from typing import cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import desc, select
@@ -33,9 +34,11 @@ from hmt_crypto.persistence.models import (
     PlatformLiveControl,
     PrivateReconciliationSnapshot,
     PrivateWorkerLease,
+    TradingViewConfiguration,
     TradingViewSignal,
     TradingViewStrategy,
 )
+from hmt_crypto.risk_policy import policy_rejection
 from hmt_crypto.worker.scope import normalize_worker_uuid
 
 
@@ -84,8 +87,49 @@ async def admit_one_tradingview_signal(
         )
         if signal is None:
             return TradingViewCycleResult("IDLE", None, None, None)
-        strategy = await session.get(TradingViewStrategy, signal.strategy_id)
-        if strategy is None or not strategy.enabled or strategy.account_id != account_id:
+        strategy = (
+            None
+            if signal.strategy_id is None
+            else await session.get(TradingViewStrategy, signal.strategy_id)
+        )
+        configuration = (
+            None
+            if signal.configuration_id is None
+            else await session.get(TradingViewConfiguration, signal.configuration_id)
+        )
+        if configuration is not None:
+            if not configuration.enabled or any(
+                value is None
+                for value in (
+                    signal.product_id,
+                    signal.symbol,
+                    signal.contracts,
+                    signal.order_type,
+                    signal.reduce_only,
+                    signal.created_by_user_id,
+                )
+            ):
+                return _reject(signal, now=now, reason="configuration_disabled")
+            product_id = signal.product_id
+            symbol = signal.symbol
+            contracts = signal.contracts
+            order_type = signal.order_type
+            reduce_only = signal.reduce_only
+            created_by_user_id = signal.created_by_user_id
+            product_id = cast(int, product_id)
+            symbol = cast(str, symbol)
+            contracts = cast(int, contracts)
+            order_type = cast(str, order_type)
+            reduce_only = cast(bool, reduce_only)
+            created_by_user_id = cast(UUID, created_by_user_id)
+        elif strategy is not None and strategy.enabled and strategy.account_id == account_id:
+            product_id = strategy.product_id
+            symbol = strategy.symbol
+            contracts = strategy.contracts
+            order_type = strategy.order_type
+            reduce_only = strategy.reduce_only
+            created_by_user_id = strategy.created_by_user_id
+        else:
             return _reject(signal, now=now, reason="strategy_disabled")
         if now - signal.received_at > timedelta(seconds=60):
             return _reject(signal, now=now, reason="signal_expired")
@@ -99,10 +143,24 @@ async def admit_one_tradingview_signal(
             select(AccountLiveControl).where(AccountLiveControl.account_id == account_id)
         )
         risk = await session.scalar(
-            select(AccountRiskPolicy).where(AccountRiskPolicy.account_id == account_id)
+            select(AccountRiskPolicy)
+            .where(AccountRiskPolicy.account_id == account_id)
+            .with_for_update()
         )
+        risk_reason = policy_rejection(risk, stage="signal_claim", reduce_only=reduce_only)
+        if risk_reason:
+            return _reject(signal, now=now, reason=risk_reason)
+        if risk is None and reduce_only:
+            risk = AccountRiskPolicy(
+                enabled=False,
+                version=0,
+                allowed_product_ids="[]",
+                max_order_notional=Decimal(0),
+                max_position_notional=Decimal(0),
+            )
         reconciliation = await session.scalar(
-            select(PrivateReconciliationSnapshot).options(
+            select(PrivateReconciliationSnapshot)
+            .options(
                 load_only(
                     PrivateReconciliationSnapshot.id,
                     PrivateReconciliationSnapshot.observed_at,
@@ -121,7 +179,7 @@ async def admit_one_tradingview_signal(
         )
         global_control = await session.get(PlatformLiveControl, "global")
         gate_open = bool(
-            control and (control.exits_enabled if strategy.reduce_only else control.entries_enabled)
+            control and (control.exits_enabled if reduce_only else control.entries_enabled)
         )
         if (
             account is None
@@ -143,17 +201,14 @@ async def admit_one_tradingview_signal(
             or reconciliation.worker_owner_id != lease.owner_id
             or reconciliation.worker_generation != lease.generation
             or reconciliation.credential_version != lease.credential_version
-            or (
-                not strategy.reduce_only
-                and (global_control is None or not global_control.entries_enabled)
-            )
+            or (not reduce_only and (global_control is None or not global_control.entries_enabled))
         ):
             return TradingViewCycleResult("DEFERRED", signal.id, None, "readiness_gate")
         try:
             allowed_products = set(json.loads(risk.allowed_product_ids))
         except (TypeError, ValueError):
             return _reject(signal, now=now, reason="invalid_risk_policy")
-        if strategy.product_id not in allowed_products:
+        if not reduce_only and product_id not in allowed_products:
             return _reject(signal, now=now, reason="product_not_allowed")
         catalogue = await session.scalar(
             select(CatalogueSnapshot)
@@ -171,8 +226,8 @@ async def admit_one_tradingview_signal(
             else await session.scalar(
                 select(CatalogueProduct).where(
                     CatalogueProduct.snapshot_id == catalogue.id,
-                    CatalogueProduct.product_id == strategy.product_id,
-                    CatalogueProduct.symbol == strategy.symbol,
+                    CatalogueProduct.product_id == product_id,
+                    CatalogueProduct.symbol == symbol,
                 )
             )
         )
@@ -180,7 +235,7 @@ async def admit_one_tradingview_signal(
             select(MarketQuote).where(
                 MarketQuote.region == "india",
                 MarketQuote.environment == "prod",
-                MarketQuote.product_id == strategy.product_id,
+                MarketQuote.product_id == product_id,
                 MarketQuote.observed_at >= now - timedelta(seconds=15),
             )
         )
@@ -190,44 +245,44 @@ async def admit_one_tradingview_signal(
         try:
             sizing = evaluate_order_sizing(
                 product=product_row.to_product(),
-                contracts=strategy.contracts,
-                order_type=strategy.order_type,
+                contracts=contracts,
+                order_type=order_type,
                 limit_price=signal.limit_price,
                 market_price=market_price,
-                reduce_only=strategy.reduce_only,
-                max_order_notional=(risk.max_order_notional if risk.enabled else Decimal("1e30")),
+                reduce_only=reduce_only,
+                max_order_notional=risk.max_order_notional,
             )
             positions = _payload_rows(reconciliation.positions_payload)
             open_orders = _payload_rows(reconciliation.open_orders_payload)
             wallet = _payload_rows(reconciliation.wallet_transactions_payload)
         except (LiveOrderAdmissionError, ValueError):
             return _reject(signal, now=now, reason="invalid_order_or_state")
-        if risk.enabled and len(open_orders) >= risk.max_open_orders and not strategy.reduce_only:
+        if risk.enabled and len(open_orders) >= risk.max_open_orders and not reduce_only:
             return _reject(signal, now=now, reason="open_order_limit")
         signed_position = 0
         for item in positions:
             if not isinstance(item, dict):
                 return _reject(signal, now=now, reason="invalid_position_state")
-            if item.get("product_id") == strategy.product_id:
+            if item.get("product_id") == product_id:
                 value = item.get("size")
                 if type(value) is not int:
                     return _reject(signal, now=now, reason="invalid_position_state")
                 signed_position = value
         direction = 1 if signal.side == "buy" else -1
-        if strategy.reduce_only and (
+        if reduce_only and (
             signed_position == 0
             or signed_position * direction >= 0
-            or strategy.contracts > abs(signed_position)
+            or contracts > abs(signed_position)
         ):
             return _reject(signal, now=now, reason="reduce_only_violation")
         try:
             projected = projected_position_contracts(
                 positions=positions,
                 open_orders=open_orders,
-                product_id=strategy.product_id,
+                product_id=product_id,
                 new_side=signal.side,
-                new_contracts=strategy.contracts,
-                new_reduce_only=strategy.reduce_only,
+                new_contracts=contracts,
+                new_reduce_only=reduce_only,
             )
             projected_notional = (
                 Decimal(0)
@@ -240,7 +295,7 @@ async def admit_one_tradingview_signal(
             )
         except LiveOrderAdmissionError:
             return _reject(signal, now=now, reason="position_sizing_invalid")
-        if risk.enabled and projected_notional > risk.max_position_notional:
+        if not reduce_only and projected_notional > risk.max_position_notional:
             return _reject(signal, now=now, reason="position_limit")
         daily_net = Decimal(0)
         for item in wallet:
@@ -256,11 +311,7 @@ async def admit_one_tradingview_signal(
                     daily_net += Decimal(str(item.get("amount")))
                 except InvalidOperation:
                     return _reject(signal, now=now, reason="invalid_wallet_state")
-        if (
-            risk.enabled
-            and max(Decimal(0), -daily_net) >= risk.max_daily_loss
-            and not strategy.reduce_only
-        ):
+        if risk.enabled and max(Decimal(0), -daily_net) >= risk.max_daily_loss and not reduce_only:
             return _reject(signal, now=now, reason="daily_loss_limit")
         preview_id, intent_id, submission_id = uuid4(), uuid4(), uuid4()
         evidence = hashlib.sha256(
@@ -273,14 +324,14 @@ async def admit_one_tradingview_signal(
             LiveOrderPreview(
                 id=preview_id,
                 account_id=account_id,
-                created_by_user_id=strategy.created_by_user_id,
+                created_by_user_id=created_by_user_id,
                 request_id=signal.id,
-                product_id=strategy.product_id,
+                product_id=product_id,
                 side=signal.side,
-                contracts=strategy.contracts,
-                order_type=strategy.order_type,
+                contracts=contracts,
+                order_type=order_type,
                 limit_price=None if signal.limit_price is None else sizing.price,
-                reduce_only=strategy.reduce_only,
+                reduce_only=reduce_only,
                 price_basis=sizing.price_basis,
                 price=sizing.price,
                 notional=sizing.notional,
@@ -300,7 +351,7 @@ async def admit_one_tradingview_signal(
                 id=intent_id,
                 account_id=account_id,
                 preview_id=preview_id,
-                created_by_user_id=strategy.created_by_user_id,
+                created_by_user_id=created_by_user_id,
                 idempotency_key=signal.id,
                 status="ADMITTED",
                 intent_sha256=intent_hash,

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "fingerprints": [
+    {
+      "kind": "instance-id",
+      "salt": "4b505d4a139a8861303a49aaec724594685809098816d0d97efd1fc9dbeab0ca",
+      "sha256": "6bdfdf114f6f869667bd392246c1c39350c8fdbcede8c80c355781fc775ea3b1"
+    },
+    {
+      "kind": "ipv4",
+      "salt": "4ed74ba27bcf799904f824189d15fc745d9395c6215dd9b3e0788fe4702f0aa7",
+      "sha256": "ac6c6c081877ff9df56f1bdaa6ce80c10f602478e90afcdd51532360c472ae5e"
+    },
+    {
+      "kind": "ipv4",
+      "salt": "98f5d5022ac0b28628ddd7459ecae957a8ecb14d073740ce1322b018209e222b",
+      "sha256": "8279e06cf5ecb5045f9393261e2f11925932fff686a91104aa87d20b79faccc8"
+    },
+    {
+      "kind": "project-ref",
+      "salt": "4eda05143625a2a74bf9f189a67b10e01445c25777cf10b7812d6a9ecebc09a2",
+      "sha256": "0a574ca5f9eb74725f78819b514474f66b081e10dc94533d321ca357be048596"
+    },
+    {
+      "kind": "project-ref",
+      "salt": "47a1f3ad994200606f3c1f97408bd221c005ffcc496f5c3a790c4bf4b18480a9",
+      "sha256": "9c85d615a029f84a74fadb68786b82811e44d4b417e39cfe946ab0589665d974"
+    }
+  ]
+}

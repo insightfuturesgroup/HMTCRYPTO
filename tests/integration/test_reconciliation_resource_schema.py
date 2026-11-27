@@ -11,9 +11,9 @@ from itertools import product
 from uuid import uuid4
 
 import pytest
-from execution_test_support import execution_db as execution_db
+from execution_test_support import execution_db as _fixture_execution_db
 from schema_test_support import HASH, NOW, account, schema_api, scope
-from schema_test_support import schema_db as schema_db
+from schema_test_support import schema_db as _fixture_schema_db
 from sqlalchemy import UniqueConstraint, delete, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,10 @@ from test_protection_schema import authorization, intent, protection
 from test_reconciliation_run_schema import run
 
 from hmt_crypto.persistence.errors import PersistenceError, PersistenceValueError
+
+# Register the original shared fixture object under its pytest name.
+execution_db = _fixture_execution_db
+schema_db = _fixture_schema_db
 
 STATES = ("PENDING", "COLLECTING", "COLLECTED", "TRUNCATED", "FAILED", "CANCELLED")
 CODES = (

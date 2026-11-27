@@ -115,7 +115,7 @@ class ProductQuery(DomainModel):
     @field_validator("contract_types", "states", mode="before")
     @classmethod
     def snapshot_tokens(cls, value: object) -> tuple[str, ...]:
-        if not isinstance(value, (list, tuple)):
+        if not isinstance(value, list | tuple):
             raise ValueError("product filters must be an ordered sequence")
         copied = tuple(value)
         if len(copied) > _MAX_FILTER_VALUES or len(set(copied)) != len(copied):
