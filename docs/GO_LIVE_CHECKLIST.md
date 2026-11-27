@@ -4,6 +4,21 @@ This is an evidence gate, not an instruction to trade. Deployment keeps global a
 entry gates disabled. A real acceptance order requires a separate, contemporaneous operator
 approval after every preceding mandatory item is complete.
 
+## Unresolved go-live blockers
+
+- [ ] P1-01 remains closed only by the reviewed audit disposition; do not infer acceptance.
+- [ ] P1-02 remains closed only by the reviewed audit disposition; do not infer acceptance.
+- [ ] P1-03 remains closed only by the reviewed audit disposition; do not infer acceptance.
+- [ ] P1-04 remains closed only by the reviewed audit disposition; do not infer acceptance.
+- [ ] P1-06 mandatory risk policy and bounded-currentness evidence are independently accepted.
+- [ ] Patch 1c is complete: every account-related FK referencing a scoped parent includes
+      region/environment/mode. The current xfail
+      `test_execution_metadata_tables_and_compiles_postgres` proves account_id-only FKs remain.
+- [ ] Post-UI: replace host-built images with CI-built ARM64 images in private ECR,
+      published through GitHub OIDC and deployed by immutable digest via the instance role.
+
+These blockers prohibit go-live. A reachable locked UI is not acceptance evidence.
+
 ## 1. Release identity and infrastructure
 
 - [ ] Record the reviewed Git commit, image digests, Alembic head, configuration digest, EC2 instance
